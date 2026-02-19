@@ -1,0 +1,76 @@
+[project]
+name = "castvibe"
+version = "0.1.0"
+description = "Python Google Cast receiver implementation"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.38.1",
+    "deptry>=0.24.0",
+    "ruff>=0.15.1",
+]
+
+[tool.ruff.lint]
+preview = true
+select = [
+  # pycodestyle
+  "E",
+  # Pyflakes
+  "F",
+  # pyupgrade
+  "UP",
+  # flake8-bugbear
+  "B",
+  # flake8-simplify
+  "SIM",
+  # isort
+  "I",
+  # naming
+  "N",
+  # flake8-builtins
+  "A",
+  # flake8-print
+  "T",
+  # flake8-comprehensions
+  "C4",
+  # flake8-return
+  "RET",
+  # flake8-use-pathlib
+  "PTH",
+  # flake8-type-checking
+  "TCH",
+  # flake8-pie
+  "PIE",
+  # Perflint
+  "PERF",
+  # flake8-unused-arguments
+  "ARG",
+  # flake8-async
+  "ASYNC",
+  # tryceratops
+  "TRY",
+]
+
+# Disable specific rules
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*.py" = ["T201"]
+
+[tool.deptry]
+extend_exclude = ["scripts"]
+
+[tool.basedpyright]
+typeCheckingMode = "recommended"
+pythonVersion = "3.12"
+pythonPlatform = "All"
+reportUnusedImport = "error"
+reportUnusedVariable = "error"
+reportDuplicateImport = "error"
+reportAny = "hint"
+reportExplicitAny = "hint"
+reportMissingTypeStubs = "hint"
+reportUnannotatedClassAttribute = "none"
