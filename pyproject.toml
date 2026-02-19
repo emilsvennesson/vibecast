@@ -4,7 +4,13 @@ version = "0.1.0"
 description = "Python Google Cast receiver implementation"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pydantic>=2.11",
+    "protobuf>=5.0",
+    "zeroconf>=0.140",
+    "cryptography>=44.0",
+    "aiohttp>=3.11",
+]
 
 [dependency-groups]
 dev = [
@@ -15,6 +21,10 @@ dev = [
     "pytest-asyncio>=0.25",
     "ruff>=0.15.1",
 ]
+
+[tool.ruff]
+# Generated protobuf files are not linted or formatted.
+extend-exclude = ["castvibe/_proto/cast_channel_pb2.py", "castvibe/_proto/cast_channel_pb2.pyi"]
 
 [tool.ruff.lint]
 preview = true
@@ -66,6 +76,10 @@ ignore = ["E501"]
 [tool.deptry]
 extend_exclude = ["scripts"]
 
+[tool.deptry.per_rule_ignores]
+# These dependencies are used in later issues; added now per project plan.
+DEP002 = ["pydantic", "zeroconf", "cryptography", "aiohttp"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 
@@ -80,3 +94,7 @@ reportAny = "hint"
 reportExplicitAny = "hint"
 reportMissingTypeStubs = "hint"
 reportUnannotatedClassAttribute = "none"
+# Generated protobuf files have type issues we can't fix.
+exclude = [".venv", "castvibe/_proto/cast_channel_pb2.py", "castvibe/_proto/cast_channel_pb2.pyi"]
+venvPath = "."
+venv = ".venv"
