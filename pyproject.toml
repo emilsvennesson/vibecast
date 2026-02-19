@@ -10,6 +10,9 @@ dependencies = []
 dev = [
     "basedpyright>=1.38.1",
     "deptry>=0.24.0",
+    "grpcio-tools>=1.70",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.25",
     "ruff>=0.15.1",
 ]
 
@@ -62,6 +65,9 @@ ignore = ["E501"]
 
 [tool.deptry]
 extend_exclude = ["scripts"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
 
 [tool.basedpyright]
 typeCheckingMode = "recommended"
