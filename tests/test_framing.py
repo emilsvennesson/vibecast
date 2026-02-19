@@ -77,7 +77,9 @@ async def _write_and_capture(msg: CastMessage) -> bytes:
     transport = _BufferTransport()
     reader = asyncio.StreamReader()
     protocol = asyncio.StreamReaderProtocol(reader)
-    writer = asyncio.StreamWriter(transport, protocol, reader, asyncio.get_event_loop())
+    writer = asyncio.StreamWriter(
+        transport, protocol, reader, asyncio.get_running_loop()
+    )
     await write_message(writer, msg)
     return bytes(transport.buffer)
 
@@ -189,3 +191,11 @@ async def test_zero_length_message_rejected() -> None:
 
     with pytest.raises(FramingError, match="zero-length"):
         _ = await read_message(reader)
+
+
+async def test_write_oversized_message_rejected() -> None:
+    """write_message rejects messages exceeding MAX_MESSAGE_SIZE."""
+    msg = _make_message(payload_binary=b"\x00" * (MAX_MESSAGE_SIZE + 1))
+
+    with pytest.raises(FramingError, match="too large to send"):
+        _ = await _write_and_capture(msg)

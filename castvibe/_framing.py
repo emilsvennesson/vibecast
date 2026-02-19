@@ -28,7 +28,8 @@ async def read_message(reader: asyncio.StreamReader) -> CastMessage:
     """Read a single length-prefixed CastMessage from *reader*.
 
     Raises:
-        FramingError: On connection close, zero-length, or oversized message.
+        FramingError: On zero-length or oversized message.
+        asyncio.IncompleteReadError: On connection close or incomplete read.
     """
     # Read 4-byte length prefix.
     header = await reader.readexactly(_LENGTH_PREFIX.size)
@@ -54,8 +55,17 @@ async def write_message(
     writer: asyncio.StreamWriter,
     msg: CastMessage,
 ) -> None:
-    """Write a single length-prefixed CastMessage to *writer*."""
+    """Write a single length-prefixed CastMessage to *writer*.
+
+    Raises:
+        FramingError: If the serialized message exceeds *MAX_MESSAGE_SIZE*.
+    """
     payload = msg.SerializeToString()
+    if len(payload) > MAX_MESSAGE_SIZE:
+        err = (
+            f"Message too large to send: {len(payload)} bytes (max {MAX_MESSAGE_SIZE})"
+        )
+        raise FramingError(err)
     writer.write(_LENGTH_PREFIX.pack(len(payload)))
     writer.write(payload)
     await writer.drain()
