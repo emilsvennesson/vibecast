@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 from typing import TYPE_CHECKING, Any
 
 from castvibe import _namespace as ns
@@ -151,8 +152,7 @@ class Connection:
             await self._handle_heartbeat(msg)
         else:
             # Log non-heartbeat messages at DEBUG for diagnostics.
-            if log.isEnabledFor(10):  # DEBUG
-                _log_message(msg, self.peer)
+            _log_message(msg, self.peer)
             if self._on_message is not None:
                 await self._on_message(self, msg)
 
@@ -251,6 +251,8 @@ def _build_message(
 
 def _log_message(msg: CastMessage, peer: str) -> None:
     """Emit a DEBUG log line summarising a Cast message."""
+    if not log.isEnabledFor(logging.DEBUG):
+        return
     if msg.payload_type == CastMessage.BINARY:
         payload_repr = f"<{len(msg.payload_binary)} bytes>"
     else:
