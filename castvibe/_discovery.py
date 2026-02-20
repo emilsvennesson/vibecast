@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import socket
 from typing import TYPE_CHECKING, Final, Protocol, cast
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 from zeroconf import ServiceInfo
@@ -78,10 +81,56 @@ def _compute_bs(device_id: str) -> str:
     return digest[:6].hex().upper()
 
 
+def _build_server_name(device_id: str, clean_id: str) -> str:
+    """Build SRV host target, preferring UUID-like ``<id>.local.``."""
+    try:
+        return f"{UUID(clean_id)}.local."
+    except ValueError:
+        safe_id = device_id.strip().strip(".")
+        return f"{safe_id or 'castvibe'}.local."
+
+
+def _discover_ipv4_addresses() -> tuple[str, ...]:
+    """Best-effort local IPv4 addresses to advertise in A records."""
+    addresses: set[str] = set()
+    infos: list[tuple[int, int, int, str, tuple[str, int]]] = []
+
+    with contextlib.suppress(OSError):
+        infos = cast(
+            "list[tuple[int, int, int, str, tuple[str, int]]]",
+            socket.getaddrinfo(
+                socket.gethostname(),
+                None,
+                family=socket.AF_INET,
+                type=socket.SOCK_DGRAM,
+            ),
+        )
+
+    for _family, _type, _proto, _canonname, sockaddr in infos:
+        raw_ip = sockaddr[0]
+        if not raw_ip.startswith("127."):
+            _ = addresses.add(raw_ip)
+
+    with (
+        contextlib.suppress(OSError),
+        socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock,
+    ):
+        sock.connect(("224.0.0.251", 5353))
+        raw_ip_obj = cast("tuple[str, int]", sock.getsockname())[0]
+        if not raw_ip_obj.startswith("127."):
+            _ = addresses.add(raw_ip_obj)
+
+    if not addresses:
+        _ = addresses.add("127.0.0.1")
+
+    return tuple(sorted(addresses))
+
+
 class CastAdvertisement:
     """Advertises the receiver over mDNS as a Google Cast target."""
 
     __slots__ = (
+        "_addresses",
         "_cert_digest",
         "_clean_id",
         "_device_id",
@@ -89,6 +138,7 @@ class CastAdvertisement:
         "_friendly_name",
         "_info",
         "_port",
+        "_server",
         "_service_name",
         "_txt",
         "_zeroconf",
@@ -102,12 +152,29 @@ class CastAdvertisement:
         port: int,
         cert_digest: str,
     ) -> None:
+        """Initialize a ``CastAdvertisement`` instance.
+
+        Parameters
+        ----------
+        friendly_name : str
+            Human-readable receiver name advertised via mDNS.
+        device_model : str
+            Device model string exposed in the Cast TXT record.
+        device_id : str
+            Stable device identifier used for service naming and hashing.
+        port : int
+            TCP port where the Cast receiver accepts TLS connections.
+        cert_digest : str
+            Hex-encoded certificate digest advertised as ``cd``.
+        """
         self._friendly_name = friendly_name
         self._device_model = device_model
         self._device_id = device_id
         self._clean_id = _clean_device_id(device_id)
         self._port = port
         self._cert_digest = cert_digest.upper()
+        self._server = _build_server_name(device_id, self._clean_id)
+        self._addresses = _discover_ipv4_addresses()
         self._service_name = _build_service_name(self._clean_id)
         self._txt = CastServiceTxt(
             md=self._device_model,
@@ -130,6 +197,16 @@ class CastAdvertisement:
         return _GOOGLECAST_SERVICE_TYPE
 
     @property
+    def server(self) -> str:
+        """Hostname target advertised in the SRV record."""
+        return self._server
+
+    @property
+    def parsed_addresses(self) -> tuple[str, ...]:
+        """IPv4 addresses advertised for the SRV host target."""
+        return self._addresses
+
+    @property
     def txt(self) -> CastServiceTxt:
         """Structured TXT record data for this service."""
         return self._txt
@@ -145,6 +222,8 @@ class CastAdvertisement:
             name=self.service_name,
             port=self._port,
             properties=self.txt_records,
+            server=self._server,
+            parsed_addresses=list(self._addresses),
         )
 
     async def start(self) -> None:

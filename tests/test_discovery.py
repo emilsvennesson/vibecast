@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import socket
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -100,6 +101,116 @@ class TestTxtRecords:
         assert instance_label.startswith("castvibe-")
         assert instance_label == f"castvibe-{device_id[:54]}"
 
+    def test_server_name_uses_hyphenated_uuid_local(
+        self, bundle: CertificateBundle
+    ) -> None:
+        """SRV host target follows the Shield-style ``<uuid>.local.`` format."""
+        device_id = "3e3f3db0-1316-4f6f-a8db-d8d9aa123456"
+        ad = CastAdvertisement(
+            friendly_name="Bedroom",
+            device_model="Chromecast",
+            device_id=device_id,
+            port=8009,
+            cert_digest=bundle.cert_digest_md5,
+        )
+
+        assert ad.server == "3e3f3db0-1316-4f6f-a8db-d8d9aa123456.local."
+
+    def test_server_name_canonicalizes_hyphenless_uuid(
+        self, bundle: CertificateBundle
+    ) -> None:
+        """Hyphenless UUID-like IDs are normalized for SRV host target."""
+        ad = CastAdvertisement(
+            friendly_name="Bedroom",
+            device_model="Chromecast",
+            device_id="3e3f3db013164f6fa8dbd8d9aa123456",
+            port=8009,
+            cert_digest=bundle.cert_digest_md5,
+        )
+
+        assert ad.server == "3e3f3db0-1316-4f6f-a8db-d8d9aa123456.local."
+
+    def test_parsed_addresses_contains_at_least_one_ipv4(
+        self, bundle: CertificateBundle
+    ) -> None:
+        """Advertisement always provides at least one IPv4 address."""
+        ad = CastAdvertisement(
+            friendly_name="Bedroom",
+            device_model="Chromecast",
+            device_id=str(uuid4()),
+            port=8009,
+            cert_digest=bundle.cert_digest_md5,
+        )
+
+        assert ad.parsed_addresses
+
+    def test_parsed_addresses_filter_loopback_getaddrinfo(
+        self, bundle: CertificateBundle
+    ) -> None:
+        """Loopback results from getaddrinfo are filtered out."""
+        getaddrinfo_result = [
+            (socket.AF_INET, socket.SOCK_DGRAM, 0, "", ("127.0.0.1", 0)),
+            (socket.AF_INET, socket.SOCK_DGRAM, 0, "", ("192.168.10.20", 0)),
+        ]
+
+        with (
+            patch(
+                "castvibe._discovery.socket.getaddrinfo",
+                return_value=getaddrinfo_result,
+            ),
+            patch("castvibe._discovery.socket.socket", side_effect=OSError),
+        ):
+            ad = CastAdvertisement(
+                friendly_name="Bedroom",
+                device_model="Chromecast",
+                device_id=str(uuid4()),
+                port=8009,
+                cert_digest=bundle.cert_digest_md5,
+            )
+
+        assert ad.parsed_addresses == ("192.168.10.20",)
+
+    def test_parsed_addresses_use_udp_probe_when_getaddrinfo_empty(
+        self, bundle: CertificateBundle
+    ) -> None:
+        """UDP probe address is used when hostname lookup has no addresses."""
+        fake_socket = MagicMock()
+        fake_socket.__enter__.return_value = fake_socket
+        fake_socket.getsockname.return_value = ("10.0.0.55", 42424)
+
+        with (
+            patch("castvibe._discovery.socket.getaddrinfo", return_value=[]),
+            patch("castvibe._discovery.socket.socket", return_value=fake_socket),
+        ):
+            ad = CastAdvertisement(
+                friendly_name="Bedroom",
+                device_model="Chromecast",
+                device_id=str(uuid4()),
+                port=8009,
+                cert_digest=bundle.cert_digest_md5,
+            )
+
+        assert ad.parsed_addresses == ("10.0.0.55",)
+        fake_socket.connect.assert_called_once_with(("224.0.0.251", 5353))
+
+    def test_parsed_addresses_fallback_to_loopback_on_failures(
+        self, bundle: CertificateBundle
+    ) -> None:
+        """Loopback fallback is used when all address lookups fail."""
+        with (
+            patch("castvibe._discovery.socket.getaddrinfo", side_effect=OSError),
+            patch("castvibe._discovery.socket.socket", side_effect=OSError),
+        ):
+            ad = CastAdvertisement(
+                friendly_name="Bedroom",
+                device_model="Chromecast",
+                device_id=str(uuid4()),
+                port=8009,
+                cert_digest=bundle.cert_digest_md5,
+            )
+
+        assert ad.parsed_addresses == ("127.0.0.1",)
+
 
 class TestLifecycle:
     """Lifecycle tests for start/stop behavior."""
@@ -132,6 +243,8 @@ class TestLifecycle:
             mock_ctor.assert_called_once_with()
             mock_zeroconf.async_register_service.assert_awaited_once()
             registered_info = mock_zeroconf.async_register_service.await_args.args[0]
+            assert registered_info.server == ad.server
+            assert registered_info.parsed_addresses()
             mock_zeroconf.async_unregister_service.assert_awaited_once_with(
                 registered_info
             )
@@ -235,8 +348,11 @@ class TestIntegration:
                 pytest.skip("mDNS add event not observed in this environment")
 
             discovered = AsyncServiceInfo(ad.service_type, ad.service_name)
-            _ = await discovered.async_request(observer.zeroconf, timeout=3000)
+            resolved = await discovered.async_request(observer.zeroconf, timeout=3000)
+            if not resolved:
+                pytest.skip("mDNS service details not resolvable in this environment")
             props = discovered.decoded_properties
+            addresses = discovered.parsed_addresses()
 
             assert props.get("ve") == expected_txt["ve"]
             assert props.get("md") == expected_txt["md"]
@@ -250,6 +366,8 @@ class TestIntegration:
             assert props.get("ic") == expected_txt["ic"]
             assert props.get("rs") in (None, "")
             assert props.get("rm") in (None, "")
+            assert discovered.server == ad.server
+            assert set(addresses).intersection(ad.parsed_addresses)
 
             await ad.stop()
 
