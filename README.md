@@ -1,0 +1,188 @@
+# castvibe
+
+`castvibe` is a Python asyncio Google Cast receiver implementation.
+
+It accepts TLS CastV2 connections from real senders (Chrome/iOS/Android),
+handles device auth + platform namespaces, and routes app-specific behavior to
+providers (for example Viaplay).
+
+## Current capabilities
+
+- TLS Cast receiver on port `8009` (configurable)
+- Device auth response with cert chain + CRL
+- Core platform namespaces:
+  - `urn:x-cast:com.google.cast.tp.connection`
+  - `urn:x-cast:com.google.cast.tp.heartbeat`
+  - `urn:x-cast:com.google.cast.receiver`
+  - `urn:x-cast:com.google.cast.receiver.discovery`
+  - `urn:x-cast:com.google.cast.multizone`
+  - `urn:x-cast:com.google.cast.setup`
+- Provider API with app launch/session callbacks
+- mDNS advertisement (`_googlecast._tcp.local`)
+
+## Requirements
+
+- Python `3.12+`
+- [`uv`](https://docs.astral.sh/uv/)
+- Cast certificate manifest JSON (see below)
+
+## Install
+
+```bash
+uv sync
+```
+
+For local development, install editable so provider entry points resolve in the
+active environment:
+
+```bash
+uv pip install -e .
+```
+
+## Certificate manifest
+
+`castvibe` expects a go-cast style manifest JSON with at least:
+
+- `pu`: peer cert PEM
+- `pr`: peer private key PEM
+- `cpu`: device auth cert PEM
+- `ica`: intermediate cert chain PEM (can include multiple cert blocks)
+- one signature field:
+  - preferred `sig_sha1` (base64 SHA1 static signature), or
+  - fallback `sig` (base64 SHA256 static signature)
+
+Optional:
+
+- `crl`: base64 CRL blob; if absent, `castvibe` fetches CRL at startup.
+
+## Getting fresh Shield certs
+
+If you use the Shield extraction workflow in
+`/Users/emil/dev/gocast/shield-analysis`:
+
+```bash
+cd /Users/emil/dev/gocast/shield-analysis
+python3 extract_cast_creds.py --output-dir output
+```
+
+This updates:
+
+- `/Users/emil/dev/gocast/shield-analysis/output/manifest.json`
+
+If your signing daemon is running and you want to add a `sig_sha1` entry to
+that manifest, generate it using the daemon and update the manifest locally.
+
+Do not commit extracted cert material or local cert scripts.
+
+## Run receiver
+
+Basic:
+
+```bash
+uv run python -m castvibe \
+  --manifest "/Users/emil/dev/gocast/shield-analysis/output/manifest.json" \
+  --name "Living Room" \
+  --log-level INFO
+```
+
+Bind explicit host/port:
+
+```bash
+uv run python -m castvibe \
+  --manifest "/Users/emil/dev/gocast/shield-analysis/output/manifest.json" \
+  --name "Living Room" \
+  --host 0.0.0.0 \
+  --port 8009 \
+  --log-level DEBUG
+```
+
+CLI options:
+
+- `--manifest` (required): path to manifest JSON
+- `--name` (required): friendly Cast device name
+- `--model`: advertised model (default `Chromecast`)
+- `--host`: bind host/interface (default `0.0.0.0`)
+- `--port`: bind port (default `8009`)
+- `--log-level`: `DEBUG|INFO|WARNING|ERROR` (default `INFO`)
+
+## Quick verification
+
+1. Confirm listener:
+
+```bash
+lsof -nP -iTCP:8009 -sTCP:LISTEN
+```
+
+2. Confirm Cast mDNS service appears:
+
+```bash
+dns-sd -B _googlecast._tcp local
+```
+
+3. Check startup logs include:
+
+- CRL fetch/source
+- server listening host/port
+- registered mDNS service and advertised addresses
+
+## Providers
+
+Provider discovery uses Python entry points under `castvibe.providers`.
+
+Built-in provider in this repo:
+
+- `ViaplayProvider` (`appId` `6313CF39`, `2DB7CC49`)
+
+Sanity-check discovery:
+
+```bash
+uv run python - <<'PY'
+from castvibe.provider import discover_providers
+providers = discover_providers()
+print([type(p).__name__ for p in providers])
+PY
+```
+
+If this prints `[]`, install editable (`uv pip install -e .`) in the same env
+you use to run `castvibe`.
+
+## Development checks
+
+```bash
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run basedpyright
+uv run deptry .
+```
+
+## Troubleshooting
+
+### No logs printed
+
+Run with `--log-level INFO` or `--log-level DEBUG`.
+
+### Device appears briefly then disconnects
+
+Check receiver logs around:
+
+- device auth challenge/response fields (`hash`, `sig`, `nonce_len`, `crl_len`)
+- sender `LAUNCH` payload and follow-up requests
+
+For iOS senders especially, ensure:
+
+- fresh cert material
+- `sig_sha1` available when needed
+- CRL is included
+
+### `LAUNCH_ERROR: Application not available`
+
+Provider for that app ID is not registered/discovered. Verify entry points and
+active environment (`uv pip install -e .`, then re-check discovery).
+
+### iPhone cannot discover receiver
+
+- Same subnet/SSID for phone + host
+- No VPN/Private Relay blocking mDNS
+- App has Local Network permission
+- Firewall allows incoming Python process
