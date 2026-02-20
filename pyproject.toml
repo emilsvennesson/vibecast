@@ -10,13 +10,15 @@ dependencies = [
     "zeroconf>=0.140",
     "cryptography>=44.0",
     "aiohttp>=3.11",
+    "uritemplate>=4.1",
 ]
 
 [project.entry-points."castvibe.providers"]
-viaplay = "castvibe.providers.viaplay:ViaplayProvider"
+viaplay = "castvibe.providers.viaplay._provider:ViaplayProvider"
 
 [dependency-groups]
 dev = [
+    "aioresponses>=0.7.8",
     "basedpyright>=1.38.1",
     "deptry>=0.24.0",
     "grpcio-tools>=1.70",
@@ -77,7 +79,7 @@ ignore = ["E501"]
 "scripts/*.py" = ["T201"]
 
 [tool.deptry]
-extend_exclude = ["scripts"]
+extend_exclude = ["scripts", ".*/tests/"]
 
 [tool.deptry.per_rule_ignores]
 # These dependencies are used in later issues; added now per project plan.
@@ -98,6 +100,12 @@ reportExplicitAny = "hint"
 reportMissingTypeStubs = "hint"
 reportUnannotatedClassAttribute = "none"
 # Generated protobuf files have type issues we can't fix.
-exclude = [".venv", "castvibe/_proto/cast_channel_pb2.py", "castvibe/_proto/cast_channel_pb2.pyi"]
+exclude = [".venv", "castvibe/_proto/cast_channel_pb2.py", "castvibe/_proto/cast_channel_pb2.pyi", "scripts/_mitm_addon.py"]
 venvPath = "."
 venv = ".venv"
+
+executionEnvironments = [
+  { root = "castvibe/providers/viaplay/tests", reportPrivateUsage = "none", reportUnknownMemberType = "none", extraPaths = ["."] },
+  { root = "tests", reportPrivateUsage = "none", extraPaths = ["."] },
+  { root = "." },
+]
