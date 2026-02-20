@@ -336,6 +336,7 @@ class TestLoadHandling:
 
         state = p._sessions["sess-1"]  # noqa: SLF001
         state.authenticated = True
+        state.auth_event.set()
 
         # Mock API.fetch_stream
         mock_stream = StreamInfo(
@@ -367,13 +368,54 @@ class TestLoadHandling:
         assert info.stream_url == "https://cdn/v.mpd"
         assert info.session_id == "sess-1"
 
+    async def test_load_propagates_drm_info(self, tmp_path: Any) -> None:
+        handler = _make_handler()
+        p = ViaplayProvider(media_handler=handler, data_dir=tmp_path)
+        session, _, _ = _make_session()
+        await p.on_launch(session, LaunchCredentials())
+
+        state = p._sessions["sess-1"]  # noqa: SLF001
+        state.authenticated = True
+        state.auth_event.set()
+
+        mock_stream = StreamInfo(
+            url="https://cdn/v.mpd",
+            content_type="application/dash+xml",
+            drm_license_url="https://drm.example.com/license",
+        )
+        with patch.object(
+            state.api,
+            "fetch_stream",
+            new_callable=AsyncMock,
+            return_value=mock_stream,
+        ):
+            load_req = LoadRequest(
+                request_id=1,
+                media=MediaInfo(
+                    content_id="https://x",
+                    content_type="video/mp4",
+                    stream_type=StreamType.BUFFERED,
+                ),
+                custom_data={"playUrl": "https://content.viaplay.se/play/1234"},
+            )
+            await p.on_media_message(session, load_req)
+            if state.auth_task:
+                await state.auth_task
+
+        handler.on_load.assert_awaited_once()
+        info: MediaLoadInfo = handler.on_load.call_args.args[0]
+        assert info.drm is not None
+        assert info.drm.system == "widevine"
+        assert info.drm.license_url == "https://drm.example.com/license"
+
     async def test_load_fails_without_auth(self, tmp_path: Any) -> None:
         p = ViaplayProvider(data_dir=tmp_path)
         session, _, send = _make_session()
         await p.on_launch(session, LaunchCredentials())
 
-        # NOT authenticated, and we patch sleep to avoid 30s wait
-        with patch("asyncio.sleep", new_callable=AsyncMock):
+        # NOT authenticated — auth_event is never set, wait_for will time out.
+        # Patch wait_for to raise TimeoutError immediately.
+        with patch("asyncio.wait_for", side_effect=TimeoutError):
             load_req = LoadRequest(
                 request_id=1,
                 media=MediaInfo(
@@ -399,6 +441,7 @@ class TestLoadHandling:
 
         state = p._sessions["sess-1"]  # noqa: SLF001
         state.authenticated = True
+        state.auth_event.set()
 
         load_req = LoadRequest(
             request_id=2,

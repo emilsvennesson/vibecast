@@ -9,12 +9,19 @@ from __future__ import annotations
 
 import logging
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import aiohttp
 from uritemplate import expand as uri_expand
+
+from castvibe.providers.viaplay._models import (
+    ViaplayAuthorizedPollResponse,
+    ViaplayDeviceAuthResponse,
+    ViaplaySessionResponse,
+    ViaplayStreamResponse,
+)
 
 log = logging.getLogger("castvibe.viaplay.api")
 
@@ -29,15 +36,6 @@ _USER_AGENT = (
 )
 
 _DEVICE_CODE_FALLBACK = "https://login.viaplay.com/api/device/code{?deviceKey,deviceId}"
-
-# Domains whose cookies we persist to disk.
-_COOKIE_DOMAINS = [
-    "https://viaplay.com",
-    "https://www.viaplay.com",
-    "https://content.viaplay.com",
-    "https://login.viaplay.com",
-    "https://play-live.viaplay.com",
-]
 
 
 # ---------------------------------------------------------------------------
@@ -59,8 +57,9 @@ class SessionCheckResult:
     """Result of a content-root session check."""
 
     user: ViaplayUser | None = None
-    links: dict[str, str] = field(default_factory=dict)
-    raw: dict[str, Any] = field(default_factory=dict)
+    persistent_login_url: str | None = None
+    token_login_url: str | None = None
+    device_auth_url: str | None = None
 
 
 @dataclass(slots=True)
@@ -70,7 +69,7 @@ class DeviceAuthInfo:
     user_code: str
     device_token: str
     activate_url: str
-    raw: dict[str, Any]
+    authorized_url: str
 
 
 @dataclass(slots=True)
@@ -79,6 +78,9 @@ class StreamInfo:
 
     url: str
     content_type: str
+    title: str | None = None
+    drm_license_url: str | None = None
+    fallback_urls: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +96,9 @@ class ViaplayAPI:
         self._data_dir.mkdir(parents=True, exist_ok=True)
 
         self._device_id = self._load_or_create_device_id()
+        # unsafe=True disables domain/path validation so cookies set by
+        # login.viaplay.com are sent to content.viaplay.se and other
+        # Viaplay subdomains — required for the cross-domain auth flow.
         self._jar = aiohttp.CookieJar(unsafe=True)
         self._session: aiohttp.ClientSession | None = None
 
@@ -207,7 +212,29 @@ class ViaplayAPI:
             url += "?profileId={profileId}"
 
         body, status = await self._get(url)
-        result = _parse_session_response(body)
+        resp = ViaplaySessionResponse.model_validate(body)
+
+        user: ViaplayUser | None = None
+        if resp.user:
+            user = ViaplayUser(
+                user_id=resp.user.user_id,
+                first_name=resp.user.first_name,
+                last_name=resp.user.last_name,
+            )
+
+        links = resp.links
+        result = SessionCheckResult(
+            user=user,
+            persistent_login_url=links.persistent_login.href
+            if links and links.persistent_login
+            else None,
+            token_login_url=links.token_login.href
+            if links and links.token_login
+            else None,
+            device_auth_url=links.device_authorization.href
+            if links and links.device_authorization
+            else None,
+        )
 
         if status != 200:
             log.debug("session check returned status %d", status)
@@ -251,12 +278,12 @@ class ViaplayAPI:
         # Find the deviceAuthorization link
         auth_url: str | None = None
         if root_result:
-            auth_url = root_result.links.get("viaplay:deviceAuthorization")
+            auth_url = root_result.device_auth_url
 
         if not auth_url:
             # Re-fetch root to get links
             root_result = await self.check_session()
-            auth_url = root_result.links.get("viaplay:deviceAuthorization")
+            auth_url = root_result.device_auth_url
 
         if not auth_url:
             auth_url = _DEVICE_CODE_FALLBACK
@@ -266,43 +293,40 @@ class ViaplayAPI:
             msg = f"device authorization request failed with status {status}"
             raise RuntimeError(msg)
 
-        user_code = body.get("userCode", "")
-        device_token = body.get("deviceToken", "")
-        if not user_code:
+        resp = ViaplayDeviceAuthResponse.model_validate(body)
+        if not resp.user_code:
             msg = "no userCode in device authorization response"
             raise RuntimeError(msg)
 
-        # Extract activate URL
-        activate_url = _find_link(body, "viaplay:activate") or ""
+        links = resp.links
+        activate_url = links.activate.href if links and links.activate else ""
+        authorized_url = links.authorized.href if links and links.authorized else ""
 
-        log.info("device auth: code=%s", user_code)
+        log.info("device auth: code=%s", resp.user_code)
         return DeviceAuthInfo(
-            user_code=user_code,
-            device_token=device_token,
+            user_code=resp.user_code,
+            device_token=resp.device_token,
             activate_url=activate_url,
-            raw=body,
+            authorized_url=authorized_url,
         )
 
-    async def poll_authorized(
-        self,
-        auth_info: DeviceAuthInfo,
-        device_token: str,
-        user_code: str,
-    ) -> bool:
+    async def poll_authorized(self, auth_info: DeviceAuthInfo) -> bool:
         """Poll the authorized endpoint.  Returns True when the code is activated."""
-        authorized_url = _find_link(auth_info.raw, "viaplay:authorized")
-        if not authorized_url:
+        if not auth_info.authorized_url:
             return False
 
-        extra = {"deviceToken": device_token, "userCode": user_code}
-        body, status = await self._get(authorized_url, extra_vars=extra)
+        extra = {
+            "deviceToken": auth_info.device_token,
+            "userCode": auth_info.user_code,
+        }
+        body, status = await self._get(auth_info.authorized_url, extra_vars=extra)
 
         if status == 200:
             self._save_cookies()
             # Try persistent login from the response
-            pl_url = _find_link(body, "viaplay:persistentLogin")
-            if pl_url:
-                _ = await self.persistent_login(pl_url)
+            resp = ViaplayAuthorizedPollResponse.model_validate(body)
+            if resp.links and resp.links.persistent_login:
+                _ = await self.persistent_login(resp.links.persistent_login.href)
             return True
 
         if status == 403:
@@ -316,8 +340,8 @@ class ViaplayAPI:
     async def fetch_stream(self, play_url: str) -> StreamInfo:
         """Resolve *play_url* to a streaming manifest.
 
-        Tries multiple HAL paths in order, matching the go-cast resolution
-        strategy observed in real captures.
+        Tries multiple HAL paths in order, matching the resolution strategy
+        observed in real captures.
 
         Raises :class:`RuntimeError` if no stream URL can be found.
         """
@@ -326,41 +350,65 @@ class ViaplayAPI:
             msg = f"stream fetch failed with status {status}"
             raise RuntimeError(msg)
 
+        resp = ViaplayStreamResponse.model_validate(body)
+        title = resp.product.content.title if resp.product else None
+        drm_url = self._extract_drm_url(resp)
+        fallbacks = self._extract_fallbacks(resp)
+
+        def _info(url: str, content_type: str) -> StreamInfo:
+            return StreamInfo(
+                url=url,
+                content_type=content_type,
+                title=title,
+                drm_license_url=drm_url,
+                fallback_urls=fallbacks,
+            )
+
         # Path 1: _embedded.viaplay:media.contentUrl
-        embedded: dict[str, Any] = body.get("_embedded", {})
-        media_obj: object = embedded.get("viaplay:media")
-        if isinstance(media_obj, dict):
-            media = cast("dict[str, Any]", media_obj)
-            content_url: object = media.get("contentUrl")
-            if isinstance(content_url, str) and content_url:
-                ct_val: object = media.get("contentType", "application/dash+xml")
-                return StreamInfo(url=content_url, content_type=str(ct_val))
+        if resp.embedded and resp.embedded.media and resp.embedded.media.content_url:
+            ct = resp.embedded.media.content_type or "application/dash+xml"
+            return _info(resp.embedded.media.content_url, ct)
 
         # Path 2: top-level contentUrl
-        top_url: object = body.get("contentUrl")
-        if isinstance(top_url, str) and top_url:
-            top_ct: object = body.get("contentType", "application/dash+xml")
-            return StreamInfo(url=top_url, content_type=str(top_ct))
+        if resp.content_url:
+            return _info(resp.content_url, resp.content_type or "application/dash+xml")
 
         # Path 3: _links.viaplay:encryptedPlaylist
-        url = _find_link(body, "viaplay:encryptedPlaylist")
-        if url:
-            fmt = body.get("streamingFormat", "")
+        if resp.links and resp.links.encrypted_playlist:
+            ep = resp.links.encrypted_playlist
+            # streamingFormat may be on the link or at the top level.
+            fmt = ep.streaming_format or resp.streaming_format or ""
             ct = "application/x-mpegURL" if fmt == "HLS" else "application/dash+xml"
-            return StreamInfo(url=url, content_type=ct)
+            return _info(ep.href, ct)
 
         # Path 4: _links.viaplay:playlist
-        url = _find_link(body, "viaplay:playlist")
-        if url:
-            return StreamInfo(url=url, content_type="application/dash+xml")
+        if resp.links and resp.links.playlist:
+            return _info(resp.links.playlist.href, "application/dash+xml")
 
         # Path 5: _links.viaplay:stream
-        url = _find_link(body, "viaplay:stream")
-        if url:
-            return StreamInfo(url=url, content_type="")
+        if resp.links and resp.links.stream:
+            return _info(resp.links.stream.href, "")
 
         msg = "no stream URL found in API response"
         raise RuntimeError(msg)
+
+    @staticmethod
+    def _extract_drm_url(resp: ViaplayStreamResponse) -> str | None:
+        """Return the best DRM license URL from a stream response."""
+        if resp.links is None:
+            return None
+        if resp.links.widevine_license:
+            return resp.links.widevine_license.href
+        if resp.links.license_link:
+            return resp.links.license_link.href
+        return None
+
+    @staticmethod
+    def _extract_fallbacks(resp: ViaplayStreamResponse) -> tuple[str, ...]:
+        """Return fallback CDN URLs from a stream response."""
+        if resp.links is None:
+            return ()
+        return tuple(fb.href for fb in resp.links.fallback_media)
 
     # -- device ID / cookie persistence --------------------------------------
 
@@ -393,62 +441,3 @@ class ViaplayAPI:
             self._jar.load(path)
         except Exception:
             log.debug("failed to load cookies", exc_info=True)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _find_link(body: dict[str, Any], link_name: str) -> str | None:
-    """Extract a HAL link ``href`` from a JSON response body."""
-    links: object = body.get("_links", {})
-    if not isinstance(links, dict):
-        return None
-    links_dict = cast("dict[str, Any]", links)
-    link: object = links_dict.get(link_name)
-    if not isinstance(link, dict):
-        return None
-    link_dict = cast("dict[str, Any]", link)
-    href: object = link_dict.get("href")
-    if isinstance(href, str):
-        return href
-    return None
-
-
-def _extract_links(body: dict[str, Any]) -> dict[str, str]:
-    """Extract all HAL ``_links`` as a flat name->href mapping."""
-    result: dict[str, str] = {}
-    links: object = body.get("_links", {})
-    if not isinstance(links, dict):
-        return result
-    links_dict = cast("dict[str, Any]", links)
-    for key, val in links_dict.items():
-        if not isinstance(val, dict):
-            continue
-        entry = cast("dict[str, Any]", val)
-        href: object = entry.get("href")
-        if isinstance(href, str):
-            result[key] = href
-    return result
-
-
-def _parse_session_response(body: dict[str, Any]) -> SessionCheckResult:
-    """Parse a content-root API response into a :class:`SessionCheckResult`."""
-    user: ViaplayUser | None = None
-    user_data: object = body.get("user")
-    if isinstance(user_data, dict):
-        ud = cast("dict[str, Any]", user_data)
-        uid: object = ud.get("userId", "")
-        fname: object = ud.get("firstName", "")
-        lname: object = ud.get("lastName", "")
-        user = ViaplayUser(
-            user_id=str(uid),
-            first_name=str(fname),
-            last_name=str(lname),
-        )
-    return SessionCheckResult(
-        user=user,
-        links=_extract_links(body),
-        raw=body,
-    )

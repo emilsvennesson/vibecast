@@ -7,11 +7,13 @@ Implements the Viaplay Cast receiver protocol including authentication
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, override
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
 import castvibe._namespace as ns
@@ -34,19 +36,27 @@ from castvibe._models import (
 )
 from castvibe.provider import (
     DefaultMediaEventHandler,
+    DrmInfo,
     LaunchCredentials,
     MediaEventHandler,
     MediaLoadInfo,
     Provider,
     ProviderSession,
 )
-from castvibe.providers.viaplay._api import ViaplayAPI
+from castvibe.providers.viaplay._api import (
+    DeviceAuthInfo,
+    SessionCheckResult,
+    ViaplayAPI,
+)
 from castvibe.providers.viaplay._models import (
+    AuthorizationDone,
     AuthorizationRequiredMessage,
     ReceiverStateMessage,
     SessionOkMessage,
+    SetupInfo,
     UserProfile,
     ViaplayReceiverState,
+    viaplay_request_adapter,
 )
 
 log = logging.getLogger("castvibe.viaplay")
@@ -70,9 +80,10 @@ class _ViaplayState:
 
     api: ViaplayAPI
     credentials: LaunchCredentials
-    broadcast: Any  # stored broadcast_custom closure
+    broadcast: Callable[[str, dict[str, Any]], Awaitable[None]]
     authenticated: bool = False
     auth_pending: bool = False
+    auth_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     # User / setup info
     user_id: str = ""
@@ -184,16 +195,20 @@ class ViaplayProvider(Provider):
         if state is None:
             return
 
-        msg_type = data.get("type", "")
+        try:
+            msg = viaplay_request_adapter.validate_python(data)
+        except Exception:
+            log.debug("unhandled viaplay message type: %s", data.get("type", ""))
+            return
 
-        if msg_type == "SETUP_INFO":
-            self._handle_setup_info(session, state, data)
-        elif msg_type == "AUTHORIZATION_DONE":
-            state.auth_task = asyncio.create_task(
-                self._complete_device_auth(session, state)
-            )
-        else:
-            log.debug("unhandled viaplay message type: %s", msg_type)
+        match msg:
+            case SetupInfo():
+                await self._handle_setup_info(session, state, msg)
+            case AuthorizationDone():
+                await _cancel_task(state.auth_task)
+                state.auth_task = asyncio.create_task(
+                    self._complete_device_auth(session, state)
+                )
 
     @override
     async def on_media_message(
@@ -207,6 +222,7 @@ class ViaplayProvider(Provider):
 
         match message:
             case LoadRequest():
+                await _cancel_task(state.auth_task)
                 state.auth_task = asyncio.create_task(
                     self._handle_load(session, state, message)
                 )
@@ -252,10 +268,9 @@ class ViaplayProvider(Provider):
         state = self._sessions.pop(session.session_id, None)
         if state is None:
             return
-        # Cancel background tasks
-        for task in (state.auth_task, state.poll_task):  # noqa: SLF001
-            if task is not None and not task.done():
-                _ = task.cancel()
+        # Cancel and await background tasks
+        for task in (state.auth_task, state.poll_task):
+            await _cancel_task(task)
         await state.api.close()
         log.info("viaplay session %s stopped", session.session_id)
 
@@ -280,27 +295,27 @@ class ViaplayProvider(Provider):
 
     # -- SETUP_INFO handler --------------------------------------------------
 
-    def _handle_setup_info(
+    async def _handle_setup_info(
         self,
         session: ProviderSession,
         state: _ViaplayState,
-        data: dict[str, Any],
+        msg: SetupInfo,
     ) -> None:
         """Process ``SETUP_INFO`` and spawn the auth flow."""
-        state.user_id = data.get("userId", "")
-        state.profile_id = data.get("profileId", "")
-        state.country_code = data.get("countryCode", "se")
-        state.receiver_name = data.get("receiverName", "")
-        state.receiver_language_code = data.get("receiverLanguageCode", "en")
+        state.user_id = msg.user_id
+        state.profile_id = msg.profile_id
+        state.country_code = msg.country_code or "se"
+        state.receiver_name = msg.receiver_name
+        state.receiver_language_code = msg.receiver_language_code
 
-        content_root = data.get("contentRoot", "")
         state.api.set_setup_info(
-            content_root=content_root,
+            content_root=msg.content_root,
             country_code=state.country_code,
             user_id=state.user_id,
             profile_id=state.profile_id,
         )
 
+        await _cancel_task(state.auth_task)
         state.auth_task = asyncio.create_task(self._run_auth_flow(session, state))
 
     # -- Auth flow -----------------------------------------------------------
@@ -316,42 +331,51 @@ class ViaplayProvider(Provider):
 
             # 1) Check if already authenticated
             if result.user and result.user.user_id == state.user_id:
-                state.authenticated = True
-                state.user_display_name = (
-                    f"{result.user.first_name} {result.user.last_name}".strip()
+                self._mark_authenticated(
+                    state, result.user.first_name, result.user.last_name
                 )
                 await self._send_session_ok(session, state)
                 return
 
             # 2) Try persistent login
-            pl_url = result.links.get("viaplay:persistentLogin")
+            pl_url = result.persistent_login_url
             if pl_url:
                 ok = await state.api.persistent_login(pl_url)
                 if ok:
                     recheck = await state.api.check_session()
                     if recheck.user and recheck.user.user_id == state.user_id:
-                        state.authenticated = True
-                        state.user_display_name = f"{recheck.user.first_name} {recheck.user.last_name}".strip()
+                        self._mark_authenticated(
+                            state, recheck.user.first_name, recheck.user.last_name
+                        )
                         await self._send_session_ok(session, state)
                         return
-                    # Login returned 200 but session check failed — proceed anyway
-                    state.authenticated = True
+                    # Login returned 200 but session user doesn't match.
+                    log.warning(
+                        "persistent login succeeded but session user mismatch (expected %s); proceeding anyway",
+                        state.user_id,
+                    )
+                    self._mark_authenticated(state)
                     await self._send_session_ok(session, state)
                     return
 
             # 3) Try token login
             token = state.credentials.credentials or ""
-            tl_url = result.links.get("viaplay:tokenLogin")
+            tl_url = result.token_login_url
             if token and tl_url:
                 ok = await state.api.token_login(tl_url, token)
                 if ok:
                     recheck = await state.api.check_session()
                     if recheck.user and recheck.user.user_id == state.user_id:
-                        state.authenticated = True
-                        state.user_display_name = f"{recheck.user.first_name} {recheck.user.last_name}".strip()
+                        self._mark_authenticated(
+                            state, recheck.user.first_name, recheck.user.last_name
+                        )
                         await self._send_session_ok(session, state)
                         return
-                    state.authenticated = True
+                    log.warning(
+                        "token login succeeded but session user mismatch (expected %s); proceeding anyway",
+                        state.user_id,
+                    )
+                    self._mark_authenticated(state)
                     await self._send_session_ok(session, state)
                     return
 
@@ -360,12 +384,26 @@ class ViaplayProvider(Provider):
 
         except Exception:
             log.exception("auth flow failed")
+            # Signal waiters so a pending LOAD doesn't hang.
+            state.auth_event.set()
+
+    @staticmethod
+    def _mark_authenticated(
+        state: _ViaplayState,
+        first_name: str = "",
+        last_name: str = "",
+    ) -> None:
+        """Set the session as authenticated and signal waiters."""
+        state.authenticated = True
+        if first_name or last_name:
+            state.user_display_name = f"{first_name} {last_name}".strip()
+        state.auth_event.set()
 
     async def _start_device_auth(
         self,
         session: ProviderSession,
         state: _ViaplayState,
-        root_result: Any,
+        root_result: SessionCheckResult,
     ) -> None:
         """Initiate device-code authorization flow."""
         auth_info = await state.api.get_device_authorization(root_result)
@@ -395,6 +433,7 @@ class ViaplayProvider(Provider):
         )
 
         # Start polling
+        await _cancel_task(state.poll_task)
         state.poll_task = asyncio.create_task(
             self._poll_for_authorization(session, state, auth_info)
         )
@@ -403,7 +442,7 @@ class ViaplayProvider(Provider):
         self,
         session: ProviderSession,
         state: _ViaplayState,
-        auth_info: Any,
+        auth_info: DeviceAuthInfo,
     ) -> None:
         """Poll every 3s for up to 5 minutes."""
         timeout = 300  # 5 minutes
@@ -414,11 +453,7 @@ class ViaplayProvider(Provider):
             await asyncio.sleep(interval)
             elapsed += interval
             try:
-                activated = await state.api.poll_authorized(
-                    auth_info,
-                    auth_info.device_token,
-                    auth_info.user_code,
-                )
+                activated = await state.api.poll_authorized(auth_info)
                 if activated:
                     await self._complete_device_auth(session, state)
                     return
@@ -440,12 +475,10 @@ class ViaplayProvider(Provider):
 
         try:
             result = await state.api.check_session()
-            state.authenticated = True
+            first = result.user.first_name if result.user else ""
+            last = result.user.last_name if result.user else ""
+            self._mark_authenticated(state, first, last)
             state.auth_pending = False
-            if result.user:
-                state.user_display_name = (
-                    f"{result.user.first_name} {result.user.last_name}".strip()
-                )
             await self._send_session_ok(session, state)
         except Exception:
             log.exception("complete device auth failed")
@@ -460,10 +493,8 @@ class ViaplayProvider(Provider):
     ) -> None:
         """Resolve stream URL and notify external player."""
         # Wait for auth (up to 30s)
-        for _ in range(30):
-            if state.authenticated:
-                break
-            await asyncio.sleep(1)
+        with contextlib.suppress(TimeoutError):
+            _ = await asyncio.wait_for(state.auth_event.wait(), timeout=30)
 
         if not state.authenticated:
             fail = LoadFailedResponse(
@@ -504,11 +535,16 @@ class ViaplayProvider(Provider):
         state.current_media = load_req.media
 
         # Extract metadata
-        title: str | None = None
-        if load_req.media.metadata:
+        title = stream_info.title
+        if not title and load_req.media.metadata:
             title = load_req.media.metadata.title
 
         stream_type = load_req.media.stream_type
+
+        # Build DRM info if a license URL was resolved
+        drm: DrmInfo | None = None
+        if stream_info.drm_license_url:
+            drm = DrmInfo(system="widevine", license_url=stream_info.drm_license_url)
 
         # Send MEDIA_STATUS (BUFFERING)
         await self._send_media_status(session, state, load_req.request_id)
@@ -526,6 +562,7 @@ class ViaplayProvider(Provider):
             duration=load_req.media.duration,
             autoplay=load_req.autoplay,
             start_time=load_req.current_time,
+            drm=drm,
             custom_data=custom,
         )
         await self._media_handler.on_load(info)
@@ -615,6 +652,24 @@ class ViaplayProvider(Provider):
             volume=Volume(level=1.0, muted=False),
             idle_reason=idle_reason,
         )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+async def _cancel_task(task: asyncio.Task[None] | None) -> None:
+    """Cancel an asyncio task and await its completion.
+
+    Suppresses :class:`asyncio.CancelledError` and any other exception
+    the task may have raised.
+    """
+    if task is None or task.done():
+        return
+    _ = task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await task
 
 
 __all__ = ["ViaplayProvider"]

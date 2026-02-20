@@ -242,7 +242,12 @@ class Provider(ABC):
 
 
 def discover_providers() -> list[Provider]:
-    """Discover and instantiate providers from package entry points."""
+    """Discover and instantiate providers from package entry points.
+
+    Providers are constructed with **no arguments**.  Providers that
+    require constructor parameters (e.g. ``media_handler``) should be
+    instantiated manually and registered via :class:`ProviderRegistry`.
+    """
     providers: list[Provider] = []
 
     eps = entry_points()

@@ -15,9 +15,6 @@ from castvibe.providers.viaplay._api import (
     DeviceAuthInfo,
     SessionCheckResult,
     ViaplayAPI,
-    _extract_links,
-    _find_link,
-    _parse_session_response,
 )
 
 # ---------------------------------------------------------------------------
@@ -114,7 +111,7 @@ class TestCheckSession:
         assert result.user is not None
         assert result.user.user_id == "user-1"
         assert result.user.first_name == "Test"
-        assert "viaplay:persistentLogin" in result.links
+        assert result.persistent_login_url == "https://login.viaplay.com/pl"
 
     async def test_raises_without_content_root(self, tmp_path: Any) -> None:
         a = ViaplayAPI(data_dir=tmp_path)
@@ -182,9 +179,7 @@ class TestTokenLogin:
 class TestGetDeviceAuthorization:
     async def test_returns_device_auth_info(self, api: ViaplayAPI) -> None:
         root_result = SessionCheckResult(
-            links={
-                "viaplay:deviceAuthorization": "https://login.viaplay.com/api/device/code{?deviceKey,deviceId}",
-            },
+            device_auth_url="https://login.viaplay.com/api/device/code{?deviceKey,deviceId}",
         )
         auth_body = {
             "userCode": "ABCD1234",
@@ -201,10 +196,11 @@ class TestGetDeviceAuthorization:
         assert info.user_code == "ABCD1234"
         assert info.device_token == "dt-999"
         assert info.activate_url == "https://viaplay.com/activate"
+        assert info.authorized_url == "https://login.viaplay.com/authorized"
 
     async def test_raises_on_missing_user_code(self, api: ViaplayAPI) -> None:
         root_result = SessionCheckResult(
-            links={"viaplay:deviceAuthorization": "https://login.viaplay.com/code"},
+            device_auth_url="https://login.viaplay.com/code",
         )
         with aioresponses() as m:
             m.get(re.compile(r".*"), payload={"deviceToken": "x"})
@@ -213,7 +209,7 @@ class TestGetDeviceAuthorization:
 
     async def test_raises_on_non_200(self, api: ViaplayAPI) -> None:
         root_result = SessionCheckResult(
-            links={"viaplay:deviceAuthorization": "https://login.viaplay.com/code"},
+            device_auth_url="https://login.viaplay.com/code",
         )
         with aioresponses() as m:
             m.get(re.compile(r".*"), payload={}, status=500)
@@ -232,17 +228,11 @@ class TestPollAuthorized:
             user_code="CODE",
             device_token="dt",
             activate_url="",
-            raw={
-                "_links": {
-                    "viaplay:authorized": {
-                        "href": "https://login.viaplay.com/authorized{?deviceToken,userCode}",
-                    },
-                },
-            },
+            authorized_url="https://login.viaplay.com/authorized{?deviceToken,userCode}",
         )
         with aioresponses() as m:
             m.get(re.compile(r".*"), payload={})
-            result = await api.poll_authorized(auth_info, "dt", "CODE")
+            result = await api.poll_authorized(auth_info)
 
         assert result is True
 
@@ -251,28 +241,22 @@ class TestPollAuthorized:
             user_code="CODE",
             device_token="dt",
             activate_url="",
-            raw={
-                "_links": {
-                    "viaplay:authorized": {
-                        "href": "https://login.viaplay.com/authorized",
-                    },
-                },
-            },
+            authorized_url="https://login.viaplay.com/authorized",
         )
         with aioresponses() as m:
             m.get(re.compile(r".*"), payload={}, status=403)
-            result = await api.poll_authorized(auth_info, "dt", "CODE")
+            result = await api.poll_authorized(auth_info)
 
         assert result is False
 
-    async def test_returns_false_when_no_authorized_link(self, api: ViaplayAPI) -> None:
+    async def test_returns_false_when_no_authorized_url(self, api: ViaplayAPI) -> None:
         auth_info = DeviceAuthInfo(
             user_code="CODE",
             device_token="dt",
             activate_url="",
-            raw={},
+            authorized_url="",
         )
-        result = await api.poll_authorized(auth_info, "dt", "CODE")
+        result = await api.poll_authorized(auth_info)
         assert result is False
 
 
@@ -371,6 +355,66 @@ class TestFetchStream:
         assert info.url == "https://cdn.example.com/stream"
         assert info.content_type == ""
 
+    async def test_extracts_drm_license_url(self, api: ViaplayAPI) -> None:
+        body = {
+            "_links": {
+                "viaplay:encryptedPlaylist": {
+                    "href": "https://cdn.example.com/manifest.mpd",
+                    "streamingFormat": "Dash",
+                },
+                "viaplay:widevineLicense": {
+                    "href": "https://drm.example.com/license",
+                    "releasePid": "abc123",
+                },
+            },
+        }
+        with aioresponses() as m:
+            m.get(re.compile(r".*"), payload=body)
+            info = await api.fetch_stream("https://x")
+
+        assert info.drm_license_url == "https://drm.example.com/license"
+
+    async def test_extracts_title_from_product(self, api: ViaplayAPI) -> None:
+        body = {
+            "product": {
+                "content": {"title": "My Show", "type": "episode"},
+                "streamType": "vod",
+            },
+            "contentUrl": "https://cdn.example.com/video.mpd",
+        }
+        with aioresponses() as m:
+            m.get(re.compile(r".*"), payload=body)
+            info = await api.fetch_stream("https://x")
+
+        assert info.title == "My Show"
+
+    async def test_extracts_fallback_urls(self, api: ViaplayAPI) -> None:
+        body = {
+            "_links": {
+                "viaplay:encryptedPlaylist": {
+                    "href": "https://cdn1.example.com/manifest.mpd",
+                },
+                "viaplay:fallbackMedia": [
+                    {
+                        "href": "https://cdn2.example.com/manifest.mpd",
+                        "streamingFormat": "Dash",
+                    },
+                    {
+                        "href": "https://cdn3.example.com/manifest.mpd",
+                        "streamingFormat": "Dash",
+                    },
+                ],
+            },
+        }
+        with aioresponses() as m:
+            m.get(re.compile(r".*"), payload=body)
+            info = await api.fetch_stream("https://x")
+
+        assert info.fallback_urls == (
+            "https://cdn2.example.com/manifest.mpd",
+            "https://cdn3.example.com/manifest.mpd",
+        )
+
     async def test_raises_on_no_stream(self, api: ViaplayAPI) -> None:
         with aioresponses() as m:
             m.get(re.compile(r".*"), payload={})
@@ -382,79 +426,3 @@ class TestFetchStream:
             m.get(re.compile(r".*"), payload={}, status=404)
             with pytest.raises(RuntimeError, match="status 404"):
                 _ = await api.fetch_stream("https://x")
-
-
-# ---------------------------------------------------------------------------
-# Helper functions
-# ---------------------------------------------------------------------------
-
-
-class TestFindLink:
-    def test_extracts_href(self) -> None:
-        body: dict[str, Any] = {
-            "_links": {"viaplay:playlist": {"href": "https://example.com"}},
-        }
-        assert _find_link(body, "viaplay:playlist") == "https://example.com"
-
-    def test_returns_none_for_missing_link(self) -> None:
-        body: dict[str, Any] = {"_links": {}}
-        assert _find_link(body, "viaplay:playlist") is None
-
-    def test_returns_none_when_no_links(self) -> None:
-        body: dict[str, Any] = {}
-        assert _find_link(body, "viaplay:playlist") is None
-
-    def test_returns_none_for_non_dict_link(self) -> None:
-        body: dict[str, Any] = {"_links": {"viaplay:playlist": "not-a-dict"}}
-        assert _find_link(body, "viaplay:playlist") is None
-
-
-class TestExtractLinks:
-    def test_extracts_all_links(self) -> None:
-        body: dict[str, Any] = {
-            "_links": {
-                "self": {"href": "https://self"},
-                "viaplay:playlist": {"href": "https://playlist"},
-            },
-        }
-        links = _extract_links(body)
-        assert links == {"self": "https://self", "viaplay:playlist": "https://playlist"}
-
-    def test_empty_when_no_links(self) -> None:
-        assert _extract_links({}) == {}
-
-    def test_skips_non_dict_values(self) -> None:
-        body: dict[str, Any] = {"_links": {"ok": {"href": "https://x"}, "bad": "str"}}
-        links = _extract_links(body)
-        assert links == {"ok": "https://x"}
-
-
-class TestParseSessionResponse:
-    def test_parses_user_and_links(self) -> None:
-        body: dict[str, Any] = {
-            "user": {
-                "userId": "u1",
-                "firstName": "Alice",
-                "lastName": "Smith",
-            },
-            "_links": {
-                "viaplay:persistentLogin": {"href": "https://login/pl"},
-            },
-        }
-        result = _parse_session_response(body)
-        assert result.user is not None
-        assert result.user.user_id == "u1"
-        assert result.user.first_name == "Alice"
-        assert result.links == {"viaplay:persistentLogin": "https://login/pl"}
-
-    def test_no_user(self) -> None:
-        result = _parse_session_response({})
-        assert result.user is None
-        assert result.links == {}
-
-    def test_user_with_missing_fields(self) -> None:
-        body: dict[str, Any] = {"user": {"userId": "u2"}}
-        result = _parse_session_response(body)
-        assert result.user is not None
-        assert result.user.user_id == "u2"
-        assert result.user.first_name == ""
