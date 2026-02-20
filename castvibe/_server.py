@@ -50,6 +50,7 @@ class CastServer:
     __slots__ = (
         "_bundle",
         "_connections",
+        "_crl",
         "_host",
         "_on_connection",
         "_on_disconnect",
@@ -66,6 +67,7 @@ class CastServer:
         *,
         host: str = "",
         port: int = 8009,
+        crl: bytes | None = None,
         on_message: Callable[[Connection, CastMessage], Awaitable[None]] | None = None,
         on_connection: Callable[[Connection], Awaitable[None]] | None = None,
         on_disconnect: Callable[[Connection], Awaitable[None]] | None = None,
@@ -73,6 +75,7 @@ class CastServer:
         self._bundle = bundle
         self._host = host
         self._port = port
+        self._crl = crl
         self._on_message = on_message
         self._on_connection = on_connection
         self._on_disconnect = on_disconnect
@@ -106,6 +109,15 @@ class CastServer:
     def active_connections(self) -> int:
         """Number of currently active client connections."""
         return len(self._connections)
+
+    @property
+    def crl(self) -> bytes | None:
+        """CRL bytes included in device auth responses."""
+        return self._crl
+
+    @crl.setter
+    def crl(self, value: bytes | None) -> None:
+        self._crl = value
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -161,6 +173,7 @@ class CastServer:
             reader,
             writer,
             self._bundle,
+            crl=self._crl,
             on_message=self._on_message,
             on_disconnect=self._connection_closed,
         )

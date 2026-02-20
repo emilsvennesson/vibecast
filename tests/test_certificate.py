@@ -63,7 +63,8 @@ def _build_manifest(
     peer_key_pem: bytes,
     device_pem: bytes,
     ica_pem: bytes,
-    sig_sha1: bytes,
+    sig_sha1: bytes | None,
+    sig: bytes | None = None,
     **extra: str,
 ) -> dict[str, str]:
     """Build a manifest dict matching the go-cast JSON format."""
@@ -72,8 +73,11 @@ def _build_manifest(
         "pr": peer_key_pem.decode(),
         "cpu": device_pem.decode(),
         "ica": ica_pem.decode(),
-        "sig_sha1": base64.b64encode(sig_sha1).decode(),
     }
+    if sig_sha1 is not None:
+        manifest["sig_sha1"] = base64.b64encode(sig_sha1).decode()
+    if sig is not None:
+        manifest["sig"] = base64.b64encode(sig).decode()
     manifest.update(extra)
     return manifest
 
@@ -239,7 +243,7 @@ class TestFromManifest:
 
     def test_missing_required_key_raises(self, tmp_path: Path) -> None:
         """Missing required manifest keys raise ValueError."""
-        manifest = {"pu": "x", "pr": "x"}  # missing cpu, ica, sig_sha1
+        manifest = {"pu": "x", "pr": "x"}  # missing cpu, ica, signature
         path = _write_manifest(tmp_path, manifest)
 
         with pytest.raises(ValueError, match="missing required keys"):
@@ -261,8 +265,35 @@ class TestFromManifest:
         del manifest["sig_sha1"]
         path = _write_manifest(tmp_path, manifest)
 
-        with pytest.raises(ValueError, match="sig_sha1"):
+        with pytest.raises(ValueError, match="sig_sha1 or sig"):
             _ = CertificateBundle.from_manifest(path)
+
+    def test_legacy_sig_is_accepted(
+        self,
+        tmp_path: Path,
+        cert_material: dict[str, Any],
+    ) -> None:
+        """Legacy ``sig`` manifests load with SHA-256 hash selection."""
+        device_key = cert_material["device_key"]
+        assert isinstance(device_key, rsa.RSAPrivateKey)
+        legacy_sig = device_key.sign(
+            cert_material["peer_der"],
+            padding.PKCS1v15(),
+            hashes.SHA256(),
+        )
+        manifest = _build_manifest(
+            peer_pem=cert_material["peer_pem"],
+            peer_key_pem=cert_material["peer_key_pem"],
+            device_pem=cert_material["device_pem"],
+            ica_pem=cert_material["ica1_pem"],
+            sig_sha1=None,
+            sig=legacy_sig,
+        )
+        path = _write_manifest(tmp_path, manifest)
+        bundle = CertificateBundle.from_manifest(path)
+
+        assert bundle.signature_sha1 == legacy_sig
+        assert bundle.signature_is_sha1 is False
 
     def test_extra_keys_ignored(
         self,
@@ -276,14 +307,34 @@ class TestFromManifest:
             device_pem=cert_material["device_pem"],
             ica_pem=cert_material["ica1_pem"],
             sig_sha1=cert_material["sig_sha1"],
-            crl="somebase64data",
-            sig="otherdata",
+            crl=base64.b64encode(b"crl").decode(),
+            sig=b"otherdata",
         )
         path = _write_manifest(tmp_path, manifest)
 
         # Should not raise — extra keys are simply ignored.
         bundle = CertificateBundle.from_manifest(path)
         assert bundle.peer_cert_pem == cert_material["peer_pem"]
+
+    def test_crl_loaded_when_present(
+        self,
+        tmp_path: Path,
+        cert_material: dict[str, Any],
+    ) -> None:
+        """Base64 ``crl`` manifests are decoded into bundle.crl bytes."""
+        crl = b"\x01\x02\x03\x04"
+        manifest = _build_manifest(
+            peer_pem=cert_material["peer_pem"],
+            peer_key_pem=cert_material["peer_key_pem"],
+            device_pem=cert_material["device_pem"],
+            ica_pem=cert_material["ica1_pem"],
+            sig_sha1=cert_material["sig_sha1"],
+            crl=base64.b64encode(crl).decode(),
+        )
+        path = _write_manifest(tmp_path, manifest)
+        bundle = CertificateBundle.from_manifest(path)
+
+        assert bundle.crl == crl
 
 
 class TestCertDigestMd5:

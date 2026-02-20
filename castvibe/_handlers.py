@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
-from castvibe import _namespace as ns
-from castvibe._device import Device, LaunchCredentials, Provider, build_receiver_status
+import castvibe._namespace as ns
+from castvibe._device import Device, build_receiver_status
 from castvibe._log import get_logger
 from castvibe._models import (
     AppAvailabilityResponse,
@@ -23,8 +22,6 @@ from castvibe._models import (
     MultizoneGetStatusRequest,
     MultizoneStatus,
     MultizoneStatusResponse,
-    Ping,
-    Pong,
     SetupData,
     SetupDeviceInfo,
     SetupRequest,
@@ -32,15 +29,16 @@ from castvibe._models import (
     SetVolumeRequest,
     StopRequest,
     connection_message_adapter,
-    heartbeat_message_adapter,
     receiver_request_adapter,
 )
-from castvibe._proto.cast_channel_pb2 import CastMessage
+from castvibe._util import extract_request_id, parse_json_payload
+from castvibe.provider import LaunchCredentials, Provider
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from castvibe._connection import Connection
+    from castvibe._proto.cast_channel_pb2 import CastMessage
 
 log = get_logger("handlers")
 
@@ -67,8 +65,6 @@ class PlatformHandler:
         match msg.namespace:
             case ns.CONNECTION:
                 await self._handle_connection(connection, msg)
-            case ns.HEARTBEAT:
-                await self._handle_heartbeat(connection, msg)
             case ns.RECEIVER:
                 await self._handle_receiver(connection, msg)
             case ns.DISCOVERY:
@@ -83,7 +79,7 @@ class PlatformHandler:
     async def _handle_connection(
         self, connection: Connection, msg: CastMessage
     ) -> None:
-        payload = _parse_payload(msg)
+        payload = parse_json_payload(msg)
         if payload is None:
             return
 
@@ -101,31 +97,8 @@ class PlatformHandler:
             case _:
                 self._device.remove_subscription(connection, msg.source_id)
 
-    async def _handle_heartbeat(self, connection: Connection, msg: CastMessage) -> None:
-        payload = _parse_payload(msg)
-        if payload is None:
-            return
-
-        try:
-            heartbeat = heartbeat_message_adapter.validate_python(payload)
-        except ValidationError:
-            log.warning("invalid heartbeat payload", exc_info=True)
-            return
-
-        match heartbeat:
-            case Ping():
-                await self._device.send_to_sender(
-                    connection=connection,
-                    source_id=msg.destination_id,
-                    dest_id=msg.source_id,
-                    namespace=ns.HEARTBEAT,
-                    data=Pong().model_dump(exclude_none=True),
-                )
-            case _:
-                return
-
     async def _handle_receiver(self, connection: Connection, msg: CastMessage) -> None:
-        payload = _parse_payload(msg)
+        payload = parse_json_payload(msg)
         if payload is None:
             return
 
@@ -133,7 +106,7 @@ class PlatformHandler:
             request = receiver_request_adapter.validate_python(payload)
         except ValidationError:
             response = InvalidRequestResponse(
-                request_id=_extract_request_id(payload),
+                request_id=extract_request_id(payload),
                 reason="Invalid receiver request",
             )
             await self._device.send_to_sender(
@@ -171,7 +144,7 @@ class PlatformHandler:
             case LaunchRequest():
                 await self._handle_launch_request(connection, msg, request)
             case StopRequest():
-                self._device.stop_session(request.session_id)
+                _ = await self._device.stop_session(request.session_id)
                 status = build_receiver_status(self._device, request.request_id)
                 await self._device.broadcast(
                     source_id=msg.destination_id,
@@ -209,7 +182,25 @@ class PlatformHandler:
             return
 
         credentials = _extract_launch_credentials(request)
-        _ = self._device.start_session(request.app_id, provider, credentials)
+        session = self._device.start_session(request.app_id, provider, credentials)
+        try:
+            await session.on_launch(connection, msg.source_id)
+        except Exception:
+            _ = await self._device.stop_session(session.session_id)
+            response = LaunchErrorResponse(
+                request_id=request.request_id,
+                reason="Application launch failed",
+            )
+            await self._device.send_to_sender(
+                connection=connection,
+                source_id=msg.destination_id,
+                dest_id=msg.source_id,
+                namespace=ns.RECEIVER,
+                data=response.model_dump(exclude_none=True),
+            )
+            log.warning("provider launch callback failed", exc_info=True)
+            return
+
         status = build_receiver_status(self._device, request.request_id)
         await self._device.broadcast(
             source_id=msg.destination_id,
@@ -218,7 +209,7 @@ class PlatformHandler:
         )
 
     async def _handle_discovery(self, connection: Connection, msg: CastMessage) -> None:
-        payload = _parse_payload(msg)
+        payload = parse_json_payload(msg)
         if payload is None:
             return
 
@@ -243,7 +234,7 @@ class PlatformHandler:
         )
 
     async def _handle_multizone(self, connection: Connection, msg: CastMessage) -> None:
-        payload = _parse_payload(msg)
+        payload = parse_json_payload(msg)
         if payload is None:
             return
 
@@ -269,7 +260,7 @@ class PlatformHandler:
         )
 
     async def _handle_setup(self, connection: Connection, msg: CastMessage) -> None:
-        payload = _parse_payload(msg)
+        payload = parse_json_payload(msg)
         if payload is None:
             return
 
@@ -337,32 +328,6 @@ def _extract_launch_credentials(request: LaunchRequest) -> LaunchCredentials:
 
 def _first_not_none(primary: str | None, fallback: str | None) -> str | None:
     return primary if primary is not None else fallback
-
-
-def _parse_payload(msg: CastMessage) -> dict[str, Any] | None:
-    if msg.payload_type != CastMessage.STRING:
-        return None
-
-    try:
-        parsed = json.loads(msg.payload_utf8)
-    except json.JSONDecodeError:
-        log.warning("invalid JSON payload", exc_info=True)
-        return None
-
-    if not isinstance(parsed, dict):
-        return None
-    return cast("dict[str, Any]", parsed)
-
-
-def _extract_request_id(
-    payload: dict[str, Any],
-    keys: tuple[str, ...] = ("requestId",),
-) -> int:
-    for key in keys:
-        raw = payload.get(key)
-        if isinstance(raw, int):
-            return raw
-    return 0
 
 
 __all__ = ["PlatformHandler"]

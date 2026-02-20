@@ -146,6 +146,15 @@ class TestBuildAuthResponse:
 
         assert msg.response.hash_algorithm == HashAlgorithm.SHA1
 
+    def test_hash_algorithm_sha256_for_legacy_signature(
+        self, bundle: CertificateBundle
+    ) -> None:
+        """hash_algorithm is SHA256 when the bundle marks a legacy signature."""
+        bundle.signature_is_sha1 = False
+        msg = _parse_auth_response(build_auth_response(bundle))
+
+        assert msg.response.hash_algorithm == HashAlgorithm.SHA256
+
     def test_signature_algorithm_pkcs1v15(self, bundle: CertificateBundle) -> None:
         """signature_algorithm is explicitly set to RSASSA_PKCS1v15."""
         msg = _parse_auth_response(build_auth_response(bundle))
@@ -170,6 +179,15 @@ class TestBuildAuthResponse:
         msg = _parse_auth_response(build_auth_response(bundle, crl=None))
 
         assert not msg.response.HasField("crl")
+
+    def test_bundle_crl_used_when_override_missing(
+        self, bundle: CertificateBundle
+    ) -> None:
+        """Bundle-level CRL is used when no explicit ``crl=`` override is given."""
+        bundle.crl = b"\x9a\x9b"
+        msg = _parse_auth_response(build_auth_response(bundle))
+
+        assert msg.response.crl == b"\x9a\x9b"
 
     def test_multiple_intermediate_certs(self) -> None:
         """Multiple intermediate certificates are all included."""

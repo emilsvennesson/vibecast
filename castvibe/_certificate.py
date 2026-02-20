@@ -1,8 +1,8 @@
 """Certificate bundle for Google Cast device authentication.
 
 Loads a go-cast compatible JSON manifest containing the TLS peer certificate,
-device authentication certificate, intermediate CA chain, and pre-computed
-signature needed to pass Cast device authentication.
+device authentication certificate, intermediate CA chain, and a pre-computed
+auth signature needed to pass Cast device authentication.
 """
 
 from __future__ import annotations
@@ -22,8 +22,8 @@ from cryptography.x509 import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-#: Required keys in the certificate manifest JSON.
-_REQUIRED_KEYS = frozenset({"pu", "pr", "cpu", "ica", "sig_sha1"})
+#: Required non-signature keys in the certificate manifest JSON.
+_REQUIRED_KEYS = frozenset({"pu", "pr", "cpu", "ica"})
 
 
 @dataclass(slots=True)
@@ -43,10 +43,17 @@ class CertificateBundle:
     device_cert_der: bytes
     #: Intermediate CA chain, each certificate in DER.
     intermediate_certs_der: list[bytes]
-    #: Pre-computed RSASSA-PKCS1v15 signature of ``SHA1(peer_cert_DER)``.
+    #: Pre-computed static auth signature.
+    #:
+    #: The field name is historical: when ``signature_is_sha1`` is ``False``
+    #: this stores the SHA-256 signature loaded from legacy ``sig`` manifests.
     signature_sha1: bytes
     #: Peer certificate in DER, computed from *peer_cert_pem* at load time.
     peer_cert_der: bytes
+    #: Whether ``signature_sha1`` is for SHA-1 (vs SHA-256 when ``False``).
+    signature_is_sha1: bool = True
+    #: Optional CRL payload to include in auth responses.
+    crl: bytes | None = None
 
     @classmethod
     def from_manifest(cls, path: Path) -> CertificateBundle:
@@ -62,7 +69,9 @@ class CertificateBundle:
         ``cpu``      Device authentication certificate PEM
         ``ica``      Intermediate CA certificate(s) PEM (may be
                      multiple concatenated PEM blocks)
-        ``sig_sha1`` Base64-encoded SHA-1 signature
+        ``sig_sha1`` Base64-encoded SHA-1 signature (preferred)
+        ``sig``      Base64-encoded SHA-256 signature (legacy fallback)
+        ``crl``      Base64-encoded Cast CRL blob (optional)
         ============ ================================================
 
         Raises:
@@ -74,6 +83,12 @@ class CertificateBundle:
         missing = _REQUIRED_KEYS - manifest.keys()
         if missing:
             msg = f"Manifest missing required keys: {', '.join(sorted(missing))}"
+            raise ValueError(msg)
+
+        has_sig_sha1 = bool(manifest.get("sig_sha1"))
+        has_sig = bool(manifest.get("sig"))
+        if not has_sig_sha1 and not has_sig:
+            msg = "Manifest missing required signature key: sig_sha1 or sig"
             raise ValueError(msg)
 
         # PEM bytes ---------------------------------------------------------
@@ -95,7 +110,13 @@ class CertificateBundle:
         intermediate_certs_der = [cert.public_bytes(Encoding.DER) for cert in ica_certs]
 
         # Signature ---------------------------------------------------------
-        signature_sha1 = base64.b64decode(manifest["sig_sha1"])
+        signature_is_sha1 = has_sig_sha1
+        signature_key = "sig_sha1" if has_sig_sha1 else "sig"
+        signature_sha1 = base64.b64decode(manifest[signature_key])
+
+        # Optional CRL ------------------------------------------------------
+        crl_b64 = manifest.get("crl")
+        crl = base64.b64decode(crl_b64) if crl_b64 else None
 
         return cls(
             peer_cert_pem=peer_cert_pem,
@@ -104,6 +125,8 @@ class CertificateBundle:
             intermediate_certs_der=intermediate_certs_der,
             signature_sha1=signature_sha1,
             peer_cert_der=peer_cert_der,
+            signature_is_sha1=signature_is_sha1,
+            crl=crl,
         )
 
     @property
