@@ -13,11 +13,17 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from castvibe import _namespace as ns
 from castvibe._auth import build_auth_response
 from castvibe._framing import FramingError, read_message, write_message
 from castvibe._log import get_logger
-from castvibe._proto.cast_channel_pb2 import CastMessage
+from castvibe._proto.cast_channel_pb2 import (
+    CastMessage,
+    DeviceAuthMessage,
+    HashAlgorithm,
+    SignatureAlgorithm,
+)
+
+from . import _namespace as ns
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -54,6 +60,7 @@ class Connection:
 
     __slots__ = (
         "_bundle",
+        "_crl",
         "_on_disconnect",
         "_on_message",
         "_reader",
@@ -67,12 +74,14 @@ class Connection:
         writer: asyncio.StreamWriter,
         bundle: CertificateBundle,
         *,
+        crl: bytes | None = None,
         on_message: Callable[[Connection, CastMessage], Awaitable[None]] | None = None,
         on_disconnect: Callable[[Connection], Awaitable[None]] | None = None,
     ) -> None:
         self._reader = reader
         self._writer = writer
         self._bundle = bundle
+        self._crl = crl
         self._on_message = on_message
         self._on_disconnect = on_disconnect
 
@@ -162,15 +171,54 @@ class Connection:
 
     async def _handle_device_auth(self, msg: CastMessage) -> None:
         """Respond to a device-auth challenge with the pre-computed auth response."""
-        log.debug("%s: device auth challenge received", self.peer)
-        payload = build_auth_response(self._bundle)
+        challenge = DeviceAuthMessage()
+        if not challenge.ParseFromString(msg.payload_binary):
+            log.warning("%s: failed to parse device auth challenge", self.peer)
+            return
+
+        if challenge.HasField("challenge"):
+            challenge_msg = challenge.challenge
+            sender_nonce = challenge_msg.sender_nonce
+            log.debug(
+                "%s: device auth challenge received (hash=%s sig=%s nonce_len=%d)",
+                self.peer,
+                _enum_name(HashAlgorithm, challenge_msg.hash_algorithm),
+                _enum_name(
+                    SignatureAlgorithm,
+                    challenge_msg.signature_algorithm,
+                ),
+                len(sender_nonce),
+            )
+        else:
+            log.debug(
+                "%s: device auth challenge received (no challenge field)", self.peer
+            )
+
+        payload = build_auth_response(self._bundle, crl=self._crl)
         await self.send_binary(
             source_id=msg.destination_id,
             dest_id=msg.source_id,
             namespace=ns.DEVICE_AUTH,
             data=payload,
         )
-        log.debug("%s: device auth response sent", self.peer)
+        response = DeviceAuthMessage()
+        _ = response.ParseFromString(payload)
+        if response.HasField("response"):
+            response_msg = response.response
+            log.debug(
+                "%s: device auth response sent (hash=%s sig=%s ica=%d crl_len=%d nonce_len=%d)",
+                self.peer,
+                _enum_name(HashAlgorithm, response_msg.hash_algorithm),
+                _enum_name(
+                    SignatureAlgorithm,
+                    response_msg.signature_algorithm,
+                ),
+                len(response_msg.intermediate_certificate),
+                len(response_msg.crl),
+                len(response_msg.sender_nonce),
+            )
+        else:
+            log.debug("%s: device auth response sent", self.peer)
 
     async def _handle_heartbeat(self, msg: CastMessage) -> None:
         """Respond to PING with PONG (fast-path, no JSON parsing)."""
@@ -265,3 +313,14 @@ def _log_message(msg: CastMessage, peer: str) -> None:
         msg.destination_id,
         payload_repr,
     )
+
+
+def _enum_name(enum_type: type[object], value: int) -> str:
+    """Best-effort enum name formatting for protobuf debug logs."""
+    name_fn = getattr(enum_type, "Name", None)
+    if callable(name_fn):
+        try:
+            return str(name_fn(value))
+        except ValueError:
+            return f"UNKNOWN({value})"
+    return str(value)

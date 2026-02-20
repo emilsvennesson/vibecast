@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import ValidationError
 
-from castvibe import _namespace as ns
 from castvibe._device import Device, LaunchCredentials, Provider, build_receiver_status
 from castvibe._log import get_logger
 from castvibe._models import (
@@ -36,6 +35,8 @@ from castvibe._models import (
     receiver_request_adapter,
 )
 from castvibe._proto.cast_channel_pb2 import CastMessage
+
+from . import _namespace as ns
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -171,7 +172,9 @@ class PlatformHandler:
             case LaunchRequest():
                 await self._handle_launch_request(connection, msg, request)
             case StopRequest():
-                self._device.stop_session(request.session_id)
+                session = self._device.stop_session(request.session_id)
+                if session is not None:
+                    await session.on_stop()
                 status = build_receiver_status(self._device, request.request_id)
                 await self._device.broadcast(
                     source_id=msg.destination_id,
@@ -209,7 +212,25 @@ class PlatformHandler:
             return
 
         credentials = _extract_launch_credentials(request)
-        _ = self._device.start_session(request.app_id, provider, credentials)
+        session = self._device.start_session(request.app_id, provider, credentials)
+        try:
+            await session.on_launch(connection, msg.source_id)
+        except Exception:
+            _ = self._device.stop_session(session.session_id)
+            response = LaunchErrorResponse(
+                request_id=request.request_id,
+                reason="Application launch failed",
+            )
+            await self._device.send_to_sender(
+                connection=connection,
+                source_id=msg.destination_id,
+                dest_id=msg.source_id,
+                namespace=ns.RECEIVER,
+                data=response.model_dump(exclude_none=True),
+            )
+            log.warning("provider launch callback failed", exc_info=True)
+            return
+
         status = build_receiver_status(self._device, request.request_id)
         await self._device.broadcast(
             source_id=msg.destination_id,

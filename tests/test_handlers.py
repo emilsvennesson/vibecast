@@ -15,13 +15,13 @@ from castvibe._models import (
     ReceiverStatusResponse,
     SetupResponse,
 )
+from castvibe.provider import Provider
 from tests.conftest import make_cast_message
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from castvibe._connection import Connection
-    from castvibe._device import Provider
 
 
 class RecordingConnection:
@@ -40,14 +40,28 @@ class RecordingConnection:
         self.sent.append((source_id, dest_id, namespace, data))
 
 
-class FakeProvider:
+class FakeProvider(Provider):
     """Minimal provider used for LAUNCH/STOP tests."""
+
+    def app_ids(self) -> frozenset[str]:
+        return frozenset({"6313CF39"})
 
     def display_name(self) -> str:
         return "Viaplay"
 
     def namespaces(self) -> frozenset[str]:
         return frozenset({"urn:x-cast:tv.viaplay.chromecast"})
+
+    async def on_launch(self, session: Any, credentials: Any) -> None:
+        _ = session
+        _ = credentials
+
+    async def on_message(
+        self, session: Any, namespace: str, data: dict[str, Any]
+    ) -> None:
+        _ = session
+        _ = namespace
+        _ = data
 
 
 def _as_connection(connection: RecordingConnection) -> Connection:

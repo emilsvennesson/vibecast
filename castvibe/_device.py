@@ -2,24 +2,35 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from threading import RLock
 from typing import TYPE_CHECKING, Any, Protocol, override
 from uuid import uuid4
 
-from castvibe import _namespace as ns
+from pydantic import ValidationError
+
 from castvibe._log import get_logger
 from castvibe._models import (
     ApplicationStatus,
     CastNamespace,
+    ConnectRequest,
+    MediaInvalidRequestResponse,
+    MediaStatus,
+    MediaStatusResponse,
     ReceiverStatus,
     ReceiverStatusResponse,
     Volume,
+    connection_message_adapter,
+    media_request_adapter,
 )
+from castvibe._proto.cast_channel_pb2 import CastMessage
+from castvibe.provider import LaunchCredentials, Provider, ProviderSession
+
+from . import _namespace as ns
 
 if TYPE_CHECKING:
     from castvibe._connection import Connection
-    from castvibe._proto.cast_channel_pb2 import CastMessage
 
 log = get_logger("device")
 
@@ -30,26 +41,6 @@ class TransportHandler(Protocol):
     async def handle_message(self, connection: Connection, msg: CastMessage) -> None:
         """Handle an incoming Cast message for this transport."""
         ...
-
-
-class Provider(Protocol):
-    """Minimal provider interface required by the device hub."""
-
-    def display_name(self) -> str:
-        """Human-readable app/provider name shown in receiver status."""
-        ...
-
-    def namespaces(self) -> frozenset[str]:
-        """Namespaces used by this provider session."""
-        ...
-
-
-@dataclass(slots=True, frozen=True)
-class LaunchCredentials:
-    """Credentials supplied with a LAUNCH request."""
-
-    credentials: str | None = None
-    credentials_type: str | None = None
 
 
 @dataclass(slots=True)
@@ -86,6 +77,7 @@ class Transport:
 class AppSession(TransportHandler):
     """Active application session registered as a Cast transport."""
 
+    device: Device
     app_id: str
     display_name: str
     session_id: str
@@ -95,17 +87,133 @@ class AppSession(TransportHandler):
     namespaces: tuple[str, ...]
     status_text: str = ""
 
+    async def on_launch(self, connection: Connection, sender_id: str) -> None:
+        """Invoke provider launch callback."""
+        context = self._build_context(connection=connection, sender_id=sender_id)
+        await self.provider.on_launch(context, self.credentials)
+
+    async def on_stop(self) -> None:
+        """Invoke provider stop callback."""
+        context = self._build_context(connection=None, sender_id=None)
+        await self.provider.on_stop(context)
+
     @override
     async def handle_message(self, connection: Connection, msg: CastMessage) -> None:
-        """Placeholder app message handler.
+        """Route app-transport messages to the provider callbacks."""
+        payload = _parse_json_payload(msg)
+        if payload is None:
+            return
 
-        Provider callback wiring is added in a later issue.
-        """
-        _ = connection
-        log.debug(
-            "session %s ignoring message on %s",
+        if msg.namespace == ns.CONNECTION:
+            await self._handle_connection_message(connection, msg.source_id, payload)
+            return
+
+        context = self._build_context(connection=connection, sender_id=msg.source_id)
+
+        if msg.namespace == ns.MEDIA:
+            await self._handle_media_message(
+                connection, msg.source_id, payload, context
+            )
+            return
+
+        if msg.namespace in self.namespaces and msg.namespace != ns.MEDIA:
+            await self.provider.on_message(context, msg.namespace, payload)
+            return
+
+        log.warning(
+            "session %s received unsupported namespace %s",
             self.session_id,
             msg.namespace,
+        )
+
+    async def _handle_connection_message(
+        self,
+        connection: Connection,
+        sender_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        try:
+            request = connection_message_adapter.validate_python(payload)
+        except ValidationError:
+            log.warning("invalid app connection payload", exc_info=True)
+            return
+
+        if isinstance(request, ConnectRequest):
+            self.device.add_subscription(connection, sender_id, self.transport_id)
+            context = self._build_context(connection=connection, sender_id=sender_id)
+            await self.provider.on_sender_connected(context, sender_id)
+            return
+
+        self.device.remove_subscription(connection, sender_id)
+
+    async def _handle_media_message(
+        self,
+        connection: Connection,
+        sender_id: str,
+        payload: dict[str, Any],
+        context: ProviderSession,
+    ) -> None:
+        try:
+            request = media_request_adapter.validate_python(payload)
+        except ValidationError:
+            response = MediaInvalidRequestResponse(
+                request_id=_extract_request_id(payload),
+                reason="Invalid media request",
+            )
+            await self.device.send_to_sender(
+                connection=connection,
+                source_id=self.transport_id,
+                dest_id=sender_id,
+                namespace=ns.MEDIA,
+                data=response.model_dump(exclude_none=True),
+            )
+            return
+
+        await self.provider.on_media_message(context, request)
+
+    def _build_context(
+        self,
+        *,
+        connection: Connection | None,
+        sender_id: str | None,
+    ) -> ProviderSession:
+        async def send_custom(namespace: str, data: dict[str, Any]) -> None:
+            if connection is None or sender_id is None:
+                await self.device.broadcast(
+                    source_id=self.transport_id,
+                    namespace=namespace,
+                    data=data,
+                )
+                return
+            await self.device.send_to_sender(
+                connection=connection,
+                source_id=self.transport_id,
+                dest_id=sender_id,
+                namespace=namespace,
+                data=data,
+            )
+
+        async def broadcast_custom(namespace: str, data: dict[str, Any]) -> None:
+            await self.device.broadcast(
+                source_id=self.transport_id,
+                namespace=namespace,
+                data=data,
+            )
+
+        async def send_media_status(status: MediaStatus, request_id: int) -> None:
+            payload = MediaStatusResponse(
+                request_id=request_id,
+                status=[status],
+            ).model_dump(exclude_none=True)
+            await send_custom(ns.MEDIA, payload)
+
+        return ProviderSession(
+            session_id=self.session_id,
+            transport_id=self.transport_id,
+            app_id=self.app_id,
+            send_custom=send_custom,
+            broadcast_custom=broadcast_custom,
+            send_media_status=send_media_status,
         )
 
 
@@ -297,6 +405,7 @@ class Device:
             provider_namespaces.append(ns.MEDIA)
 
             session = AppSession(
+                device=self,
                 app_id=app_id,
                 display_name=provider.display_name(),
                 session_id=session_id,
@@ -309,13 +418,19 @@ class Device:
             self.register_transport(transport_id, session)
             return session
 
-    def stop_session(self, session_id: str) -> None:
+    def stop_session(self, session_id: str) -> AppSession | None:
         """Stop and unregister a running app session."""
         with self._lock:
             session = self.sessions.pop(session_id, None)
             if session is None:
-                return
+                return None
             self.unregister_transport(session.transport_id)
+            return session
+
+    def session_ids(self) -> list[str]:
+        """Return the current app session IDs."""
+        with self._lock:
+            return list(self.sessions.keys())
 
     def snapshot_receiver_state(self) -> tuple[list[AppSession], Volume]:
         """Return atomic snapshots used for RECEIVER_STATUS generation."""
@@ -355,6 +470,28 @@ def build_receiver_status(
         is_stand_by=False,
     )
     return ReceiverStatusResponse(request_id=request_id, status=status)
+
+
+def _parse_json_payload(msg: CastMessage) -> dict[str, Any] | None:
+    if msg.payload_type != CastMessage.STRING:
+        return None
+
+    try:
+        parsed = json.loads(msg.payload_utf8)
+    except json.JSONDecodeError:
+        log.warning("invalid JSON payload", exc_info=True)
+        return None
+
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
+
+
+def _extract_request_id(payload: dict[str, Any]) -> int:
+    raw = payload.get("requestId")
+    if isinstance(raw, int):
+        return raw
+    return 0
 
 
 __all__ = [

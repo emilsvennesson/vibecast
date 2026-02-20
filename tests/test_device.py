@@ -7,11 +7,11 @@ from typing import TYPE_CHECKING, Any, cast
 
 from castvibe import _namespace as ns
 from castvibe._device import Device, LaunchCredentials, ReceiverConfig
+from castvibe.provider import Provider
 from tests.conftest import make_cast_message
 
 if TYPE_CHECKING:
     from castvibe._connection import Connection
-    from castvibe._device import Provider
     from castvibe._proto.cast_channel_pb2 import CastMessage
 
 
@@ -41,18 +41,32 @@ class RecordingHandler:
         self.calls.append((connection, msg))
 
 
-class FakeProvider:
+class FakeProvider(Provider):
     """Minimal provider implementation used by session tests."""
 
     def __init__(self, display_name: str, namespaces: frozenset[str]) -> None:
         self._display_name = display_name
         self._namespaces = namespaces
 
+    def app_ids(self) -> frozenset[str]:
+        return frozenset({"6313CF39"})
+
     def display_name(self) -> str:
         return self._display_name
 
     def namespaces(self) -> frozenset[str]:
         return self._namespaces
+
+    async def on_launch(self, session: Any, credentials: Any) -> None:
+        _ = session
+        _ = credentials
+
+    async def on_message(
+        self, session: Any, namespace: str, data: dict[str, Any]
+    ) -> None:
+        _ = session
+        _ = namespace
+        _ = data
 
 
 def _as_connection(connection: RecordingConnection) -> Connection:
@@ -161,7 +175,7 @@ class TestRouting:
 class TestSessionLifecycle:
     def test_start_and_stop_session(self) -> None:
         device = _build_device()
-        provider: Provider = FakeProvider(
+        provider = FakeProvider(
             display_name="Viaplay",
             namespaces=frozenset({"urn:x-cast:tv.viaplay.chromecast"}),
         )
@@ -186,7 +200,7 @@ class TestSessionLifecycle:
 
     def test_transport_ids_are_sequential(self) -> None:
         device = _build_device()
-        provider: Provider = FakeProvider(display_name="App", namespaces=frozenset())
+        provider = FakeProvider(display_name="App", namespaces=frozenset())
 
         first = device.start_session("app-1", provider, LaunchCredentials())
         second = device.start_session("app-2", provider, LaunchCredentials())

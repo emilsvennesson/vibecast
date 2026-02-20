@@ -12,6 +12,9 @@ dependencies = [
     "aiohttp>=3.11",
 ]
 
+[project.entry-points."castvibe.providers"]
+viaplay = "castvibe.providers.viaplay:ViaplayProvider"
+
 [dependency-groups]
 dev = [
     "basedpyright>=1.38.1",
