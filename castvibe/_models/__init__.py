@@ -51,6 +51,15 @@ from castvibe._models._media import (
     SeekRequest,
     media_request_adapter,
 )
+from castvibe._models._multizone import (
+    MultizoneDevice,
+    MultizoneDeviceVolume,
+    MultizoneGetStatusRequest,
+    MultizonePlaybackSession,
+    MultizoneStatus,
+    MultizoneStatusResponse,
+    multizone_get_status_adapter,
+)
 from castvibe._models._receiver import (
     AppAvailabilityResponse,
     GetAppAvailabilityRequest,
@@ -63,6 +72,13 @@ from castvibe._models._receiver import (
     SetVolumeRequest,
     StopRequest,
     receiver_request_adapter,
+)
+from castvibe._models._setup import (
+    SetupData,
+    SetupDeviceInfo,
+    SetupRequest,
+    SetupResponse,
+    setup_request_adapter,
 )
 
 __all__ = [
@@ -86,6 +102,14 @@ __all__ = [
     "Ping",
     "Pong",
     "heartbeat_message_adapter",
+    # Multizone
+    "MultizoneDevice",
+    "MultizoneDeviceVolume",
+    "MultizoneGetStatusRequest",
+    "MultizonePlaybackSession",
+    "MultizoneStatus",
+    "MultizoneStatusResponse",
+    "multizone_get_status_adapter",
     # Connection
     "CloseRequest",
     "ConnectRequest",
@@ -107,6 +131,12 @@ __all__ = [
     "SetVolumeRequest",
     "StopRequest",
     "receiver_request_adapter",
+    # Setup
+    "SetupData",
+    "SetupDeviceInfo",
+    "SetupRequest",
+    "SetupResponse",
+    "setup_request_adapter",
     # Media
     "LoadFailedResponse",
     "LoadRequest",
