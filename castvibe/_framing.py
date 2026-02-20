@@ -10,6 +10,8 @@ All Cast messages are framed as:
 import asyncio
 import struct
 
+from google.protobuf.message import DecodeError
+
 from castvibe._proto.cast_channel_pb2 import CastMessage
 
 #: Maximum allowed message size (64 KiB). Cast messages are typically a few KB;
@@ -28,7 +30,7 @@ async def read_message(reader: asyncio.StreamReader) -> CastMessage:
     """Read a single length-prefixed CastMessage from *reader*.
 
     Raises:
-        FramingError: On zero-length or oversized message.
+        FramingError: On zero-length, oversized, or malformed message.
         asyncio.IncompleteReadError: On connection close or incomplete read.
     """
     # Read 4-byte length prefix.
@@ -47,7 +49,11 @@ async def read_message(reader: asyncio.StreamReader) -> CastMessage:
     payload = await reader.readexactly(length)
 
     cast_message = CastMessage()
-    _ = cast_message.ParseFromString(payload)
+    try:
+        _ = cast_message.ParseFromString(payload)
+    except DecodeError as exc:
+        msg = f"Malformed protobuf payload ({length} bytes)"
+        raise FramingError(msg) from exc
     return cast_message
 
 
