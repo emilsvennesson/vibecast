@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, override
 
 from castvibe.provider import (
     LaunchCredentials,
@@ -18,15 +18,19 @@ class DummyProvider(Provider):
         self._name = name
         self._app_ids = app_ids
 
+    @override
     def app_ids(self) -> frozenset[str]:
         return self._app_ids
 
+    @override
     def display_name(self) -> str:
         return self._name
 
+    @override
     def namespaces(self) -> frozenset[str]:
         return frozenset({"urn:x-cast:test"})
 
+    @override
     async def on_launch(
         self,
         session: ProviderSession,
@@ -35,6 +39,7 @@ class DummyProvider(Provider):
         _ = session
         _ = credentials
 
+    @override
     async def on_message(
         self,
         session: ProviderSession,

@@ -32,8 +32,13 @@ def build_auth_response(
 ) -> bytes:
     """Build a serialized ``DeviceAuthMessage`` containing an ``AuthResponse``.
 
-    The response uses the static pre-computed SHA-1 signature from *bundle*.
-    No sender nonce is incorporated (static signature mode).
+    The hash algorithm is selected automatically: SHA-1 when the bundle was
+    loaded from a ``sig_sha1`` manifest field, SHA-256 when loaded from the
+    legacy ``sig`` field.  No sender nonce is incorporated (static signature
+    mode).
+
+    If *crl* is provided it takes precedence; otherwise the CRL embedded in
+    *bundle* (if any) is used.
 
     Returns raw protobuf bytes ready to be sent as a ``BINARY`` payload on the
     ``urn:x-cast:com.google.cast.tp.deviceauth`` namespace.

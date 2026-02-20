@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, cast, override
 
 from castvibe import _namespace as ns
-from castvibe._device import Device, LaunchCredentials, ReceiverConfig
-from castvibe.provider import Provider
+from castvibe._device import Device, DeviceIdentity
+from castvibe.provider import LaunchCredentials, Provider
 from tests.conftest import make_cast_message
 
 if TYPE_CHECKING:
@@ -48,19 +48,24 @@ class FakeProvider(Provider):
         self._display_name = display_name
         self._namespaces = namespaces
 
+    @override
     def app_ids(self) -> frozenset[str]:
         return frozenset({"6313CF39"})
 
+    @override
     def display_name(self) -> str:
         return self._display_name
 
+    @override
     def namespaces(self) -> frozenset[str]:
         return self._namespaces
 
+    @override
     async def on_launch(self, session: Any, credentials: Any) -> None:
         _ = session
         _ = credentials
 
+    @override
     async def on_message(
         self, session: Any, namespace: str, data: dict[str, Any]
     ) -> None:
@@ -75,7 +80,7 @@ def _as_connection(connection: RecordingConnection) -> Connection:
 
 def _build_device() -> Device:
     return Device(
-        ReceiverConfig(
+        DeviceIdentity(
             friendly_name="Living Room",
             device_model="Chromecast",
             device_id="device-1234",
@@ -173,7 +178,7 @@ class TestRouting:
 
 
 class TestSessionLifecycle:
-    def test_start_and_stop_session(self) -> None:
+    async def test_start_and_stop_session(self) -> None:
         device = _build_device()
         provider = FakeProvider(
             display_name="Viaplay",
@@ -193,7 +198,7 @@ class TestSessionLifecycle:
         assert ns.MEDIA in session.namespaces
         assert "urn:x-cast:tv.viaplay.chromecast" in session.namespaces
 
-        device.stop_session(session.session_id)
+        _ = await device.stop_session(session.session_id)
 
         assert session.session_id not in device.sessions
         assert session.transport_id not in device.transports

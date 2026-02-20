@@ -6,7 +6,7 @@ for app launch/session wiring and protocol tests.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, override
 
 from castvibe.provider import LaunchCredentials, Provider, ProviderSession
 
@@ -17,15 +17,19 @@ class ViaplayProvider(Provider):
     _APP_IDS = frozenset({"6313CF39", "2DB7CC49"})
     _NAMESPACES = frozenset({"urn:x-cast:tv.viaplay.chromecast"})
 
+    @override
     def app_ids(self) -> frozenset[str]:
         return self._APP_IDS
 
+    @override
     def display_name(self) -> str:
         return "Viaplay"
 
+    @override
     def namespaces(self) -> frozenset[str]:
         return self._NAMESPACES
 
+    @override
     async def on_launch(
         self,
         session: ProviderSession,
@@ -34,6 +38,7 @@ class ViaplayProvider(Provider):
         _ = session
         _ = credentials
 
+    @override
     async def on_message(
         self,
         session: ProviderSession,

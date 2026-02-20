@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, cast, override
 
 from castvibe import _namespace as ns
-from castvibe._device import Device, LaunchCredentials, ReceiverConfig
+from castvibe._device import Device, DeviceIdentity
 from castvibe._handlers import PlatformHandler
 from castvibe._models import (
     DeviceInfoResponse,
@@ -15,7 +15,7 @@ from castvibe._models import (
     ReceiverStatusResponse,
     SetupResponse,
 )
-from castvibe.provider import Provider
+from castvibe.provider import LaunchCredentials, Provider
 from tests.conftest import make_cast_message
 
 if TYPE_CHECKING:
@@ -43,19 +43,24 @@ class RecordingConnection:
 class FakeProvider(Provider):
     """Minimal provider used for LAUNCH/STOP tests."""
 
+    @override
     def app_ids(self) -> frozenset[str]:
         return frozenset({"6313CF39"})
 
+    @override
     def display_name(self) -> str:
         return "Viaplay"
 
+    @override
     def namespaces(self) -> frozenset[str]:
         return frozenset({"urn:x-cast:tv.viaplay.chromecast"})
 
+    @override
     async def on_launch(self, session: Any, credentials: Any) -> None:
         _ = session
         _ = credentials
 
+    @override
     async def on_message(
         self, session: Any, namespace: str, data: dict[str, Any]
     ) -> None:
@@ -70,7 +75,7 @@ def _as_connection(connection: RecordingConnection) -> Connection:
 
 def _build_device(provider_lookup: Callable[[str], Provider | None]) -> Device:
     device = Device(
-        ReceiverConfig(
+        DeviceIdentity(
             friendly_name="Living Room",
             device_model="Chromecast",
             device_id="device-1234",
@@ -126,24 +131,6 @@ class TestPlatformNamespaces:
         )
 
         assert device.transports["receiver-0"].subscriptions == []
-
-    async def test_heartbeat_ping_gets_pong(self) -> None:
-        device = _build_device(lambda _app_id: None)
-        connection = RecordingConnection()
-
-        await _route(
-            device,
-            connection,
-            namespace=ns.HEARTBEAT,
-            payload={"type": "PING"},
-        )
-
-        assert len(connection.sent) == 1
-        source_id, dest_id, namespace, data = connection.sent[0]
-        assert source_id == "receiver-0"
-        assert dest_id == "sender-0"
-        assert namespace == ns.HEARTBEAT
-        assert data == {"type": "PONG"}
 
     async def test_get_status_returns_receiver_status(self) -> None:
         device = _build_device(lambda _app_id: None)

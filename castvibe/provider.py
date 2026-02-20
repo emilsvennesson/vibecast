@@ -4,13 +4,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from importlib.metadata import EntryPoints, entry_points
-from typing import TYPE_CHECKING, Any
+from importlib.metadata import EntryPoint, EntryPoints, entry_points
+from typing import TYPE_CHECKING, Any, cast
 
+import castvibe._namespace as ns
 from castvibe._log import get_logger
 from castvibe._models import MediaRequest, MediaStatus, MediaStatusResponse
-
-from . import _namespace as ns
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -134,16 +133,18 @@ def discover_providers() -> list[Provider]:
     providers: list[Provider] = []
 
     eps = entry_points()
-    discovered: EntryPoints | tuple[Any, ...]
+    discovered: EntryPoints | tuple[EntryPoint, ...]
     if hasattr(eps, "select"):
         discovered = eps.select(group=_ENTRY_POINT_GROUP)
     else:
         get = getattr(eps, "get", None)
-        raw_discovered = get(_ENTRY_POINT_GROUP, ()) if callable(get) else ()
-        if isinstance(raw_discovered, EntryPoints | tuple):
-            discovered = raw_discovered
-        elif isinstance(raw_discovered, list):
-            discovered = tuple(raw_discovered)
+        raw: object = get(_ENTRY_POINT_GROUP, ()) if callable(get) else ()
+        if isinstance(raw, EntryPoints):
+            discovered = raw
+        elif isinstance(raw, list | tuple):
+            discovered = cast(
+                "tuple[EntryPoint, ...]", tuple(cast("list[object]", raw))
+            )
         else:
             discovered = ()
 

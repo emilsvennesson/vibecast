@@ -13,6 +13,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+import castvibe._namespace as ns
 from castvibe._auth import build_auth_response
 from castvibe._framing import FramingError, read_message, write_message
 from castvibe._log import get_logger
@@ -22,8 +23,6 @@ from castvibe._proto.cast_channel_pb2 import (
     HashAlgorithm,
     SignatureAlgorithm,
 )
-
-from . import _namespace as ns
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -81,6 +80,8 @@ class Connection:
         self._reader = reader
         self._writer = writer
         self._bundle = bundle
+        # CRL is captured at connection-accept time; if CRL rotation is
+        # added later, connections should reference the server's CRL instead.
         self._crl = crl
         self._on_message = on_message
         self._on_disconnect = on_disconnect
@@ -222,7 +223,7 @@ class Connection:
 
     async def _handle_heartbeat(self, msg: CastMessage) -> None:
         """Respond to PING with PONG (fast-path, no JSON parsing)."""
-        if msg.payload_type == CastMessage.STRING and "PING" in msg.payload_utf8:
+        if msg.payload_type == CastMessage.STRING and '"PING"' in msg.payload_utf8:
             await self.send_json(
                 source_id=msg.destination_id,
                 dest_id=msg.source_id,

@@ -57,17 +57,15 @@ Optional:
 
 ## Getting fresh Shield certs
 
-If you use the Shield extraction workflow in
-`/Users/emil/dev/gocast/shield-analysis`:
+If you use the Shield extraction workflow from
+[go-cast](https://github.com/tristanpenman/go-cast):
 
 ```bash
-cd /Users/emil/dev/gocast/shield-analysis
+cd /path/to/shield-analysis
 python3 extract_cast_creds.py --output-dir output
 ```
 
-This updates:
-
-- `/Users/emil/dev/gocast/shield-analysis/output/manifest.json`
+This produces `output/manifest.json`.
 
 If your signing daemon is running and you want to add a `sig_sha1` entry to
 that manifest, generate it using the daemon and update the manifest locally.
@@ -80,7 +78,7 @@ Basic:
 
 ```bash
 uv run python -m castvibe \
-  --manifest "/Users/emil/dev/gocast/shield-analysis/output/manifest.json" \
+  --manifest /path/to/manifest.json \
   --name "Living Room" \
   --log-level INFO
 ```
@@ -89,7 +87,7 @@ Bind explicit host/port:
 
 ```bash
 uv run python -m castvibe \
-  --manifest "/Users/emil/dev/gocast/shield-analysis/output/manifest.json" \
+  --manifest /path/to/manifest.json \
   --name "Living Room" \
   --host 0.0.0.0 \
   --port 8009 \

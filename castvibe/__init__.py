@@ -1,6 +1,6 @@
 """castvibe — Python Google Cast receiver implementation."""
 
-# pyright: reportImportCycles=false, reportUnsupportedDunderAll=false
+# pyright: reportUnsupportedDunderAll=false
 
 from castvibe._certificate import CertificateBundle
 from castvibe.provider import LaunchCredentials, Provider, ProviderSession

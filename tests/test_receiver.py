@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import struct
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, override
 
 import pytest
 
@@ -71,15 +71,19 @@ class DummyProvider(Provider):
         self.launch_calls: list[LaunchCredentials] = []
         self.custom_messages: list[tuple[str, dict[str, Any]]] = []
 
+    @override
     def app_ids(self) -> frozenset[str]:
         return frozenset({"DUMMYAPP"})
 
+    @override
     def display_name(self) -> str:
         return "Dummy"
 
+    @override
     def namespaces(self) -> frozenset[str]:
         return frozenset({"urn:x-cast:com.example.dummy"})
 
+    @override
     async def on_launch(
         self,
         session: ProviderSession,
@@ -88,6 +92,7 @@ class DummyProvider(Provider):
         _ = session
         self.launch_calls.append(credentials)
 
+    @override
     async def on_message(
         self,
         session: ProviderSession,
@@ -224,7 +229,7 @@ class TestIntegration:
                 break
             await asyncio.sleep(0.01)
 
-        task.cancel()
+        _ = task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
 

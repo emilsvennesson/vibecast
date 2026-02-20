@@ -8,8 +8,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from castvibe._auth import fetch_crl
-from castvibe._device import Device
-from castvibe._device import ReceiverConfig as DeviceConfig
+from castvibe._device import Device, DeviceIdentity
 from castvibe._discovery import CastAdvertisement
 from castvibe._handlers import PlatformHandler
 from castvibe._log import get_logger
@@ -65,7 +64,7 @@ class CastReceiver:
         )
 
         self.device = Device(
-            DeviceConfig(
+            DeviceIdentity(
                 friendly_name=config.friendly_name,
                 device_model=config.device_model,
                 device_id=device_id,
@@ -149,17 +148,16 @@ class CastReceiver:
         )
 
     async def stop(self) -> None:
-        """Stop sessions, mDNS advertisement, and TLS server."""
+        """Stop sessions, mDNS advertisement, and TLS server.
+
+        Safe to call multiple times; subsequent calls are no-ops.
+        """
+        if not self._started:
+            return
         self._stop_event.set()
 
         for session_id in self.device.session_ids():
-            session = self.device.stop_session(session_id)
-            if session is None:
-                continue
-            try:
-                await session.on_stop()
-            except Exception:
-                log.warning("provider stop callback failed", exc_info=True)
+            _ = await self.device.stop_session(session_id)
 
         advertisement = self._advertisement
         self._advertisement = None
@@ -175,10 +173,9 @@ class CastReceiver:
         """Start receiver and wait until ``stop()`` or cancellation."""
         await self.start()
         try:
-            await self._stop_event.wait()
-        except asyncio.CancelledError:
+            _ = await self._stop_event.wait()
+        finally:
             await self.stop()
-            raise
 
     async def _on_message(self, connection: Connection, msg: CastMessage) -> None:
         await self.device.route_message(connection, msg)

@@ -14,34 +14,34 @@ from castvibe.receiver import CastReceiver, ReceiverConfig
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a castvibe receiver")
-    parser.add_argument(
+    _ = parser.add_argument(
         "--manifest",
         type=Path,
         required=True,
         help="Path to go-cast compatible certificate manifest JSON",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--name",
         required=True,
         help="Friendly receiver name advertised over mDNS",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--model",
         default="Chromecast",
         help="Device model string advertised via mDNS",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--host",
         default="0.0.0.0",
         help="Host/interface to bind the TLS Cast server to",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--port",
         type=int,
         default=8009,
         help="Port to bind the TLS Cast server to",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--log-level",
         default="INFO",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
