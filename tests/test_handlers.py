@@ -10,6 +10,7 @@ from castvibe._device import Device, LaunchCredentials, ReceiverConfig
 from castvibe._handlers import PlatformHandler
 from castvibe._models import (
     DeviceInfoResponse,
+    LaunchErrorResponse,
     MultizoneStatusResponse,
     ReceiverStatusResponse,
     SetupResponse,
@@ -95,6 +96,23 @@ async def _connect_sender(device: Device, connection: RecordingConnection) -> No
 
 
 class TestPlatformNamespaces:
+    async def test_connection_close_removes_subscription(self) -> None:
+        device = _build_device(lambda _app_id: None)
+        connection = RecordingConnection()
+        await _connect_sender(device, connection)
+
+        subscriptions = device.transports["receiver-0"].subscriptions
+        assert len(subscriptions) == 1
+
+        await _route(
+            device,
+            connection,
+            namespace=ns.CONNECTION,
+            payload={"type": "CLOSE"},
+        )
+
+        assert device.transports["receiver-0"].subscriptions == []
+
     async def test_heartbeat_ping_gets_pong(self) -> None:
         device = _build_device(lambda _app_id: None)
         connection = RecordingConnection()
@@ -203,6 +221,30 @@ class TestPlatformNamespaces:
         assert namespace == ns.RECEIVER
         response = ReceiverStatusResponse.model_validate(data)
         assert len(response.status.applications) == 1
+
+    async def test_launch_unavailable_app_returns_launch_error(self) -> None:
+        device = _build_device(lambda _app_id: None)
+        connection = RecordingConnection()
+
+        await _route(
+            device,
+            connection,
+            namespace=ns.RECEIVER,
+            payload={
+                "type": "LAUNCH",
+                "requestId": 41,
+                "appId": "UNKNOWN",
+            },
+        )
+
+        assert len(connection.sent) == 1
+        source_id, dest_id, namespace, data = connection.sent[0]
+        assert source_id == "receiver-0"
+        assert dest_id == "sender-0"
+        assert namespace == ns.RECEIVER
+        response = LaunchErrorResponse.model_validate(data)
+        assert response.request_id == 41
+        assert response.reason == "Application not available"
 
     async def test_stop_removes_session_and_broadcasts_status(self) -> None:
         provider = FakeProvider()

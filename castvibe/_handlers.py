@@ -287,8 +287,7 @@ class PlatformHandler:
                 name=self._device.config.friendly_name,
                 version=8,
                 device_info=SetupDeviceInfo(
-                    ssdp_udn=self._device.config.ssdp_udn
-                    or self._device.config.device_id,
+                    ssdp_udn=self._device.config.ssdp_udn,
                 ),
             ),
         )
