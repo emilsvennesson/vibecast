@@ -70,6 +70,7 @@ class DummyProvider(Provider):
     def __init__(self) -> None:
         self.launch_calls: list[LaunchCredentials] = []
         self.custom_messages: list[tuple[str, dict[str, Any]]] = []
+        self.stop_calls = 0
 
     @override
     def app_ids(self) -> frozenset[str]:
@@ -101,6 +102,11 @@ class DummyProvider(Provider):
     ) -> None:
         _ = session
         self.custom_messages.append((namespace, data))
+
+    @override
+    async def on_stop(self, session: ProviderSession) -> None:
+        _ = session
+        self.stop_calls += 1
 
 
 def _patch_runtime(monkeypatch: Any, *, crl: bytes = b"test-crl") -> None:
@@ -323,4 +329,13 @@ class TestIntegration:
 
         writer.close()
         await writer.wait_closed()
+
+        for _ in range(50):
+            if provider.stop_calls == 1 and receiver.device.session_ids() == []:
+                break
+            await asyncio.sleep(0.01)
+
+        assert provider.stop_calls == 1
+        assert receiver.device.session_ids() == []
+
         await receiver.stop()

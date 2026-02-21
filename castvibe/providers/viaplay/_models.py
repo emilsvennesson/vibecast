@@ -31,7 +31,7 @@ class SubtitleState(CastModel):
 
     active_language_code: str | None = None
     available_language_codes: list[str] = []
-    enabled: bool | None = None
+    enabled: bool | None = True
 
 
 class AudioTrackState(CastModel):
@@ -97,6 +97,9 @@ class AuthorizationDone(CastModel):
     """``AUTHORIZATION_DONE`` — sender signals the user activated the device code."""
 
     type: Literal["AUTHORIZATION_DONE"] = "AUTHORIZATION_DONE"
+    success: bool = True
+    user_id: str = ""
+    profile_id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +128,7 @@ class AuthorizationRequiredMessage(CastModel):
     """``AUTHORIZATION_REQUIRED`` broadcast when device-code auth is needed."""
 
     type: Literal["AUTHORIZATION_REQUIRED"] = "AUTHORIZATION_REQUIRED"
+    authorization_url: str | None = None
     receiver_state: ViaplayReceiverState
 
 
@@ -345,6 +349,7 @@ class ViaplayDeviceAuthResponse(BaseModel):
 
     user_code: str = Field(default="", alias="userCode")
     device_token: str = Field(default="", alias="deviceToken")
+    verification_url: str = Field(default="", alias="verificationUrl")
     links: DeviceAuthLinks | None = Field(default=None, alias="_links")
 
 

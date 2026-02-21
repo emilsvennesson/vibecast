@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -26,7 +27,12 @@ from castvibe.provider import (
     MediaLoadInfo,
     ProviderSession,
 )
-from castvibe.providers.viaplay._api import StreamInfo
+from castvibe.providers.viaplay._api import (
+    DeviceAuthInfo,
+    SessionCheckResult,
+    StreamInfo,
+    ViaplayUser,
+)
 from castvibe.providers.viaplay._provider import _NS_VIAPLAY, ViaplayProvider
 
 # ---------------------------------------------------------------------------
@@ -141,6 +147,7 @@ class TestOnSenderConnected:
         assert second_ns == _NS_VIAPLAY
         assert second_data["type"] == "RECEIVER_STATE"
         assert second_data["receiverState"]["status"] == "IDLE"
+        assert second_data["receiverState"]["isScrubbable"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +181,204 @@ class TestSetupInfo:
 
         # The auth flow coroutine should have been awaited via the task
         mock_auth.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# on_message — AUTHORIZATION_DONE
+# ---------------------------------------------------------------------------
+
+
+class TestAuthorizationDone:
+    async def test_success_false_does_not_trigger_completion(
+        self, tmp_path: Any
+    ) -> None:
+        p = ViaplayProvider(data_dir=tmp_path)
+        session, _, _ = _make_session()
+        await p.on_launch(session, LaunchCredentials())
+
+        with patch.object(
+            p,
+            "_complete_device_auth",
+            new_callable=AsyncMock,
+        ) as mock_complete:
+            await p.on_message(
+                session,
+                _NS_VIAPLAY,
+                {
+                    "type": "AUTHORIZATION_DONE",
+                    "success": False,
+                },
+            )
+            await asyncio.sleep(0)
+
+        mock_complete.assert_not_awaited()
+
+    async def test_success_true_triggers_completion(self, tmp_path: Any) -> None:
+        p = ViaplayProvider(data_dir=tmp_path)
+        session, _, _ = _make_session()
+        await p.on_launch(session, LaunchCredentials())
+
+        with patch.object(
+            p,
+            "_complete_device_auth",
+            new_callable=AsyncMock,
+        ) as mock_complete:
+            await p.on_message(
+                session,
+                _NS_VIAPLAY,
+                {
+                    "type": "AUTHORIZATION_DONE",
+                    "success": True,
+                },
+            )
+            state = p._sessions["sess-1"]  # noqa: SLF001
+            if state.auth_task:
+                await state.auth_task
+
+        mock_complete.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# _complete_device_auth
+# ---------------------------------------------------------------------------
+
+
+class TestCompleteDeviceAuth:
+    async def test_does_not_authenticate_without_session_user(
+        self, tmp_path: Any
+    ) -> None:
+        p = ViaplayProvider(data_dir=tmp_path)
+        session, broadcast, _ = _make_session()
+        await p.on_launch(session, LaunchCredentials())
+
+        state = p._sessions["sess-1"]  # noqa: SLF001
+        state.user_id = "expected-user"
+        state.auth_pending = True
+
+        with patch.object(
+            state.api,
+            "check_session",
+            new_callable=AsyncMock,
+            return_value=SessionCheckResult(user=None),
+        ):
+            await p._complete_device_auth(session, state)
+
+        assert state.authenticated is False
+        assert state.auth_pending is True
+        assert state.auth_event.is_set() is False
+        broadcast.assert_not_awaited()
+
+    async def test_does_not_authenticate_on_user_mismatch(self, tmp_path: Any) -> None:
+        p = ViaplayProvider(data_dir=tmp_path)
+        session, broadcast, _ = _make_session()
+        await p.on_launch(session, LaunchCredentials())
+
+        state = p._sessions["sess-1"]  # noqa: SLF001
+        state.user_id = "expected-user"
+        state.auth_pending = True
+
+        with patch.object(
+            state.api,
+            "check_session",
+            new_callable=AsyncMock,
+            return_value=SessionCheckResult(user=ViaplayUser(user_id="other-user")),
+        ):
+            await p._complete_device_auth(session, state)
+
+        assert state.authenticated is False
+        assert state.auth_pending is True
+        assert state.auth_event.is_set() is False
+        broadcast.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# _run_auth_flow
+# ---------------------------------------------------------------------------
+
+
+class TestAuthFlow:
+    async def test_persistent_login_mismatch_falls_back_to_device_auth(
+        self, tmp_path: Any
+    ) -> None:
+        p = ViaplayProvider(data_dir=tmp_path)
+        session, _, _ = _make_session()
+        await p.on_launch(session, LaunchCredentials())
+
+        state = p._sessions["sess-1"]  # noqa: SLF001
+        state.user_id = "expected-user"
+        root = SessionCheckResult(persistent_login_url="https://login.viaplay.com/pl")
+        mismatch = SessionCheckResult(user=ViaplayUser(user_id="other-user"))
+
+        with (
+            patch.object(
+                state.api,
+                "check_session",
+                new_callable=AsyncMock,
+                side_effect=[root, mismatch],
+            ),
+            patch.object(
+                state.api,
+                "persistent_login",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                p,
+                "_start_device_auth",
+                new_callable=AsyncMock,
+            ) as mock_start,
+        ):
+            await p._run_auth_flow(session, state)
+
+        assert state.authenticated is False
+        mock_start.assert_awaited_once_with(session, state, root)
+
+
+# ---------------------------------------------------------------------------
+# _start_device_auth
+# ---------------------------------------------------------------------------
+
+
+class TestStartDeviceAuth:
+    async def test_uses_expanded_activate_url_without_duplicating_user_code(
+        self, tmp_path: Any
+    ) -> None:
+        p = ViaplayProvider(data_dir=tmp_path)
+        session, broadcast, _ = _make_session()
+        await p.on_launch(session, LaunchCredentials())
+
+        state = p._sessions["sess-1"]  # noqa: SLF001
+        state.user_id = "user-1"
+        state.profile_id = "profile-1"
+
+        activate_url = (
+            "https://login.viaplay.com/api/device/activate"
+            "?deviceKey=chromecastgoogletv4k-se&userCode=ABCD"
+        )
+        auth_info = DeviceAuthInfo(
+            user_code="ABCD",
+            device_token="dt-1",
+            activate_url=activate_url,
+            authorized_url="https://login.viaplay.com/api/device/authorized{?deviceId,deviceToken,userCode}",
+        )
+
+        with (
+            patch.object(
+                state.api,
+                "get_device_authorization",
+                new_callable=AsyncMock,
+                return_value=auth_info,
+            ),
+            patch.object(p, "_poll_for_authorization", new_callable=AsyncMock),
+        ):
+            await p._start_device_auth(session, state, SessionCheckResult())
+
+        # 1st broadcast is AUTHORIZATION_REQUIRED
+        auth_required = broadcast.await_args_list[0].args[1]
+        assert auth_required["type"] == "AUTHORIZATION_REQUIRED"
+        assert auth_required["authorizationUrl"] == activate_url
+        assert auth_required["receiverState"]["authorizationUrl"] == activate_url
+        assert auth_required["receiverState"]["userCode"] == "ABCD"
 
 
 # ---------------------------------------------------------------------------

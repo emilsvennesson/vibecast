@@ -47,6 +47,7 @@ class FakeProvider(Provider):
     def __init__(self, display_name: str, namespaces: frozenset[str]) -> None:
         self._display_name = display_name
         self._namespaces = namespaces
+        self.stop_calls = 0
 
     @override
     def app_ids(self) -> frozenset[str]:
@@ -72,6 +73,11 @@ class FakeProvider(Provider):
         _ = session
         _ = namespace
         _ = data
+
+    @override
+    async def on_stop(self, session: Any) -> None:
+        _ = session
+        self.stop_calls += 1
 
 
 def _as_connection(connection: RecordingConnection) -> Connection:
@@ -114,10 +120,10 @@ class TestSubscriptions:
 
         assert len(device.transports["receiver-0"].subscriptions) == 3
 
-        device.remove_subscription(conn1, "sender-1")
+        _ = device.remove_subscription(conn1, "sender-1")
         assert len(device.transports["receiver-0"].subscriptions) == 2
 
-        device.remove_all_subscriptions(conn1)
+        _ = device.remove_all_subscriptions(conn1)
         subscriptions = device.transports["receiver-0"].subscriptions
         assert len(subscriptions) == 1
         assert subscriptions[0].sender_id == "sender-3"
@@ -212,3 +218,37 @@ class TestSessionLifecycle:
 
         assert first.transport_id == "pid-1"
         assert second.transport_id == "pid-2"
+
+    async def test_stop_orphaned_session_when_last_subscription_removed(self) -> None:
+        device = _build_device()
+        provider = FakeProvider(display_name="Viaplay", namespaces=frozenset())
+        session = device.start_session("6313CF39", provider, LaunchCredentials())
+
+        conn = _as_connection(RecordingConnection())
+        device.add_subscription(conn, "sender-1", session.transport_id)
+
+        transport_id = device.remove_subscription(conn, "sender-1")
+        assert transport_id == session.transport_id
+
+        stopped = await device.stop_orphaned_sessions({session.transport_id})
+
+        assert stopped == [session.session_id]
+        assert session.session_id not in device.sessions
+        assert provider.stop_calls == 1
+
+    async def test_keeps_session_when_other_subscribers_remain(self) -> None:
+        device = _build_device()
+        provider = FakeProvider(display_name="Viaplay", namespaces=frozenset())
+        session = device.start_session("6313CF39", provider, LaunchCredentials())
+
+        conn1 = _as_connection(RecordingConnection())
+        conn2 = _as_connection(RecordingConnection())
+        device.add_subscription(conn1, "sender-1", session.transport_id)
+        device.add_subscription(conn2, "sender-2", session.transport_id)
+
+        _ = device.remove_subscription(conn1, "sender-1")
+        stopped = await device.stop_orphaned_sessions({session.transport_id})
+
+        assert stopped == []
+        assert session.session_id in device.sessions
+        assert provider.stop_calls == 0

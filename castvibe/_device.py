@@ -142,7 +142,9 @@ class AppSession(TransportHandler):
             await self.provider.on_sender_connected(context, sender_id)
             return
 
-        self.device.remove_subscription(connection, sender_id)
+        removed_transport_id = self.device.remove_subscription(connection, sender_id)
+        if removed_transport_id is not None:
+            _ = await self.device.stop_orphaned_sessions({removed_transport_id})
 
     async def _handle_media_message(
         self,
@@ -287,35 +289,47 @@ class Device:
             return
 
         if current_transport is not None:
-            self.remove_subscription(connection, sender_id)
+            _ = self.remove_subscription(connection, sender_id)
 
         self._subscriptions[key] = transport_id
         transport.subscriptions.append(
             Subscription(connection=connection, sender_id=sender_id)
         )
 
-    def remove_subscription(self, connection: Connection, sender_id: str) -> None:
-        """Remove subscription for a sender on a connection."""
+    def remove_subscription(self, connection: Connection, sender_id: str) -> str | None:
+        """Remove subscription for a sender on a connection.
+
+        Returns the transport ID the sender was subscribed to, or ``None``
+        when no subscription existed.
+        """
         key = (connection, sender_id)
         transport_id = self._subscriptions.pop(key, None)
         if transport_id is None:
-            return
+            return None
 
         transport = self.transports.get(transport_id)
         if transport is None:
-            return
+            return transport_id
 
         transport.subscriptions = [
             sub
             for sub in transport.subscriptions
             if not (sub.connection is connection and sub.sender_id == sender_id)
         ]
+        return transport_id
 
-    def remove_all_subscriptions(self, connection: Connection) -> None:
-        """Remove every subscription belonging to *connection*."""
+    def remove_all_subscriptions(self, connection: Connection) -> set[str]:
+        """Remove every subscription belonging to *connection*.
+
+        Returns all transport IDs that were affected.
+        """
         keys = [key for key in self._subscriptions if key[0] is connection]
+        transport_ids: set[str] = set()
         for _, sender_id in keys:
-            self.remove_subscription(connection, sender_id)
+            transport_id = self.remove_subscription(connection, sender_id)
+            if transport_id is not None:
+                transport_ids.add(transport_id)
+        return transport_ids
 
     # ------------------------------------------------------------------
     # Message routing
@@ -421,6 +435,38 @@ class Device:
             )
         self.unregister_transport(session.transport_id)
         return session
+
+    async def stop_orphaned_sessions(
+        self,
+        transport_ids: set[str] | None = None,
+    ) -> list[str]:
+        """Stop app sessions that no longer have sender subscriptions.
+
+        If *transport_ids* is provided, only sessions for those transports are
+        evaluated.
+        """
+        stopped: list[str] = []
+
+        for session_id, session in list(self.sessions.items()):
+            if transport_ids is not None and session.transport_id not in transport_ids:
+                continue
+
+            transport = self.transports.get(session.transport_id)
+            if transport is None or transport.subscriptions:
+                continue
+
+            _ = await self.stop_session(session_id)
+            stopped.append(session_id)
+
+        if stopped and "receiver-0" in self.transports:
+            status = build_receiver_status(self)
+            await self.broadcast(
+                source_id="receiver-0",
+                namespace=ns.RECEIVER,
+                data=status.model_dump(exclude_none=True),
+            )
+
+        return stopped
 
     def session_ids(self) -> list[str]:
         """Return the current app session IDs."""

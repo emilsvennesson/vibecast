@@ -35,6 +35,15 @@ _USER_AGENT = (
     "Safari/537.36 CrKey/1.56.500000 DeviceType/AndroidTV"
 )
 
+_ORIGIN = "https://viaplay-chromecast.viaplay.com"
+_REFERER = "https://viaplay-chromecast.viaplay.com/"
+_CAST_DEVICE_CAPABILITIES = (
+    '{"display_supported":true,'
+    '"hi_res_audio_supported":false,'
+    '"remote_control_input_supported":true,'
+    '"touch_input_supported":false}'
+)
+
 _DEVICE_CODE_FALLBACK = "https://login.viaplay.com/api/device/code{?deviceKey,deviceId}"
 
 
@@ -154,6 +163,7 @@ class ViaplayAPI:
             "deviceKey": self.device_key,
             "deviceType": "chromecast",
             "deviceName": "chromecast-receiver-v3",
+            "userAgent": _USER_AGENT,
             "profileId": self._profile_id,
             "cse": "true",
         }
@@ -163,6 +173,17 @@ class ViaplayAPI:
 
     def _expand(self, template: str, extra: dict[str, str] | None = None) -> str:
         return uri_expand(template, var_dict=self._template_vars(extra))
+
+    @staticmethod
+    def _default_headers() -> dict[str, str]:
+        return {
+            "User-Agent": _USER_AGENT,
+            "Accept": "*/*",
+            "Accept-Language": "en-US",
+            "Origin": _ORIGIN,
+            "Referer": _REFERER,
+            "CAST-DEVICE-CAPABILITIES": _CAST_DEVICE_CAPABILITIES,
+        }
 
     # -- HTTP helpers --------------------------------------------------------
 
@@ -177,7 +198,7 @@ class ViaplayAPI:
         if expand:
             url = self._expand(url, extra_vars)
         session = self._ensure_session()
-        async with session.get(url, headers={"User-Agent": _USER_AGENT}) as resp:
+        async with session.get(url, headers=self._default_headers()) as resp:
             body = await resp.json(content_type=None)
             return body, resp.status
 
@@ -192,7 +213,7 @@ class ViaplayAPI:
         if expand:
             url = self._expand(url, extra_vars)
         session = self._ensure_session()
-        async with session.get(url, headers={"User-Agent": _USER_AGENT}) as resp:
+        async with session.get(url, headers=self._default_headers()) as resp:
             body = await resp.read()
             return body, resp.status
 
@@ -299,7 +320,15 @@ class ViaplayAPI:
             raise RuntimeError(msg)
 
         links = resp.links
-        activate_url = links.activate.href if links and links.activate else ""
+        activate_url = ""
+        if links and links.activate:
+            activate_url = self._expand(
+                links.activate.href,
+                {"userCode": resp.user_code},
+            )
+        elif resp.verification_url:
+            activate_url = resp.verification_url
+
         authorized_url = links.authorized.href if links and links.authorized else ""
 
         log.info("device auth: code=%s", resp.user_code)
@@ -345,8 +374,10 @@ class ViaplayAPI:
 
         Raises :class:`RuntimeError` if no stream URL can be found.
         """
-        body, status = await self._get(play_url)
+        resolved_url = self._expand(play_url)
+        body, status = await self._get(resolved_url, expand=False)
         if status != 200:
+            log.debug("stream fetch returned %d for %s", status, resolved_url)
             msg = f"stream fetch failed with status {status}"
             raise RuntimeError(msg)
 

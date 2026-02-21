@@ -39,6 +39,7 @@ from datetime import UTC, datetime
 from itertools import count
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from castvibe._auth import build_auth_response, fetch_crl
 from castvibe._certificate import CertificateBundle
@@ -60,6 +61,7 @@ from castvibe._util import parse_json_payload
 # ---------------------------------------------------------------------------
 
 _seq = count(1)
+_DEFAULT_DEVICE_ID_PATH = Path.home() / ".castvibe" / "capture_proxy_device_id"
 
 
 # ---------------------------------------------------------------------------
@@ -547,6 +549,14 @@ def _parse_args() -> argparse.Namespace:
         help="Device model for mDNS TXT record",
     )
     _ = p.add_argument(
+        "--device-id",
+        default=None,
+        help=(
+            "Stable mDNS device ID. If omitted, capture_provider persists one at "
+            "~/.castvibe/capture_proxy_device_id"
+        ),
+    )
+    _ = p.add_argument(
         "--no-mdns", action="store_true", help="Disable mDNS advertisement"
     )
     _ = p.add_argument(
@@ -565,6 +575,18 @@ def _parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
+
+def _load_or_create_device_id(path: Path) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        existing = path.read_text(encoding="utf-8").strip()
+        if existing:
+            return existing
+
+    device_id = uuid4().hex
+    _ = path.write_text(device_id, encoding="utf-8")
+    return device_id
 
 
 async def _run(args: argparse.Namespace) -> None:
@@ -689,9 +711,7 @@ async def _run(args: argparse.Namespace) -> None:
     # -- mDNS advertisement -------------------------------------------------
     advertisement: CastAdvertisement | None = None
     if not args.no_mdns:
-        from uuid import uuid4
-
-        device_id = str(uuid4())
+        device_id = args.device_id or _load_or_create_device_id(_DEFAULT_DEVICE_ID_PATH)
         advertisement = CastAdvertisement(
             friendly_name=args.friendly_name,
             device_model=args.device_model,

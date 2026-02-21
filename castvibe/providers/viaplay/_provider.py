@@ -205,6 +205,9 @@ class ViaplayProvider(Provider):
             case SetupInfo():
                 await self._handle_setup_info(session, state, msg)
             case AuthorizationDone():
+                if not msg.success:
+                    log.debug("ignoring AUTHORIZATION_DONE with success=false")
+                    return
                 await _cancel_task(state.auth_task)
                 state.auth_task = asyncio.create_task(
                     self._complete_device_auth(session, state)
@@ -305,7 +308,8 @@ class ViaplayProvider(Provider):
         state.user_id = msg.user_id
         state.profile_id = msg.profile_id
         state.country_code = msg.country_code or "se"
-        state.receiver_name = msg.receiver_name
+        if msg.receiver_name:
+            state.receiver_name = msg.receiver_name
         state.receiver_language_code = msg.receiver_language_code
 
         state.api.set_setup_info(
@@ -349,14 +353,10 @@ class ViaplayProvider(Provider):
                         )
                         await self._send_session_ok(session, state)
                         return
-                    # Login returned 200 but session user doesn't match.
                     log.warning(
-                        "persistent login succeeded but session user mismatch (expected %s); proceeding anyway",
+                        "persistent login succeeded but session user mismatch (expected %s); continuing auth flow",
                         state.user_id,
                     )
-                    self._mark_authenticated(state)
-                    await self._send_session_ok(session, state)
-                    return
 
             # 3) Try token login
             token = state.credentials.credentials or ""
@@ -372,12 +372,9 @@ class ViaplayProvider(Provider):
                         await self._send_session_ok(session, state)
                         return
                     log.warning(
-                        "token login succeeded but session user mismatch (expected %s); proceeding anyway",
+                        "token login succeeded but session user mismatch (expected %s); continuing auth flow",
                         state.user_id,
                     )
-                    self._mark_authenticated(state)
-                    await self._send_session_ok(session, state)
-                    return
 
             # 4) Device code fallback
             await self._start_device_auth(session, state, result)
@@ -410,9 +407,6 @@ class ViaplayProvider(Provider):
         state.auth_pending = True
 
         activate_url = auth_info.activate_url
-        if activate_url and auth_info.user_code:
-            sep = "&" if "?" in activate_url else "?"
-            activate_url = f"{activate_url}{sep}userCode={auth_info.user_code}"
 
         # Build receiver state for AUTHORIZATION_REQUIRED
         rs = self._build_viaplay_receiver_state(
@@ -422,7 +416,15 @@ class ViaplayProvider(Provider):
             user_code=auth_info.user_code,
         )
 
-        auth_msg = AuthorizationRequiredMessage(receiver_state=rs)
+        auth_msg = AuthorizationRequiredMessage(
+            authorization_url=activate_url or None,
+            receiver_state=rs,
+        )
+        log.debug(
+            "broadcasting AUTHORIZATION_REQUIRED (user_code=%s, authorization_url=%s)",
+            auth_info.user_code,
+            activate_url,
+        )
         await session.broadcast_custom(
             _NS_VIAPLAY, auth_msg.model_dump(exclude_none=True)
         )
@@ -456,7 +458,8 @@ class ViaplayProvider(Provider):
                 activated = await state.api.poll_authorized(auth_info)
                 if activated:
                     await self._complete_device_auth(session, state)
-                    return
+                    if state.authenticated:
+                        return
             except Exception:
                 log.debug("poll authorized error", exc_info=True)
 
@@ -475,6 +478,18 @@ class ViaplayProvider(Provider):
 
         try:
             result = await state.api.check_session()
+            if result.user is None:
+                log.debug("complete device auth: no session user yet")
+                return
+
+            if result.user.user_id != state.user_id:
+                log.warning(
+                    "complete device auth user mismatch (expected %s, got %s)",
+                    state.user_id,
+                    result.user.user_id,
+                )
+                return
+
             first = result.user.first_name if result.user else ""
             last = result.user.last_name if result.user else ""
             self._mark_authenticated(state, first, last)
@@ -614,7 +629,7 @@ class ViaplayProvider(Provider):
     ) -> ViaplayReceiverState:
         return ViaplayReceiverState(
             status=status,
-            is_scrubbable=status == "PLAYING",
+            is_scrubbable=True,
             pne_in_progress=False,
             user_id=state.user_id or None,
             user_profile=UserProfile(id=state.profile_id or None)

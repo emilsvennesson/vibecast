@@ -85,6 +85,12 @@ class TestTemplateExpansion:
         )
         assert "accessToken=tok123" in result
 
+    async def test_expand_includes_user_agent_var(self, api: ViaplayAPI) -> None:
+        result = api._expand(  # noqa: SLF001
+            "https://example.com{?userAgent}",
+        )
+        assert "userAgent=" in result
+
 
 # ---------------------------------------------------------------------------
 # check_session
@@ -197,6 +203,32 @@ class TestGetDeviceAuthorization:
         assert info.device_token == "dt-999"
         assert info.activate_url == "https://viaplay.com/activate"
         assert info.authorized_url == "https://login.viaplay.com/authorized"
+
+    async def test_expands_templated_activate_url(self, api: ViaplayAPI) -> None:
+        root_result = SessionCheckResult(
+            device_auth_url="https://login.viaplay.com/api/device/code{?deviceKey,deviceId}",
+        )
+        auth_body = {
+            "userCode": "ABCD1234",
+            "deviceToken": "dt-999",
+            "verificationUrl": "https://viaplay.com/activate",
+            "_links": {
+                "viaplay:activate": {
+                    "href": "https://login.viaplay.com/api/device/activate{?deviceKey,userCode}"
+                },
+                "viaplay:authorized": {
+                    "href": "https://login.viaplay.com/api/device/authorized{?deviceId,deviceToken,userCode}"
+                },
+            },
+        }
+        with aioresponses() as m:
+            m.get(re.compile(r"https://login\.viaplay\.com/.*"), payload=auth_body)
+            info = await api.get_device_authorization(root_result)
+
+        assert info.activate_url == (
+            "https://login.viaplay.com/api/device/activate"
+            "?deviceKey=chromecastgoogletv4k-se&userCode=ABCD1234"
+        )
 
     async def test_raises_on_missing_user_code(self, api: ViaplayAPI) -> None:
         root_result = SessionCheckResult(

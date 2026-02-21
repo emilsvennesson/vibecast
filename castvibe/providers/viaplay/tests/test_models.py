@@ -73,6 +73,19 @@ class TestAuthorizationDone:
         dumped = msg.model_dump(exclude_none=True)
         assert dumped["type"] == "AUTHORIZATION_DONE"
 
+    def test_parses_success_flag(self) -> None:
+        msg = AuthorizationDone.model_validate(
+            {
+                "type": "AUTHORIZATION_DONE",
+                "success": False,
+                "userId": "u1",
+                "profileId": "p1",
+            }
+        )
+        assert msg.success is False
+        assert msg.user_id == "u1"
+        assert msg.profile_id == "p1"
+
 
 class TestReceiverStateMessage:
     def test_defaults(self) -> None:
@@ -116,9 +129,15 @@ class TestAuthorizationRequiredMessage:
             user_code="ABC123",
             authorization_url="https://viaplay.com/activate?userCode=ABC123",
         )
-        msg = AuthorizationRequiredMessage(receiver_state=rs)
+        msg = AuthorizationRequiredMessage(
+            authorization_url="https://viaplay.com/activate?userCode=ABC123",
+            receiver_state=rs,
+        )
         dumped = msg.model_dump(exclude_none=True)
         assert dumped["type"] == "AUTHORIZATION_REQUIRED"
+        assert (
+            dumped["authorizationUrl"] == "https://viaplay.com/activate?userCode=ABC123"
+        )
         assert dumped["receiverState"]["userCode"] == "ABC123"
 
 
