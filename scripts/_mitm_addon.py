@@ -10,16 +10,14 @@ the shared capture log file (the same file the Cast proxy writes to).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
 from datetime import UTC, datetime
 from itertools import count
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from mitmproxy import http
+from typing import Any
 
 #: Maximum response body size to include inline (64 KiB).
 _MAX_BODY_SIZE = 64 * 1024
@@ -79,6 +77,15 @@ def _decode_body(raw: bytes | None, content_type: str) -> Any:
     return text
 
 
+def _capture_url(flow: Any) -> str:
+    """Return a capture URL that prefers the logical request hostname."""
+    request = flow.request
+    pretty_url = getattr(request, "pretty_url", "")
+    if isinstance(pretty_url, str) and pretty_url:
+        return pretty_url
+    return request.url
+
+
 class CaptureAddon:
     """Writes each HTTP flow to the shared JSON Lines capture log."""
 
@@ -101,7 +108,18 @@ class CaptureAddon:
             )
         self._seq = count(1)
 
-    def response(self, flow: http.HTTPFlow) -> None:
+    def done(self) -> None:
+        """Called by mitmproxy when the addon is shutting down."""
+        f = self._file
+        if f is None:
+            return
+        with contextlib.suppress(Exception):
+            f.flush()
+        with contextlib.suppress(Exception):
+            f.close()
+        self._file = None
+
+    def response(self, flow: Any) -> None:
         """Called when a complete request/response pair is available."""
         if self._file is None:
             return
@@ -118,7 +136,7 @@ class CaptureAddon:
             "seq": next(self._seq),
             "layer": "http",
             "method": flow.request.method,
-            "url": flow.request.url,
+            "url": _capture_url(flow),
             "request_headers": dict(flow.request.headers),
             "request_body": _decode_body(flow.request.get_content(), req_ct),
             "status": response.status_code,
