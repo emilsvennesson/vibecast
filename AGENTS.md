@@ -12,6 +12,11 @@ receiver. It accepts TLS connections from iOS/Android/Chrome Cast senders,
 performs device authentication, handles the Cast platform protocol, and delegates
 app-specific behavior to modular **providers** (e.g. Viaplay).
 
+## Backward Compatibility
+
+Do not preserve backward compatibility by default; if a direct API or behavior
+change is clearly better for the project, implement it directly.
+
 ## Reference Implementations
 
 Two existing codebases serve as implementation references. **Do not port code
