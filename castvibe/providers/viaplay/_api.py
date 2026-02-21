@@ -16,6 +16,7 @@ from typing import Any
 import aiohttp
 from uritemplate import expand as uri_expand
 
+from castvibe._models import StreamType
 from castvibe.providers.viaplay._models import (
     ViaplayAuthorizedPollResponse,
     ViaplayDeviceAuthResponse,
@@ -87,6 +88,8 @@ class StreamInfo:
 
     url: str
     content_type: str
+    stream_type: StreamType | None = None
+    duration: float | None = None
     title: str | None = None
     drm_license_url: str | None = None
     fallback_urls: tuple[str, ...] = ()
@@ -382,6 +385,8 @@ class ViaplayAPI:
             raise RuntimeError(msg)
 
         resp = ViaplayStreamResponse.model_validate(body)
+        stream_type = self._resolve_stream_type(resp, play_url)
+        duration = self._normalize_duration(resp.duration)
         title = resp.product.content.title if resp.product else None
         drm_url = self._extract_drm_url(resp)
         fallbacks = self._extract_fallbacks(resp)
@@ -390,6 +395,8 @@ class ViaplayAPI:
             return StreamInfo(
                 url=url,
                 content_type=content_type,
+                stream_type=stream_type,
+                duration=duration,
                 title=title,
                 drm_license_url=drm_url,
                 fallback_urls=fallbacks,
@@ -433,6 +440,40 @@ class ViaplayAPI:
         if resp.links.license_link:
             return resp.links.license_link.href
         return None
+
+    @staticmethod
+    def _resolve_stream_type(
+        resp: ViaplayStreamResponse,
+        play_url: str,
+    ) -> StreamType | None:
+        """Infer Cast stream type from API response and play URL."""
+        if resp.product and resp.product.stream_type:
+            raw = resp.product.stream_type.upper()
+            if raw == "LIVE":
+                return StreamType.LIVE
+            if raw in {"VOD", "BUFFERED"}:
+                return StreamType.BUFFERED
+
+        lowered = play_url.lower()
+        if "bymediaguid" in lowered or "play-live." in lowered:
+            return StreamType.LIVE
+        if "byguid" in lowered:
+            return StreamType.BUFFERED
+
+        return None
+
+    @staticmethod
+    def _normalize_duration(raw_duration: float) -> float | None:
+        """Normalize Viaplay duration to seconds.
+
+        Viaplay responses are inconsistent: some return seconds, while others
+        return milliseconds. We treat very large values as milliseconds.
+        """
+        if raw_duration <= 0:
+            return None
+        if raw_duration >= 100_000:
+            return raw_duration / 1000
+        return raw_duration
 
     @staticmethod
     def _extract_fallbacks(resp: ViaplayStreamResponse) -> tuple[str, ...]:

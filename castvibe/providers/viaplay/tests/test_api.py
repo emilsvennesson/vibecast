@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 import pytest
 from aioresponses import aioresponses
 
+from castvibe._models import StreamType
 from castvibe.providers.viaplay._api import (
     DeviceAuthInfo,
     SessionCheckResult,
@@ -419,6 +420,62 @@ class TestFetchStream:
             info = await api.fetch_stream("https://x")
 
         assert info.title == "My Show"
+
+    async def test_extracts_stream_type_and_duration_from_product(
+        self, api: ViaplayAPI
+    ) -> None:
+        body = {
+            "duration": 2535.6,
+            "product": {
+                "streamType": "VOD",
+                "content": {"title": "Episode"},
+            },
+            "contentUrl": "https://cdn.example.com/video.mpd",
+            "contentType": "application/dash+xml",
+        }
+        with aioresponses() as m:
+            m.get(re.compile(r".*"), payload=body)
+            info = await api.fetch_stream(
+                "https://play.viaplay.com/api/stream/byguid{?deviceId}"
+            )
+
+        assert info.stream_type == StreamType.BUFFERED
+        assert info.duration == pytest.approx(2535.6)
+
+    async def test_normalizes_millisecond_duration(self, api: ViaplayAPI) -> None:
+        body = {
+            "duration": 2535648,
+            "product": {
+                "streamType": "VOD",
+                "content": {"title": "Episode"},
+            },
+            "contentUrl": "https://cdn.example.com/video.mpd",
+            "contentType": "application/dash+xml",
+        }
+        with aioresponses() as m:
+            m.get(re.compile(r".*"), payload=body)
+            info = await api.fetch_stream(
+                "https://play.viaplay.com/api/stream/byguid{?deviceId}"
+            )
+
+        assert info.duration == pytest.approx(2535.648)
+
+    async def test_inferrs_live_stream_type_from_play_url(
+        self, api: ViaplayAPI
+    ) -> None:
+        body = {
+            "duration": 0,
+            "contentUrl": "https://cdn.example.com/live.mpd",
+            "contentType": "application/dash+xml",
+        }
+        with aioresponses() as m:
+            m.get(re.compile(r".*"), payload=body)
+            info = await api.fetch_stream(
+                "https://play-live.viaplay.com/api/stream/bymediaguid{?deviceId}&mediaGuid=X"
+            )
+
+        assert info.stream_type == StreamType.LIVE
+        assert info.duration is None
 
     async def test_extracts_fallback_urls(self, api: ViaplayAPI) -> None:
         body = {

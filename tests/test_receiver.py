@@ -331,11 +331,12 @@ class TestIntegration:
         await writer.wait_closed()
 
         for _ in range(50):
-            if provider.stop_calls == 1 and receiver.device.session_ids() == []:
+            if receiver.device.session_ids():
                 break
             await asyncio.sleep(0.01)
 
-        assert provider.stop_calls == 1
-        assert receiver.device.session_ids() == []
+        assert provider.stop_calls == 0
+        assert len(receiver.device.session_ids()) == 1
 
         await receiver.stop()
+        assert provider.stop_calls == 1

@@ -31,7 +31,7 @@ class SubtitleState(CastModel):
 
     active_language_code: str | None = None
     available_language_codes: list[str] = []
-    enabled: bool | None = True
+    enabled: bool | dict[str, Any] | None = True
 
 
 class AudioTrackState(CastModel):
@@ -102,6 +102,14 @@ class AuthorizationDone(CastModel):
     profile_id: str = ""
 
 
+class GotoIdle(CastModel):
+    """``GOTO_IDLE`` — sender signals app should return to idle state."""
+
+    type: Literal["GOTO_IDLE"] = "GOTO_IDLE"
+    user_id: str = ""
+    profile_id: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Outbound messages (receiver -> sender)
 # ---------------------------------------------------------------------------
@@ -132,12 +140,21 @@ class AuthorizationRequiredMessage(CastModel):
     receiver_state: ViaplayReceiverState
 
 
+class PosDurMessage(CastModel):
+    """``POSDUR`` progress update used by Viaplay senders."""
+
+    type: Literal["POSDUR"] = "POSDUR"
+    position: int
+    duration: int
+    receiver_state: ViaplayReceiverState
+
+
 # ---------------------------------------------------------------------------
 # Discriminated union for inbound Viaplay messages
 # ---------------------------------------------------------------------------
 
 ViaplayRequest = Annotated[
-    SetupInfo | AuthorizationDone,
+    SetupInfo | AuthorizationDone | GotoIdle,
     Discriminator("type"),
 ]
 

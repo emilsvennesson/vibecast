@@ -142,9 +142,7 @@ class AppSession(TransportHandler):
             await self.provider.on_sender_connected(context, sender_id)
             return
 
-        removed_transport_id = self.device.remove_subscription(connection, sender_id)
-        if removed_transport_id is not None:
-            _ = await self.device.stop_orphaned_sessions({removed_transport_id})
+        _ = self.device.remove_subscription(connection, sender_id)
 
     async def _handle_media_message(
         self,
@@ -356,12 +354,15 @@ class Device:
         data: dict[str, Any],
     ) -> None:
         """Send a JSON message to one sender on one connection."""
-        await connection.send_json(
-            source_id=source_id,
-            dest_id=dest_id,
-            namespace=namespace,
-            data=data,
-        )
+        try:
+            await connection.send_json(
+                source_id=source_id,
+                dest_id=dest_id,
+                namespace=namespace,
+                data=data,
+            )
+        except (ConnectionResetError, BrokenPipeError, OSError, RuntimeError):
+            _ = self.remove_all_subscriptions(connection)
 
     async def broadcast(
         self,
@@ -377,12 +378,15 @@ class Device:
 
         connections = {sub.connection for sub in transport.subscriptions}
         for connection in connections:
-            await connection.send_json(
-                source_id=source_id,
-                dest_id="*",
-                namespace=namespace,
-                data=data,
-            )
+            try:
+                await connection.send_json(
+                    source_id=source_id,
+                    dest_id="*",
+                    namespace=namespace,
+                    data=data,
+                )
+            except (ConnectionResetError, BrokenPipeError, OSError, RuntimeError):
+                _ = self.remove_all_subscriptions(connection)
 
     # ------------------------------------------------------------------
     # Session lifecycle
@@ -485,22 +489,25 @@ def build_receiver_status(
     """Build a ``RECEIVER_STATUS`` response from current device state."""
     sessions, volume = device.snapshot_receiver_state()
 
-    applications = [
-        ApplicationStatus(
-            app_id=session.app_id,
-            app_type="WEB",
-            display_name=session.display_name,
-            is_idle_screen=False,
-            launched_from_cloud=False,
-            namespaces=[CastNamespace(name=name) for name in session.namespaces],
-            sender_connected=True,
-            session_id=session.session_id,
-            status_text=session.status_text,
-            transport_id=session.transport_id,
-            universal_app_id=session.app_id,
+    applications: list[ApplicationStatus] = []
+    for session in sessions:
+        transport = device.transports.get(session.transport_id)
+        sender_connected = bool(transport and transport.subscriptions)
+        applications.append(
+            ApplicationStatus(
+                app_id=session.app_id,
+                app_type="WEB",
+                display_name=session.display_name,
+                is_idle_screen=False,
+                launched_from_cloud=False,
+                namespaces=[CastNamespace(name=name) for name in session.namespaces],
+                sender_connected=sender_connected,
+                session_id=session.session_id,
+                status_text=session.status_text,
+                transport_id=session.transport_id,
+                universal_app_id=session.app_id,
+            )
         )
-        for session in sessions
-    ]
 
     status = ReceiverStatus(
         applications=applications,

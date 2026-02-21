@@ -10,7 +10,9 @@ from castvibe.providers.viaplay._models import (
     AuthorizedPollLinks,
     DeviceAuthLinks,
     EmbeddedMedia,
+    GotoIdle,
     LoginUserData,
+    PosDurMessage,
     ReceiverStateMessage,
     SessionLinks,
     SessionOkMessage,
@@ -108,6 +110,26 @@ class TestReceiverStateMessage:
         assert dumped["receiverState"]["status"] == "PLAYING"
         assert dumped["receiverState"]["userId"] == "u1"
 
+    def test_subtitle_enabled_can_be_style_dict(self) -> None:
+        rs = ViaplayReceiverState.model_validate(
+            {
+                "status": "CASTING",
+                "subtitles": {
+                    "activeLanguageCode": "sv",
+                    "enabled": {
+                        "fontSize": 1,
+                        "backgroundColor": "#0000007F",
+                        "foregroundColor": "#FFFFFFFF",
+                    },
+                },
+            }
+        )
+        msg = ReceiverStateMessage(receiver_state=rs)
+        dumped = msg.model_dump(exclude_none=True)
+        enabled = dumped["receiverState"]["subtitles"]["enabled"]
+        assert isinstance(enabled, dict)
+        assert enabled["fontSize"] == 1
+
 
 class TestSessionOkMessage:
     def test_with_user_info(self) -> None:
@@ -141,6 +163,17 @@ class TestAuthorizationRequiredMessage:
         assert dumped["receiverState"]["userCode"] == "ABC123"
 
 
+class TestPosDurMessage:
+    def test_serialization(self) -> None:
+        rs = ViaplayReceiverState(status="CASTING")
+        msg = PosDurMessage(position=12, duration=2535, receiver_state=rs)
+        dumped = msg.model_dump(exclude_none=True)
+        assert dumped["type"] == "POSDUR"
+        assert dumped["position"] == 12
+        assert dumped["duration"] == 2535
+        assert dumped["receiverState"]["status"] == "CASTING"
+
+
 class TestViaplayRequestDiscriminator:
     def test_dispatches_setup_info(self) -> None:
         raw = {"type": "SETUP_INFO", "contentRoot": "https://example.com"}
@@ -152,6 +185,12 @@ class TestViaplayRequestDiscriminator:
         raw = {"type": "AUTHORIZATION_DONE"}
         msg = viaplay_request_adapter.validate_python(raw)
         assert isinstance(msg, AuthorizationDone)
+
+    def test_dispatches_goto_idle(self) -> None:
+        raw = {"type": "GOTO_IDLE", "userId": "u1", "profileId": "p1"}
+        msg = viaplay_request_adapter.validate_python(raw)
+        assert isinstance(msg, GotoIdle)
+        assert msg.user_id == "u1"
 
 
 # ---------------------------------------------------------------------------

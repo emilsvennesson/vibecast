@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast, override
 
 from castvibe import _namespace as ns
-from castvibe._device import Device, DeviceIdentity
+from castvibe._device import Device, DeviceIdentity, build_receiver_status
 from castvibe.provider import LaunchCredentials, Provider
 from tests.conftest import make_cast_message
 
@@ -29,6 +29,22 @@ class RecordingConnection:
         data: dict[str, Any],
     ) -> None:
         self.sent.append((source_id, dest_id, namespace, data))
+
+
+class FailingConnection:
+    async def send_json(
+        self,
+        source_id: str,
+        dest_id: str,
+        namespace: str,
+        data: dict[str, Any],
+    ) -> None:
+        _ = source_id
+        _ = dest_id
+        _ = namespace
+        _ = data
+        msg = "Connection lost"
+        raise ConnectionResetError(msg)
 
 
 @dataclass(slots=True)
@@ -182,6 +198,21 @@ class TestRouting:
         assert conn1.sent[0][0] == "receiver-0"
         assert conn1.sent[0][1] == "*"
 
+    async def test_broadcast_prunes_broken_connections(self) -> None:
+        device = _build_device()
+        device.register_transport("receiver-0", RecordingHandler())
+
+        broken = cast("Connection", cast("object", FailingConnection()))
+        device.add_subscription(broken, "sender-1", "receiver-0")
+
+        await device.broadcast(
+            source_id="receiver-0",
+            namespace=ns.RECEIVER,
+            data={"type": "RECEIVER_STATUS"},
+        )
+
+        assert device.transports["receiver-0"].subscriptions == []
+
 
 class TestSessionLifecycle:
     async def test_start_and_stop_session(self) -> None:
@@ -252,3 +283,19 @@ class TestSessionLifecycle:
         assert stopped == []
         assert session.session_id in device.sessions
         assert provider.stop_calls == 0
+
+    def test_receiver_status_sender_connected_tracks_subscriptions(self) -> None:
+        device = _build_device()
+        provider = FakeProvider(display_name="Viaplay", namespaces=frozenset())
+        session = device.start_session("6313CF39", provider, LaunchCredentials())
+
+        status = build_receiver_status(device)
+        app = status.status.applications[0]
+        assert app.sender_connected is False
+
+        conn = _as_connection(RecordingConnection())
+        device.add_subscription(conn, "sender-1", session.transport_id)
+
+        status = build_receiver_status(device)
+        app = status.status.applications[0]
+        assert app.sender_connected is True

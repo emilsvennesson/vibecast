@@ -17,6 +17,7 @@ from castvibe._models import (
     PauseRequest,
     PlayerState,
     PlayRequest,
+    QueueGetItemIdsRequest,
     SeekRequest,
     StreamType,
     Volume,
@@ -149,6 +150,36 @@ class TestOnSenderConnected:
         assert second_data["receiverState"]["status"] == "IDLE"
         assert second_data["receiverState"]["isScrubbable"] is True
 
+    async def test_reconnect_with_active_media_sends_full_status(
+        self, tmp_path: Any
+    ) -> None:
+        p = ViaplayProvider(data_dir=tmp_path)
+        session, broadcast, _ = _make_session()
+        await p.on_launch(session, LaunchCredentials())
+
+        state = p._sessions["sess-1"]  # noqa: SLF001
+        state.player_state = PlayerState.PLAYING
+        state.current_time = 42.0
+        state.current_media = MediaInfo(
+            content_id="https://x",
+            content_type="application/dash+xml",
+            stream_type=StreamType.BUFFERED,
+            duration=120.0,
+        )
+        state.stream_url = "https://cdn/manifest.mpd"
+
+        await p.on_sender_connected(session, "sender-0")
+
+        assert broadcast.await_count == 2
+        media_ns, media_data = broadcast.await_args_list[0].args
+        assert media_ns == "urn:x-cast:com.google.cast.media"
+        assert media_data["status"][0]["playerState"] == "PLAYING"
+        assert media_data["status"][0]["media"]["duration"] == 120.0
+
+        state_ns, state_data = broadcast.await_args_list[1].args
+        assert state_ns == _NS_VIAPLAY
+        assert state_data["receiverState"]["status"] == "CASTING"
+
 
 # ---------------------------------------------------------------------------
 # on_message — SETUP_INFO
@@ -236,6 +267,50 @@ class TestAuthorizationDone:
                 await state.auth_task
 
         mock_complete.assert_awaited_once()
+
+    async def test_goto_idle_resets_media_state(self, tmp_path: Any) -> None:
+        p = ViaplayProvider(data_dir=tmp_path)
+        session, broadcast, _ = _make_session()
+        await p.on_launch(session, LaunchCredentials())
+
+        state = p._sessions["sess-1"]  # noqa: SLF001
+        state.player_state = PlayerState.PLAYING
+        state.current_media = MediaInfo(
+            content_id="https://x",
+            content_type="application/dash+xml",
+            stream_type=StreamType.BUFFERED,
+        )
+        state.stream_url = "https://cdn/manifest.mpd"
+        state.current_product_url = (
+            "https://content.viaplay.com/{deviceKey}/byguid/1{?productsPerPage}"
+        )
+
+        blocker = asyncio.Event()
+
+        async def _pending_load() -> None:
+            _ = await blocker.wait()
+
+        pending_load = asyncio.create_task(_pending_load())
+        state.load_task = pending_load
+
+        await p.on_message(
+            session,
+            _NS_VIAPLAY,
+            {"type": "GOTO_IDLE", "userId": "u1", "profileId": "p1"},
+        )
+
+        assert pending_load.done() is True
+        assert pending_load.cancelled() is True
+        assert state.player_state == PlayerState.IDLE
+        assert state.current_media is None
+        assert state.stream_url == ""
+        assert state.current_product_url is None
+        assert state.load_task is None
+
+        ns_name, data = broadcast.await_args_list[-1].args
+        assert ns_name == _NS_VIAPLAY
+        assert data["type"] == "RECEIVER_STATE"
+        assert data["receiverState"]["status"] == "IDLE"
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +564,106 @@ class TestMediaMessages:
 
         handler.on_volume.assert_awaited_once_with("sess-1", 0.5, True)
 
+    async def test_queue_get_item_ids(
+        self,
+        tmp_path: Any,
+    ) -> None:
+        p = ViaplayProvider(data_dir=tmp_path)
+        session, _broadcast, send = _make_session()
+        await p.on_launch(session, LaunchCredentials())
+
+        state = p._sessions["sess-1"]  # noqa: SLF001
+        state.current_media = MediaInfo(
+            content_id="https://x",
+            content_type="application/dash+xml",
+            stream_type=StreamType.BUFFERED,
+        )
+
+        await p.on_media_message(
+            session,
+            QueueGetItemIdsRequest(request_id=16, media_session_id=1),
+        )
+
+        send.assert_awaited_once()
+        call_ns, data = send.await_args_list[0].args
+        assert call_ns == "urn:x-cast:com.google.cast.media"
+        assert data == {
+            "type": "QUEUE_ITEM_IDS",
+            "requestId": 16,
+            "itemIds": [1],
+            "sequenceNumber": 0,
+        }
+
+    async def test_queue_get_item_ids_during_inflight_load(self, tmp_path: Any) -> None:
+        p = ViaplayProvider(data_dir=tmp_path)
+        session, _broadcast, send = _make_session()
+        await p.on_launch(session, LaunchCredentials())
+
+        state = p._sessions["sess-1"]  # noqa: SLF001
+
+        blocker = asyncio.Event()
+
+        async def _pending() -> None:
+            _ = await blocker.wait()
+
+        state.load_task = asyncio.create_task(_pending())
+
+        try:
+            await p.on_media_message(
+                session,
+                QueueGetItemIdsRequest(request_id=17, media_session_id=1),
+            )
+        finally:
+            blocker.set()
+            if state.load_task:
+                await state.load_task
+
+        send.assert_awaited_once()
+        call_ns, data = send.await_args_list[0].args
+        assert call_ns == "urn:x-cast:com.google.cast.media"
+        assert data == {
+            "type": "QUEUE_ITEM_IDS",
+            "requestId": 17,
+            "itemIds": [1],
+            "sequenceNumber": 0,
+        }
+
+    async def test_queue_get_item_ids_during_auth_flow_without_load(
+        self, tmp_path: Any
+    ) -> None:
+        p = ViaplayProvider(data_dir=tmp_path)
+        session, _broadcast, send = _make_session()
+        await p.on_launch(session, LaunchCredentials())
+
+        state = p._sessions["sess-1"]  # noqa: SLF001
+
+        blocker = asyncio.Event()
+
+        async def _pending() -> None:
+            _ = await blocker.wait()
+
+        state.auth_task = asyncio.create_task(_pending())
+
+        try:
+            await p.on_media_message(
+                session,
+                QueueGetItemIdsRequest(request_id=18, media_session_id=1),
+            )
+        finally:
+            blocker.set()
+            if state.auth_task:
+                await state.auth_task
+
+        send.assert_awaited_once()
+        call_ns, data = send.await_args_list[0].args
+        assert call_ns == "urn:x-cast:com.google.cast.media"
+        assert data == {
+            "type": "QUEUE_ITEM_IDS",
+            "requestId": 18,
+            "itemIds": [],
+            "sequenceNumber": 0,
+        }
+
 
 # ---------------------------------------------------------------------------
 # update_playback (external player → Cast senders)
@@ -512,17 +687,46 @@ class TestUpdatePlayback:
 
         await p.update_playback("sess-1", PlayerState.PLAYING, 10.0)
 
-        # state.broadcast wraps session.broadcast_custom which calls the mock
-        broadcast.assert_awaited_once()
-        call_ns, data = broadcast.call_args.args
-        assert call_ns == "urn:x-cast:com.google.cast.media"
-        assert data["status"][0]["playerState"] == "PLAYING"
-        assert data["status"][0]["currentTime"] == 10.0
+        # update_playback emits both MEDIA_STATUS and RECEIVER_STATE
+        assert broadcast.await_count == 2
+
+        media_ns, media_data = broadcast.await_args_list[0].args
+        assert media_ns == "urn:x-cast:com.google.cast.media"
+        assert media_data["status"][0]["playerState"] == "PLAYING"
+        assert media_data["status"][0]["currentTime"] == 10.0
+
+        state_ns, state_data = broadcast.await_args_list[1].args
+        assert state_ns == _NS_VIAPLAY
+        assert state_data["type"] == "RECEIVER_STATE"
+        assert state_data["receiverState"]["status"] == "CASTING"
 
     async def test_noop_for_unknown_session(self, tmp_path: Any) -> None:
         """update_playback should silently return for unknown sessions."""
         p = ViaplayProvider(data_dir=tmp_path)
         await p.update_playback("nonexistent", PlayerState.IDLE)
+
+    async def test_emits_posdur_when_duration_known(self, tmp_path: Any) -> None:
+        p = ViaplayProvider(data_dir=tmp_path)
+        session, broadcast, _ = _make_session()
+        await p.on_launch(session, LaunchCredentials())
+
+        state = p._sessions["sess-1"]  # noqa: SLF001
+        state.current_media = MediaInfo(
+            content_id="https://x",
+            content_type="application/dash+xml",
+            stream_type=StreamType.BUFFERED,
+            duration=2535.48,
+        )
+        state.stream_url = "https://cdn/manifest.mpd"
+
+        await p.update_playback("sess-1", PlayerState.PLAYING, 260.9)
+
+        assert broadcast.await_count == 3
+        posdur_ns, posdur_data = broadcast.await_args_list[2].args
+        assert posdur_ns == _NS_VIAPLAY
+        assert posdur_data["type"] == "POSDUR"
+        assert posdur_data["position"] == 260
+        assert posdur_data["duration"] == 2535
 
 
 # ---------------------------------------------------------------------------
@@ -545,7 +749,10 @@ class TestLoadHandling:
 
         # Mock API.fetch_stream
         mock_stream = StreamInfo(
-            url="https://cdn/v.mpd", content_type="application/dash+xml"
+            url="https://cdn/v.mpd",
+            content_type="application/dash+xml",
+            stream_type=StreamType.LIVE,
+            duration=3600.0,
         )
         with patch.object(
             state.api,
@@ -558,20 +765,26 @@ class TestLoadHandling:
                 media=MediaInfo(
                     content_id="https://x",
                     content_type="video/mp4",
-                    stream_type=StreamType.BUFFERED,
+                    stream_type=StreamType.NONE,
+                    duration=0,
                 ),
                 custom_data={"playUrl": "https://content.viaplay.se/play/1234"},
             )
             await p.on_media_message(session, load_req)
             # Wait for the spawned task
-            if state.auth_task:
-                await state.auth_task
+            if state.load_task:
+                await state.load_task
 
         # Media handler should have been called with load info
         handler.on_load.assert_awaited_once()
         info: MediaLoadInfo = handler.on_load.call_args.args[0]
         assert info.stream_url == "https://cdn/v.mpd"
         assert info.session_id == "sess-1"
+        assert info.stream_type == StreamType.LIVE
+        assert info.duration == 3600.0
+        assert state.current_media is not None
+        assert state.current_media.stream_type == StreamType.LIVE
+        assert state.current_media.duration == 3600.0
 
     async def test_load_propagates_drm_info(self, tmp_path: Any) -> None:
         handler = _make_handler()
@@ -604,14 +817,56 @@ class TestLoadHandling:
                 custom_data={"playUrl": "https://content.viaplay.se/play/1234"},
             )
             await p.on_media_message(session, load_req)
-            if state.auth_task:
-                await state.auth_task
+            if state.load_task:
+                await state.load_task
 
         handler.on_load.assert_awaited_once()
         info: MediaLoadInfo = handler.on_load.call_args.args[0]
         assert info.drm is not None
         assert info.drm.system == "widevine"
         assert info.drm.license_url == "https://drm.example.com/license"
+
+    async def test_load_normalizes_none_stream_type(self, tmp_path: Any) -> None:
+        handler = _make_handler()
+        p = ViaplayProvider(media_handler=handler, data_dir=tmp_path)
+        session, _, _ = _make_session()
+        await p.on_launch(session, LaunchCredentials())
+
+        state = p._sessions["sess-1"]  # noqa: SLF001
+        state.authenticated = True
+        state.auth_event.set()
+
+        mock_stream = StreamInfo(
+            url="https://cdn/v.mpd",
+            content_type="application/dash+xml",
+        )
+        with patch.object(
+            state.api,
+            "fetch_stream",
+            new_callable=AsyncMock,
+            return_value=mock_stream,
+        ):
+            load_req = LoadRequest(
+                request_id=1,
+                media=MediaInfo(
+                    content_id="https://x",
+                    content_type="video/mp4",
+                    stream_type=StreamType.NONE,
+                    duration=0,
+                ),
+                custom_data={"playUrl": "https://content.viaplay.se/play/1234"},
+            )
+            await p.on_media_message(session, load_req)
+            if state.load_task:
+                await state.load_task
+
+        handler.on_load.assert_awaited_once()
+        info: MediaLoadInfo = handler.on_load.call_args.args[0]
+        assert info.stream_type == StreamType.BUFFERED
+        assert info.duration is None
+        assert state.current_media is not None
+        assert state.current_media.stream_type == StreamType.BUFFERED
+        assert state.current_media.duration is None
 
     async def test_load_fails_without_auth(self, tmp_path: Any) -> None:
         p = ViaplayProvider(data_dir=tmp_path)
@@ -620,7 +875,19 @@ class TestLoadHandling:
 
         # NOT authenticated — auth_event is never set, wait_for will time out.
         # Patch wait_for to raise TimeoutError immediately.
-        with patch("asyncio.wait_for", side_effect=TimeoutError):
+        async def _timeout_wait_for(
+            awaitable: Any,
+            *args: Any,
+            **kwargs: Any,
+        ) -> None:
+            _ = args
+            _ = kwargs
+            close = getattr(awaitable, "close", None)
+            if callable(close):
+                _ = close()
+            raise TimeoutError
+
+        with patch("asyncio.wait_for", side_effect=_timeout_wait_for):
             load_req = LoadRequest(
                 request_id=1,
                 media=MediaInfo(
@@ -632,8 +899,8 @@ class TestLoadHandling:
             )
             await p.on_media_message(session, load_req)
             state = p._sessions["sess-1"]  # noqa: SLF001
-            if state.auth_task:
-                await state.auth_task
+            if state.load_task:
+                await state.load_task
 
         # Should have sent LOAD_FAILED
         _, data = send.call_args.args
@@ -658,9 +925,51 @@ class TestLoadHandling:
             custom_data={},
         )
         await p.on_media_message(session, load_req)
-        if state.auth_task:
-            await state.auth_task
+        if state.load_task:
+            await state.load_task
 
         _, data = send.call_args.args
         assert data["type"] == "LOAD_FAILED"
         assert data["reason"] == "NO_PLAY_URL"
+
+    async def test_load_buffering_broadcasts_casting_receiver_state(
+        self, tmp_path: Any
+    ) -> None:
+        p = ViaplayProvider(data_dir=tmp_path)
+        session, broadcast, _send = _make_session()
+        await p.on_launch(session, LaunchCredentials())
+
+        state = p._sessions["sess-1"]  # noqa: SLF001
+        state.authenticated = True
+        state.auth_event.set()
+
+        mock_stream = StreamInfo(
+            url="https://cdn/v.mpd",
+            content_type="application/dash+xml",
+        )
+        with patch.object(
+            state.api,
+            "fetch_stream",
+            new_callable=AsyncMock,
+            return_value=mock_stream,
+        ):
+            load_req = LoadRequest(
+                request_id=3,
+                media=MediaInfo(
+                    content_id="https://x",
+                    content_type="video/mp4",
+                    stream_type=StreamType.BUFFERED,
+                ),
+                custom_data={"playUrl": "https://content.viaplay.se/play/1234"},
+            )
+            await p.on_media_message(session, load_req)
+            if state.load_task:
+                await state.load_task
+
+        receiver_state = [
+            payload
+            for namespace, payload in (call.args for call in broadcast.await_args_list)
+            if namespace == _NS_VIAPLAY and payload.get("type") == "RECEIVER_STATE"
+        ]
+        assert receiver_state
+        assert receiver_state[-1]["receiverState"]["status"] == "CASTING"
