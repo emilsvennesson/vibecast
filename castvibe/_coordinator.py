@@ -46,7 +46,27 @@ if TYPE_CHECKING:
 
 log = get_logger("coordinator")
 
-_SUPPORTED_MEDIA_COMMANDS = 15
+# Cast SDK ``Command`` enum bitmask for ``MediaStatus.supportedMediaCommands``.
+# LOAD, PLAY, and STOP are always implicitly supported.
+#
+#   PAUSE            1
+#   SEEK             2
+#   STREAM_VOLUME    4
+#   STREAM_MUTE      8
+#   SKIP_FORWARD    16
+#   SKIP_BACKWARD   32
+#   QUEUE_NEXT      64
+#   QUEUE_PREV     128
+#   QUEUE_SHUFFLE  256
+#   SKIP_AD        512
+#   EDIT_TRACKS   4096
+#   PLAYBACK_RATE 8192
+#   LIKE         16384
+#   DISLIKE      32768
+#   FOLLOW       65536
+#   UNFOLLOW    131072
+#   STREAM_TRANSFER 262144
+_SUPPORTED_MEDIA_COMMANDS = 1 | 2 | 4 | 8  # PAUSE | SEEK | STREAM_VOLUME | STREAM_MUTE
 
 
 class PlaybackCoordinator:
@@ -122,24 +142,54 @@ class PlaybackCoordinator:
                 self._player_state = PlayerState.PLAYING
                 self._idle_reason = None
                 await self._broadcast_media_status(message.request_id)
-                await self._call_player("play")
+                try:
+                    await self._player.on_play(self._player_context)
+                except Exception:
+                    log.warning(
+                        "player on_play failed for session %s",
+                        self.session_id,
+                        exc_info=True,
+                    )
                 await self._notify_provider()
             case PauseRequest():
                 self._player_state = PlayerState.PAUSED
                 self._idle_reason = None
                 await self._broadcast_media_status(message.request_id)
-                await self._call_player("pause")
+                try:
+                    await self._player.on_pause(self._player_context)
+                except Exception:
+                    log.warning(
+                        "player on_pause failed for session %s",
+                        self.session_id,
+                        exc_info=True,
+                    )
                 await self._notify_provider()
             case SeekRequest():
                 self._current_time = message.current_time
                 self._idle_reason = None
                 await self._broadcast_media_status(message.request_id)
-                await self._call_player("seek", message.current_time)
+                try:
+                    await self._player.on_seek(
+                        self._player_context, message.current_time
+                    )
+                except Exception:
+                    log.warning(
+                        "player on_seek failed for session %s",
+                        self.session_id,
+                        exc_info=True,
+                    )
                 await self._notify_provider()
             case MediaStopRequest():
                 self._set_idle_state(idle_reason=IdleReason.CANCELLED)
                 await self._broadcast_empty_media_status(message.request_id)
-                await self._call_player("stop")
+                try:
+                    await self._player.on_stop(self._player_context)
+                except Exception:
+                    log.warning(
+                        "player on_stop failed for session %s",
+                        self.session_id,
+                        exc_info=True,
+                    )
                 self._clear_media()
                 self._unregister_license_handler()
                 await self._notify_provider()
@@ -257,7 +307,14 @@ class PlaybackCoordinator:
     async def close(self) -> None:
         """Release coordinator resources on app-session teardown."""
         if self._playback_media is not None:
-            await self._call_player("stop")
+            try:
+                await self._player.on_stop(self._player_context)
+            except Exception:
+                log.warning(
+                    "player on_stop failed for session %s",
+                    self.session_id,
+                    exc_info=True,
+                )
         self._clear_media()
         self._unregister_license_handler()
 
@@ -267,6 +324,8 @@ class PlaybackCoordinator:
         sender_id: str,
         request: LoadRequest,
     ) -> None:
+        self._media_session_id += 1
+
         try:
             media = await self._provider.resolve_media(self._provider_session, request)
         except Exception:
@@ -384,24 +443,6 @@ class PlaybackCoordinator:
         except Exception:
             log.warning(
                 "provider playback update failed for session %s",
-                self.session_id,
-                exc_info=True,
-            )
-
-    async def _call_player(self, action: str, arg: float | None = None) -> None:
-        try:
-            if action == "play":
-                await self._player.on_play(self._player_context)
-            elif action == "pause":
-                await self._player.on_pause(self._player_context)
-            elif action == "seek" and arg is not None:
-                await self._player.on_seek(self._player_context, arg)
-            elif action == "stop":
-                await self._player.on_stop(self._player_context)
-        except Exception:
-            log.warning(
-                "player callback failed for %s session %s",
-                action,
                 self.session_id,
                 exc_info=True,
             )

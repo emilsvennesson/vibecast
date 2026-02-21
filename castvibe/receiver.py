@@ -217,6 +217,11 @@ class CastReceiver:
         await self.device.route_message(connection, msg)
 
     async def _on_disconnect(self, connection: Connection) -> None:
+        # Only remove subscriptions — do NOT stop orphaned sessions here.
+        # Cast senders are expected to disconnect and reconnect (e.g. app
+        # backgrounding, network transitions) while the session stays alive.
+        # Sessions are only torn down by an explicit STOP request from a
+        # sender or when the receiver shuts down.
         _ = self.device.remove_all_subscriptions(connection)
 
 

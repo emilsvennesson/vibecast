@@ -204,7 +204,6 @@ class PlayerServer(Player):
 
     @override
     async def on_volume(self, ctx: PlayerContext, level: float, muted: bool) -> None:
-        _ = ctx
         await self._broadcast_command(
             VolumeCommand(session_id=ctx.session_id, level=level, muted=muted)
         )
