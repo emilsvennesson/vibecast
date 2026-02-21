@@ -10,6 +10,7 @@ providers (for example Viaplay).
 
 - TLS Cast receiver on port `8009` (configurable)
 - Built-in player mediator server on port `8010` (configurable):
+  - `GET /` (embedded Shaka web player)
   - `GET /player` (WebSocket command/report channel)
   - `POST /license/{session_id}` (DRM license proxy)
 - Device auth response with cert chain + CRL
@@ -115,6 +116,8 @@ CLI options:
 
 Once the receiver is running, external players connect to:
 
+- Browser player: `http://<receiver-ip>:8010/`
+  - Built-in Shaka player that auto-connects as `role=primary`
 - WebSocket: `ws://<receiver-ip>:8010/player`
   - optional role query: `?role=primary` or `?role=observer`
 - License proxy: `http://<receiver-ip>:8010/license/<session-id>`

@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from castvibe._log import get_logger
 from castvibe._models import PlayerState
+from castvibe._player_web import player_web_page, player_web_script
 from castvibe.player import (
     DrmPayload,
     ErrorReport,
@@ -88,6 +89,9 @@ class PlayerServer(Player):
             return
 
         app = web.Application()
+        _ = app.router.add_get("/", self._handle_web_player)
+        _ = app.router.add_get("/index.html", self._handle_web_player)
+        _ = app.router.add_get("/player.js", self._handle_web_player_script)
         _ = app.router.add_get(self._player_path, self._handle_ws)
         _ = app.router.add_post("/license/{session_id}", self._handle_license)
 
@@ -100,8 +104,10 @@ class PlayerServer(Player):
         self._app = app
         self._runner = runner
         log.info(
-            "player server started (host=%s, port=%d)",
+            "player server started (host=%s, port=%d, web=http://%s:%d/)",
             self._host,
+            self._serving_port,
+            self._resolved_host,
             self._serving_port,
         )
 
@@ -238,6 +244,17 @@ class PlayerServer(Player):
             self._remove_connection(connection)
 
         return ws
+
+    async def _handle_web_player(self, request: web.Request) -> web.Response:
+        _ = request
+        return web.Response(text=player_web_page(), content_type="text/html")
+
+    async def _handle_web_player_script(self, request: web.Request) -> web.Response:
+        _ = request
+        return web.Response(
+            text=player_web_script(),
+            content_type="application/javascript",
+        )
 
     async def _handle_report(self, connection: _PlayerConnection, payload: str) -> None:
         try:
