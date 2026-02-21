@@ -10,6 +10,7 @@ dependencies = [
     "zeroconf>=0.140",
     "cryptography>=44.0",
     "httpx>=0.28",
+    "aiohttp>=3.11",
     "uritemplate>=4.1",
 ]
 

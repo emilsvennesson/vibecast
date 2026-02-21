@@ -38,7 +38,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from castvibe._connection import Connection
+    from castvibe._player_server import PlayerServer
     from castvibe._proto.cast_channel_pb2 import CastMessage
+    from castvibe.player import Player
 
 log = get_logger("handlers")
 
@@ -50,14 +52,18 @@ def _no_provider(_app_id: str) -> Provider | None:
 class PlatformHandler:
     """Handles platform namespaces addressed to ``receiver-0``."""
 
-    __slots__ = ("_device", "_provider_lookup")
+    __slots__ = ("_device", "_player", "_player_server", "_provider_lookup")
 
     def __init__(
         self,
         device: Device,
+        player: Player,
+        player_server: PlayerServer | None,
         provider_lookup: Callable[[str], Provider | None] | None = None,
     ) -> None:
         self._device = device
+        self._player = player
+        self._player_server = player_server
         self._provider_lookup = provider_lookup or _no_provider
 
     async def handle_message(self, connection: Connection, msg: CastMessage) -> None:
@@ -182,7 +188,13 @@ class PlatformHandler:
             return
 
         credentials = _extract_launch_credentials(request)
-        session = self._device.start_session(request.app_id, provider, credentials)
+        session = self._device.start_session(
+            request.app_id,
+            provider,
+            credentials,
+            player=self._player,
+            player_server=self._player_server,
+        )
         try:
             await session.on_launch(connection, msg.source_id)
         except Exception:

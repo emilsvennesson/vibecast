@@ -10,11 +10,13 @@ from typing import TYPE_CHECKING, Any, override
 import pytest
 
 from castvibe import _namespace as ns
+from castvibe._models import LoadRequest, StreamType
 from castvibe._proto.cast_channel_pb2 import (
     AuthChallenge,
     CastMessage,
     DeviceAuthMessage,
 )
+from castvibe.player import PlaybackMedia
 from castvibe.provider import LaunchCredentials, Provider, ProviderSession
 from castvibe.receiver import CastReceiver, ReceiverConfig
 from tests.conftest import make_cast_message
@@ -104,6 +106,20 @@ class DummyProvider(Provider):
         self.custom_messages.append((namespace, data))
 
     @override
+    async def resolve_media(
+        self,
+        session: ProviderSession,
+        load_request: LoadRequest,
+    ) -> PlaybackMedia:
+        _ = load_request
+        return PlaybackMedia(
+            session_id=session.session_id,
+            url="https://example.com/video.mpd",
+            content_type="application/dash+xml",
+            stream_type=StreamType.BUFFERED,
+        )
+
+    @override
     async def on_stop(self, session: ProviderSession) -> None:
         _ = session
         self.stop_calls += 1
@@ -127,6 +143,8 @@ class TestReceiverConfig:
         assert config.device_model == "Chromecast"
         assert config.host == "0.0.0.0"
         assert config.port == 8009
+        assert config.player_host == "0.0.0.0"
+        assert config.player_port == 8010
         assert receiver.config.device_id is not None
 
 
@@ -162,7 +180,10 @@ class TestIntegration:
         _patch_runtime(monkeypatch, crl=b"\xaa\xbb")
         receiver = CastReceiver(
             config=ReceiverConfig(
-                friendly_name="Living Room", host="127.0.0.1", port=0
+                friendly_name="Living Room",
+                host="127.0.0.1",
+                port=0,
+                player_port=0,
             ),
             certificates=bundle,
             providers=[],
@@ -224,7 +245,10 @@ class TestIntegration:
         _patch_runtime(monkeypatch)
         receiver = CastReceiver(
             config=ReceiverConfig(
-                friendly_name="Living Room", host="127.0.0.1", port=0
+                friendly_name="Living Room",
+                host="127.0.0.1",
+                port=0,
+                player_port=0,
             ),
             certificates=bundle,
             providers=[],
@@ -252,7 +276,10 @@ class TestIntegration:
         provider = DummyProvider()
         receiver = CastReceiver(
             config=ReceiverConfig(
-                friendly_name="Living Room", host="127.0.0.1", port=0
+                friendly_name="Living Room",
+                host="127.0.0.1",
+                port=0,
+                player_port=0,
             ),
             certificates=bundle,
             providers=[provider],

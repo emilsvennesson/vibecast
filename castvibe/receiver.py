@@ -14,6 +14,7 @@ from castvibe._discovery import CastAdvertisement
 from castvibe._handlers import PlatformHandler
 from castvibe._http import ReceiverHTTPClient
 from castvibe._log import get_logger
+from castvibe._player_server import PlayerServer
 from castvibe._server import CastServer
 from castvibe.provider import Provider, ProviderRegistry, discover_providers
 
@@ -34,6 +35,8 @@ class ReceiverConfig:
     device_id: str | None = None
     host: str = "0.0.0.0"
     port: int = 8009
+    player_host: str = "0.0.0.0"
+    player_port: int = 8010
     data_dir: Path = field(default_factory=lambda: Path.home() / ".castvibe")
 
 
@@ -44,6 +47,7 @@ class CastReceiver:
         "_advertisement",
         "_certificates",
         "_http",
+        "_player_server",
         "_server",
         "_started",
         "_stop_event",
@@ -78,9 +82,19 @@ class CastReceiver:
             data_dir=config.data_dir,
         )
 
+        self._player_server = PlayerServer(
+            host=config.player_host,
+            port=config.player_port,
+        )
+
         self.device.register_transport(
             "receiver-0",
-            PlatformHandler(self.device, provider_lookup=self.providers.get),
+            PlatformHandler(
+                self.device,
+                player=self._player_server,
+                player_server=self._player_server,
+                provider_lookup=self.providers.get,
+            ),
         )
 
         self._server = CastServer(
@@ -119,15 +133,22 @@ class CastReceiver:
             log.info("using CRL from manifest (%d bytes)", len(crl))
         self._server.crl = crl
 
-        await self._server.start()
+        await self._player_server.start()
+        try:
+            await self._server.start()
+        except Exception:
+            await self._player_server.stop()
+            raise
         port = self._server.serving_port
         if port is None:
+            await self._player_server.stop()
             await self._server.stop()
             msg = "server did not expose serving port"
             raise RuntimeError(msg)
 
         device_id = self.config.device_id
         if device_id is None:
+            await self._player_server.stop()
             await self._server.stop()
             msg = "receiver device_id is not initialized"
             raise RuntimeError(msg)
@@ -142,6 +163,7 @@ class CastReceiver:
         try:
             await advertisement.start()
         except Exception:
+            await self._player_server.stop()
             await self._server.stop()
             raise
 
@@ -163,6 +185,7 @@ class CastReceiver:
         Safe to call multiple times; subsequent calls are no-ops.
         """
         if not self._started:
+            await self._player_server.stop()
             await self._http.close()
             return
         self._stop_event.set()
@@ -177,6 +200,7 @@ class CastReceiver:
                 await advertisement.stop()
         finally:
             await self._server.stop()
+            await self._player_server.stop()
             await self._http.close()
             self._started = False
             log.info("cast receiver stopped")
@@ -193,6 +217,11 @@ class CastReceiver:
         await self.device.route_message(connection, msg)
 
     async def _on_disconnect(self, connection: Connection) -> None:
+        # Only remove subscriptions — do NOT stop orphaned sessions here.
+        # Cast senders are expected to disconnect and reconnect (e.g. app
+        # backgrounding, network transitions) while the session stays alive.
+        # Sessions are only torn down by an explicit STOP request from a
+        # sender or when the receiver shuts down.
         _ = self.device.remove_all_subscriptions(connection)
 
 

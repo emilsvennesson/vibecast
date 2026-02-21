@@ -1,8 +1,4 @@
-"""Bundled Viaplay provider.
-
-Implements the Viaplay Cast receiver protocol including authentication
-(persistent login, token login, device-code flow) and stream resolution.
-"""
+"""Bundled Viaplay provider."""
 
 from __future__ import annotations
 
@@ -12,39 +8,15 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, override
 
-if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
-import castvibe._namespace as ns
-from castvibe._models import (
-    IdleReason,
-    LoadFailedResponse,
-    LoadRequest,
-    MediaGetStatusRequest,
-    MediaInfo,
-    MediaRequest,
-    MediaSetVolumeRequest,
-    MediaStatus,
-    MediaStatusResponse,
-    MediaStopRequest,
-    PauseRequest,
-    PlayerState,
-    PlayRequest,
-    QueueGetItemIdsRequest,
-    QueueItemIdsResponse,
-    SeekRequest,
-    StreamType,
-    Volume,
-)
-from castvibe.provider import (
-    DefaultMediaEventHandler,
+from castvibe._models import LoadRequest, PlayerState, StreamType
+from castvibe.player import (
     DrmInfo,
-    LaunchCredentials,
-    MediaEventHandler,
-    MediaLoadInfo,
-    Provider,
-    ProviderSession,
+    LicenseRequest,
+    LicenseResponse,
+    PlaybackMedia,
+    PlaybackState,
 )
+from castvibe.provider import LaunchCredentials, Provider, ProviderSession
 from castvibe.providers.viaplay._api import (
     DeviceAuthInfo,
     SessionCheckResult,
@@ -65,19 +37,12 @@ from castvibe.providers.viaplay._models import (
     viaplay_request_adapter,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
 log = logging.getLogger("castvibe.viaplay")
 
-# Viaplay custom namespace (provider-specific, not part of platform protocol).
 _NS_VIAPLAY = "urn:x-cast:tv.viaplay.chromecast"
-
-# Bitmask for supported media commands (PAUSE | SEEK | STREAM_VOLUME |
-# STREAM_MUTE | SKIP_FORWARD | SKIP_BACKWARD and more).
-_SUPPORTED_MEDIA_COMMANDS = 274447
-
-
-# ---------------------------------------------------------------------------
-# Per-session state
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -91,7 +56,6 @@ class _ViaplayState:
     auth_pending: bool = False
     auth_event: asyncio.Event = field(default_factory=asyncio.Event)
 
-    # User / setup info
     user_id: str = ""
     profile_id: str = ""
     user_display_name: str = ""
@@ -99,55 +63,28 @@ class _ViaplayState:
     receiver_name: str = ""
     receiver_language_code: str = "en"
 
-    # Media state
-    media_session_id: int = 1
-    player_state: PlayerState = PlayerState.IDLE
-    current_media: MediaInfo | None = None
-    current_time: float = 0.0
-    stream_url: str = ""
-    stream_content_type: str = ""
     current_product_url: str | None = None
     loading_product_url: str | None = None
     subtitle_active_language_code: str | None = None
     subtitle_enabled: bool | dict[str, Any] | None = True
     audio_active_track: str | None = None
-    volume_level: float = 1.0
-    volume_muted: bool = False
+    current_license_url: str | None = None
+    playback_state: PlaybackState = field(
+        default_factory=lambda: PlaybackState(player_state=PlayerState.IDLE)
+    )
 
-    # Background tasks
     auth_task: asyncio.Task[None] | None = field(default=None, repr=False)
     poll_task: asyncio.Task[None] | None = field(default=None, repr=False)
-    load_task: asyncio.Task[None] | None = field(default=None, repr=False)
-
-
-# ---------------------------------------------------------------------------
-# ViaplayProvider
-# ---------------------------------------------------------------------------
 
 
 class ViaplayProvider(Provider):
-    """Full Viaplay Cast receiver provider.
-
-    Args:
-        media_handler: Optional handler for media events.  When a stream is
-            resolved the handler's :meth:`~MediaEventHandler.on_load` method
-            is called with a :class:`~castvibe.provider.MediaLoadInfo`.
-    """
+    """Viaplay provider implementation."""
 
     _APP_IDS = frozenset({"6313CF39", "2DB7CC49"})
     _NAMESPACES = frozenset({_NS_VIAPLAY})
 
-    def __init__(
-        self,
-        *,
-        media_handler: MediaEventHandler | None = None,
-    ) -> None:
-        self._media_handler: MediaEventHandler = (
-            media_handler or DefaultMediaEventHandler()
-        )
+    def __init__(self) -> None:
         self._sessions: dict[str, _ViaplayState] = {}
-
-    # -- Provider ABC --------------------------------------------------------
 
     @override
     def app_ids(self) -> frozenset[str]:
@@ -168,14 +105,14 @@ class ViaplayProvider(Provider):
         credentials: LaunchCredentials,
     ) -> None:
         api = ViaplayAPI(
-            client=session.http_client, device_id=session.receiver.device_id
+            client=session.http_client,
+            device_id=session.receiver.device_id,
         )
-        state = _ViaplayState(
+        self._sessions[session.session_id] = _ViaplayState(
             api=api,
             credentials=credentials,
             broadcast=session.broadcast_custom,
         )
-        self._sessions[session.session_id] = state
         log.info("viaplay session %s launched", session.session_id)
 
     @override
@@ -184,23 +121,13 @@ class ViaplayProvider(Provider):
         session: ProviderSession,
         sender_id: str,
     ) -> None:
+        _ = sender_id
         state = self._sessions.get(session.session_id)
         if state is None:
             return
-
-        # On fresh sessions we send empty status; on reconnects with active media
-        # we send current status so sender UI can recover immediately.
-        if state.current_media is None or not state.stream_url:
-            empty_status = MediaStatusResponse(request_id=0, status=[])
-            await session.broadcast_custom(
-                ns.MEDIA, empty_status.model_dump(exclude_none=True)
-            )
-        else:
-            await self._send_media_status(session, state, 0)
-
         await self._broadcast_receiver_state(
             state,
-            self._receiver_status_from_player_state(state.player_state),
+            self._receiver_status_from_player_state(state.playback_state.player_state),
         )
 
     @override
@@ -210,6 +137,7 @@ class ViaplayProvider(Provider):
         namespace: str,
         data: dict[str, Any],
     ) -> None:
+        _ = namespace
         state = self._sessions.get(session.session_id)
         if state is None:
             return
@@ -232,128 +160,131 @@ class ViaplayProvider(Provider):
                     self._complete_device_auth(session, state)
                 )
             case GotoIdle():
-                await self._reset_media_state(state)
+                state.playback_state = PlaybackState(player_state=PlayerState.IDLE)
                 await self._broadcast_receiver_state(state, "IDLE")
 
     @override
-    async def on_media_message(
+    async def resolve_media(
         self,
         session: ProviderSession,
-        message: MediaRequest,
-    ) -> None:
+        load_request: LoadRequest,
+    ) -> PlaybackMedia:
         state = self._sessions.get(session.session_id)
         if state is None:
+            msg = "unknown session"
+            raise RuntimeError(msg)
+
+        with contextlib.suppress(TimeoutError):
+            _ = await asyncio.wait_for(state.auth_event.wait(), timeout=30)
+
+        if not state.authenticated:
+            msg = "NOT_AUTHENTICATED"
+            raise RuntimeError(msg)
+
+        custom_data = load_request.custom_data or {}
+        templated_product_url = custom_data.get(
+            "templatedproducturl"
+        ) or custom_data.get("templatedProductUrl")
+        if isinstance(templated_product_url, str) and templated_product_url:
+            state.current_product_url = templated_product_url
+        else:
+            product_url = custom_data.get("producturl") or custom_data.get("productUrl")
+            state.current_product_url = (
+                product_url if isinstance(product_url, str) and product_url else None
+            )
+        state.loading_product_url = None
+
+        subtitle_lang = custom_data.get("subtitleLanguageCode")
+        state.subtitle_active_language_code = (
+            subtitle_lang if isinstance(subtitle_lang, str) and subtitle_lang else None
+        )
+
+        audio_track = custom_data.get("audioTrackLanguageCode")
+        state.audio_active_track = (
+            audio_track if isinstance(audio_track, str) and audio_track else None
+        )
+
+        subtitle_enabled = custom_data.get("subtitleActive")
+        if isinstance(subtitle_enabled, dict | bool):
+            state.subtitle_enabled = subtitle_enabled
+
+        play_url = custom_data.get("playUrl") or custom_data.get("contentUrl") or ""
+        if not isinstance(play_url, str) or not play_url:
+            msg = "NO_PLAY_URL"
+            raise RuntimeError(msg)
+
+        stream_info = await state.api.fetch_stream(play_url)
+
+        resolved_stream_type = stream_info.stream_type or load_request.media.stream_type
+        if resolved_stream_type is StreamType.NONE:
+            resolved_stream_type = StreamType.BUFFERED
+
+        resolved_duration = stream_info.duration
+        if resolved_duration is None and load_request.media.duration:
+            resolved_duration = load_request.media.duration
+
+        metadata = load_request.media.metadata
+        title = stream_info.title or (metadata.title if metadata else None)
+        subtitle = metadata.subtitle if metadata else None
+        images = tuple(metadata.images) if metadata else ()
+
+        drm: DrmInfo | None = None
+        state.current_license_url = stream_info.drm_license_url
+        if stream_info.drm_license_url:
+            drm = DrmInfo(system="widevine", license_url=stream_info.drm_license_url)
+
+        return PlaybackMedia(
+            session_id=session.session_id,
+            url=stream_info.url,
+            content_type=stream_info.content_type,
+            stream_type=resolved_stream_type,
+            title=title,
+            subtitle=subtitle,
+            images=images,
+            duration=resolved_duration,
+            autoplay=load_request.autoplay,
+            start_time=load_request.current_time,
+            drm=drm,
+            custom_data=custom_data,
+        )
+
+    @override
+    async def on_playback_update(
+        self,
+        session: ProviderSession,
+        state: PlaybackState,
+    ) -> None:
+        internal = self._sessions.get(session.session_id)
+        if internal is None:
             return
+        internal.playback_state = state
 
-        match message:
-            case LoadRequest():
-                await _cancel_task(state.load_task)
-                state.load_task = asyncio.create_task(
-                    self._handle_load(session, state, message)
-                )
-            case PlayRequest():
-                state.player_state = PlayerState.PLAYING
-                await self._send_media_status(session, state, message.request_id)
-                await self._media_handler.on_play(session.session_id)
-            case PauseRequest():
-                state.player_state = PlayerState.PAUSED
-                await self._send_media_status(session, state, message.request_id)
-                await self._media_handler.on_pause(session.session_id)
-            case SeekRequest():
-                state.current_time = message.current_time
-                await self._send_media_status(session, state, message.request_id)
-                await self._media_handler.on_seek(
-                    session.session_id, message.current_time
-                )
-            case MediaGetStatusRequest():
-                await self._send_media_status(session, state, message.request_id)
-            case MediaStopRequest():
-                await self._reset_media_state(state)
-                empty = MediaStatusResponse(request_id=message.request_id, status=[])
-                await session.broadcast_custom(
-                    ns.MEDIA, empty.model_dump(exclude_none=True)
-                )
-                await self._media_handler.on_stop(session.session_id)
-            case MediaSetVolumeRequest():
-                volume_fields = message.volume.model_fields_set
-                if "level" in volume_fields:
-                    state.volume_level = message.volume.level
-                if "muted" in volume_fields:
-                    state.volume_muted = message.volume.muted
+        receiver_status = self._receiver_status_from_player_state(state.player_state)
+        await self._broadcast_receiver_state(internal, receiver_status)
+        if receiver_status == "CASTING":
+            await self._broadcast_posdur(internal, state)
 
-                await self._media_handler.on_volume(
-                    session.session_id,
-                    state.volume_level,
-                    state.volume_muted,
-                )
-                await self._send_media_status(session, state, message.request_id)
-            case QueueGetItemIdsRequest():
-                has_inflight_load = (
-                    state.load_task is not None and not state.load_task.done()
-                )
-                has_active_media = (
-                    state.current_media is not None
-                    or state.player_state is not PlayerState.IDLE
-                )
-                item_ids = (
-                    [state.media_session_id]
-                    if (has_active_media or has_inflight_load)
-                    else []
-                )
-                queue = QueueItemIdsResponse(
-                    request_id=message.request_id,
-                    item_ids=item_ids,
-                    sequence_number=0,
-                )
-                log.debug(
-                    "replying QUEUE_ITEM_IDS request_id=%d item_ids=%s",
-                    message.request_id,
-                    item_ids,
-                )
-                await session.send_custom(ns.MEDIA, queue.model_dump(exclude_none=True))
-            case _:
-                # QueueLoadRequest or any unknown — send empty status
-                empty = MediaStatusResponse(request_id=message.request_id, status=[])
-                await session.send_custom(ns.MEDIA, empty.model_dump(exclude_none=True))
+    @override
+    async def resolve_license(
+        self,
+        session: ProviderSession,
+        request: LicenseRequest,
+    ) -> LicenseResponse:
+        state = self._sessions.get(session.session_id)
+        if state is None or not state.current_license_url:
+            return LicenseResponse(body=b"placeholder-license-response")
+
+        body = await state.api.fetch_license(state.current_license_url, request.body)
+        return LicenseResponse(body=body)
 
     @override
     async def on_stop(self, session: ProviderSession) -> None:
         state = self._sessions.pop(session.session_id, None)
         if state is None:
             return
-        # Cancel and await background tasks
-        for task in (state.auth_task, state.poll_task, state.load_task):
+        for task in (state.auth_task, state.poll_task):
             await _cancel_task(task)
         log.info("viaplay session %s stopped", session.session_id)
-
-    @override
-    async def update_playback(
-        self,
-        session_id: str,
-        player_state: PlayerState,
-        current_time: float = 0.0,
-        idle_reason: IdleReason | None = None,
-    ) -> None:
-        """Push playback state from an external player (e.g. Kodi)."""
-        state = self._sessions.get(session_id)
-        if state is None:
-            return
-        previous_player_state = state.player_state
-        state.player_state = player_state
-        state.current_time = current_time
-
-        status = self._build_media_status(state, idle_reason=idle_reason)
-        response = MediaStatusResponse(request_id=0, status=[status])
-        await state.broadcast(ns.MEDIA, response.model_dump(exclude_none=True))
-
-        receiver_status = self._receiver_status_from_player_state(player_state)
-        if player_state != previous_player_state:
-            await self._broadcast_receiver_state(state, receiver_status)
-
-        if receiver_status == "CASTING":
-            await self._broadcast_posdur(state)
-
-    # -- SETUP_INFO handler --------------------------------------------------
 
     async def _handle_setup_info(
         self,
@@ -361,7 +292,6 @@ class ViaplayProvider(Provider):
         state: _ViaplayState,
         msg: SetupInfo,
     ) -> None:
-        """Process ``SETUP_INFO`` and spawn the auth flow."""
         state.user_id = msg.user_id
         state.profile_id = msg.profile_id
         state.country_code = msg.country_code or "se"
@@ -385,66 +315,57 @@ class ViaplayProvider(Provider):
         state.poll_task = None
         state.auth_task = asyncio.create_task(self._run_auth_flow(session, state))
 
-    # -- Auth flow -----------------------------------------------------------
-
     async def _run_auth_flow(
         self,
         session: ProviderSession,
         state: _ViaplayState,
     ) -> None:
-        """Three-step authentication cascade."""
         try:
             result = await state.api.check_session()
 
-            # 1) Check if already authenticated
             if result.user and result.user.user_id == state.user_id:
                 self._mark_authenticated(
-                    state, result.user.first_name, result.user.last_name
+                    state,
+                    result.user.first_name,
+                    result.user.last_name,
                 )
                 await self._send_session_ok(session, state)
                 return
 
-            # 2) Try persistent login
-            pl_url = result.persistent_login_url
-            if pl_url:
-                ok = await state.api.persistent_login(pl_url)
-                if ok:
-                    recheck = await state.api.check_session()
-                    if recheck.user and recheck.user.user_id == state.user_id:
-                        self._mark_authenticated(
-                            state, recheck.user.first_name, recheck.user.last_name
-                        )
-                        await self._send_session_ok(session, state)
-                        return
-                    log.warning(
-                        "persistent login succeeded but session user mismatch (expected %s); continuing auth flow",
-                        state.user_id,
+            persistent_login_url = result.persistent_login_url
+            if persistent_login_url and await state.api.persistent_login(
+                persistent_login_url
+            ):
+                recheck = await state.api.check_session()
+                if recheck.user and recheck.user.user_id == state.user_id:
+                    self._mark_authenticated(
+                        state,
+                        recheck.user.first_name,
+                        recheck.user.last_name,
                     )
+                    await self._send_session_ok(session, state)
+                    return
 
-            # 3) Try token login
             token = state.credentials.credentials or ""
-            tl_url = result.token_login_url
-            if token and tl_url:
-                ok = await state.api.token_login(tl_url, token)
-                if ok:
-                    recheck = await state.api.check_session()
-                    if recheck.user and recheck.user.user_id == state.user_id:
-                        self._mark_authenticated(
-                            state, recheck.user.first_name, recheck.user.last_name
-                        )
-                        await self._send_session_ok(session, state)
-                        return
-                    log.warning(
-                        "token login succeeded but session user mismatch (expected %s); continuing auth flow",
-                        state.user_id,
+            token_login_url = result.token_login_url
+            if (
+                token
+                and token_login_url
+                and await state.api.token_login(token_login_url, token)
+            ):
+                recheck = await state.api.check_session()
+                if recheck.user and recheck.user.user_id == state.user_id:
+                    self._mark_authenticated(
+                        state,
+                        recheck.user.first_name,
+                        recheck.user.last_name,
                     )
+                    await self._send_session_ok(session, state)
+                    return
 
-            # 4) Device code fallback
             await self._start_device_auth(session, state, result)
-
         except Exception:
             log.exception("auth flow failed")
-            # Signal waiters so a pending LOAD doesn't hang.
             state.auth_event.set()
 
     @staticmethod
@@ -453,7 +374,6 @@ class ViaplayProvider(Provider):
         first_name: str = "",
         last_name: str = "",
     ) -> None:
-        """Set the session as authenticated and signal waiters."""
         state.authenticated = True
         if first_name or last_name:
             state.user_display_name = f"{first_name} {last_name}".strip()
@@ -465,39 +385,29 @@ class ViaplayProvider(Provider):
         state: _ViaplayState,
         root_result: SessionCheckResult,
     ) -> None:
-        """Initiate device-code authorization flow."""
         auth_info = await state.api.get_device_authorization(root_result)
         state.auth_pending = True
 
-        activate_url = auth_info.activate_url
-
-        # Build receiver state for AUTHORIZATION_REQUIRED
-        rs = self._build_viaplay_receiver_state(
+        receiver_state = self._build_viaplay_receiver_state(
             state,
             status="AUTHORIZATION_REQUIRED",
-            authorization_url=activate_url,
+            authorization_url=auth_info.activate_url,
             user_code=auth_info.user_code,
         )
-
-        auth_msg = AuthorizationRequiredMessage(
-            authorization_url=activate_url or None,
-            receiver_state=rs,
-        )
-        log.debug(
-            "broadcasting AUTHORIZATION_REQUIRED (user_code=%s, authorization_url=%s)",
-            auth_info.user_code,
-            activate_url,
+        message = AuthorizationRequiredMessage(
+            authorization_url=auth_info.activate_url or None,
+            receiver_state=receiver_state,
         )
         await session.broadcast_custom(
-            _NS_VIAPLAY, auth_msg.model_dump(exclude_none=True)
+            _NS_VIAPLAY, message.model_dump(exclude_none=True)
         )
-
-        state_msg = ReceiverStateMessage(receiver_state=rs)
         await session.broadcast_custom(
-            _NS_VIAPLAY, state_msg.model_dump(exclude_none=True)
+            _NS_VIAPLAY,
+            ReceiverStateMessage(receiver_state=receiver_state).model_dump(
+                exclude_none=True
+            ),
         )
 
-        # Start polling
         await _cancel_task(state.poll_task)
         state.poll_task = asyncio.create_task(
             self._poll_for_authorization(session, state, auth_info)
@@ -509,8 +419,7 @@ class ViaplayProvider(Provider):
         state: _ViaplayState,
         auth_info: DeviceAuthInfo,
     ) -> None:
-        """Poll every 3s for up to 5 minutes."""
-        timeout = 300  # 5 minutes
+        timeout = 300
         interval = 3
         elapsed = 0.0
 
@@ -535,256 +444,64 @@ class ViaplayProvider(Provider):
         session: ProviderSession,
         state: _ViaplayState,
     ) -> None:
-        """Finalize device-code authentication."""
         if state.authenticated:
             return
 
         try:
             result = await state.api.check_session()
-            if result.user is None:
-                log.debug("complete device auth: no session user yet")
+            if result.user is None or result.user.user_id != state.user_id:
                 return
 
-            if result.user.user_id != state.user_id:
-                log.warning(
-                    "complete device auth user mismatch (expected %s, got %s)",
-                    state.user_id,
-                    result.user.user_id,
-                )
-                return
-
-            first = result.user.first_name if result.user else ""
-            last = result.user.last_name if result.user else ""
-            self._mark_authenticated(state, first, last)
+            self._mark_authenticated(
+                state,
+                result.user.first_name,
+                result.user.last_name,
+            )
             state.auth_pending = False
             await self._send_session_ok(session, state)
         except Exception:
             log.exception("complete device auth failed")
-
-    # -- LOAD handler --------------------------------------------------------
-
-    async def _handle_load(
-        self,
-        session: ProviderSession,
-        state: _ViaplayState,
-        load_req: LoadRequest,
-    ) -> None:
-        """Resolve stream URL and notify external player."""
-        # Wait for auth (up to 30s)
-        with contextlib.suppress(TimeoutError):
-            _ = await asyncio.wait_for(state.auth_event.wait(), timeout=30)
-
-        if not state.authenticated:
-            fail = LoadFailedResponse(
-                request_id=load_req.request_id,
-                reason="NOT_AUTHENTICATED",
-            )
-            await session.send_custom(ns.MEDIA, fail.model_dump(exclude_none=True))
-            return
-
-        # Extract play URL from customData
-        custom = load_req.custom_data or {}
-        templated_product_url = custom.get("templatedproducturl") or custom.get(
-            "templatedProductUrl"
-        )
-        if isinstance(templated_product_url, str) and templated_product_url:
-            state.current_product_url = templated_product_url
-        else:
-            product_url = custom.get("producturl") or custom.get("productUrl")
-            state.current_product_url = (
-                product_url if isinstance(product_url, str) and product_url else None
-            )
-        state.loading_product_url = None
-
-        subtitle_lang = custom.get("subtitleLanguageCode")
-        state.subtitle_active_language_code = (
-            subtitle_lang if isinstance(subtitle_lang, str) and subtitle_lang else None
-        )
-
-        audio_track = custom.get("audioTrackLanguageCode")
-        state.audio_active_track = (
-            audio_track if isinstance(audio_track, str) and audio_track else None
-        )
-
-        subtitle_enabled = custom.get("subtitleActive")
-        if isinstance(subtitle_enabled, dict | bool):
-            state.subtitle_enabled = subtitle_enabled
-
-        play_url = custom.get("playUrl") or custom.get("contentUrl") or ""
-        if not play_url:
-            fail = LoadFailedResponse(
-                request_id=load_req.request_id,
-                reason="NO_PLAY_URL",
-            )
-            await session.send_custom(ns.MEDIA, fail.model_dump(exclude_none=True))
-            return
-
-        # Resolve stream
-        try:
-            stream_info = await state.api.fetch_stream(play_url)
-        except Exception:
-            log.exception("stream resolution failed for %s", play_url)
-            fail = LoadFailedResponse(
-                request_id=load_req.request_id,
-                reason="STREAM_FETCH_FAILED",
-            )
-            await session.send_custom(ns.MEDIA, fail.model_dump(exclude_none=True))
-            return
-
-        # Update state
-        state.stream_url = stream_info.url
-        state.stream_content_type = stream_info.content_type
-        state.player_state = PlayerState.BUFFERING
-        state.current_time = load_req.current_time
-        resolved_stream_type = stream_info.stream_type or load_req.media.stream_type
-        if resolved_stream_type is StreamType.NONE:
-            resolved_stream_type = StreamType.BUFFERED
-        resolved_duration = stream_info.duration
-        if resolved_duration is None:
-            requested_duration = load_req.media.duration
-            resolved_duration = (
-                requested_duration
-                if requested_duration and requested_duration > 0
-                else None
-            )
-
-        state.current_media = load_req.media.model_copy(
-            update={
-                "stream_type": resolved_stream_type,
-                "duration": resolved_duration,
-            }
-        )
-
-        # Extract metadata
-        title = stream_info.title
-        if not title and load_req.media.metadata:
-            title = load_req.media.metadata.title
-
-        stream_type = resolved_stream_type
-
-        # Build DRM info if a license URL was resolved
-        drm: DrmInfo | None = None
-        if stream_info.drm_license_url:
-            drm = DrmInfo(system="widevine", license_url=stream_info.drm_license_url)
-
-        # Send MEDIA_STATUS (BUFFERING)
-        await self._send_media_status(session, state, load_req.request_id)
-
-        # Broadcast RECEIVER_STATE in Viaplay's status vocabulary.
-        await self._broadcast_receiver_state(
-            state,
-            self._receiver_status_from_player_state(state.player_state),
-        )
-
-        # Notify external player
-        info = MediaLoadInfo(
-            session_id=session.session_id,
-            stream_url=stream_info.url,
-            content_type=stream_info.content_type,
-            stream_type=stream_type,
-            title=title,
-            duration=resolved_duration,
-            autoplay=load_req.autoplay,
-            start_time=load_req.current_time,
-            drm=drm,
-            custom_data=custom,
-        )
-        try:
-            await self._media_handler.on_load(info)
-        except Exception:
-            log.exception("media handler on_load failed")
-            self._clear_media_state(state)
-
-            fail = LoadFailedResponse(
-                request_id=load_req.request_id,
-                reason="PLAYER_LOAD_FAILED",
-            )
-            await session.send_custom(ns.MEDIA, fail.model_dump(exclude_none=True))
-
-            empty = MediaStatusResponse(request_id=load_req.request_id, status=[])
-            await session.broadcast_custom(
-                ns.MEDIA, empty.model_dump(exclude_none=True)
-            )
-            await self._broadcast_receiver_state(state, "IDLE")
-
-    # -- Message helpers -----------------------------------------------------
 
     async def _send_session_ok(
         self,
         session: ProviderSession,
         state: _ViaplayState,
     ) -> None:
-        rs = self._build_viaplay_receiver_state(state, status="IDLE")
-        msg = SessionOkMessage(
+        receiver_state = self._build_viaplay_receiver_state(state, status="IDLE")
+        message = SessionOkMessage(
             user_id=state.user_id,
             profile_id=state.profile_id,
             user_display_name=state.user_display_name or None,
-            receiver_state=rs,
+            receiver_state=receiver_state,
         )
-        await session.broadcast_custom(_NS_VIAPLAY, msg.model_dump(exclude_none=True))
-
-    async def _reset_media_state(self, state: _ViaplayState) -> None:
-        await _cancel_task(state.load_task)
-        state.load_task = None
-        self._clear_media_state(state)
-
-    @staticmethod
-    def _clear_media_state(state: _ViaplayState) -> None:
-        state.player_state = PlayerState.IDLE
-        state.current_media = None
-        state.current_time = 0.0
-        state.stream_url = ""
-        state.stream_content_type = ""
-        state.current_product_url = None
-        state.loading_product_url = None
+        await session.broadcast_custom(
+            _NS_VIAPLAY, message.model_dump(exclude_none=True)
+        )
 
     async def _broadcast_receiver_state(
         self,
         state: _ViaplayState,
         status: str,
     ) -> None:
-        rs = self._build_viaplay_receiver_state(state, status=status)
-        msg = ReceiverStateMessage(receiver_state=rs)
-        log.debug("broadcasting RECEIVER_STATE status=%s", status)
-        await state.broadcast(_NS_VIAPLAY, msg.model_dump(exclude_none=True))
-
-    async def _broadcast_posdur(self, state: _ViaplayState) -> None:
-        media = state.current_media
-        if media is None or media.duration is None or media.duration <= 0:
-            return
-
-        receiver_status = self._receiver_status_from_player_state(state.player_state)
-        rs = self._build_viaplay_receiver_state(state, status=receiver_status)
-        message = PosDurMessage(
-            position=max(0, int(state.current_time)),
-            duration=max(0, int(media.duration)),
-            receiver_state=rs,
-        )
-        log.debug(
-            "broadcasting POSDUR position=%d duration=%d",
-            message.position,
-            message.duration,
-        )
+        receiver_state = self._build_viaplay_receiver_state(state, status=status)
+        message = ReceiverStateMessage(receiver_state=receiver_state)
         await state.broadcast(_NS_VIAPLAY, message.model_dump(exclude_none=True))
 
-    async def _send_media_status(
+    async def _broadcast_posdur(
         self,
-        session: ProviderSession,
         state: _ViaplayState,
-        request_id: int,
+        playback_state: PlaybackState,
     ) -> None:
-        status = self._build_media_status(state)
-        response = MediaStatusResponse(request_id=request_id, status=[status])
-        log.debug(
-            "sending MEDIA_STATUS request_id=%d player_state=%s current_time=%.3f stream_url=%s",
-            request_id,
-            state.player_state,
-            state.current_time,
-            bool(state.stream_url),
-        )
-        await session.broadcast_custom(ns.MEDIA, response.model_dump(exclude_none=True))
+        if playback_state.duration is None or playback_state.duration <= 0:
+            return
 
-    # -- State builders ------------------------------------------------------
+        receiver_state = self._build_viaplay_receiver_state(state, status="CASTING")
+        message = PosDurMessage(
+            position=max(0, int(playback_state.current_time)),
+            duration=max(0, int(playback_state.duration)),
+            receiver_state=receiver_state,
+        )
+        await state.broadcast(_NS_VIAPLAY, message.model_dump(exclude_none=True))
 
     def _build_viaplay_receiver_state(
         self,
@@ -823,7 +540,6 @@ class ViaplayProvider(Provider):
 
     @staticmethod
     def _receiver_status_from_player_state(player_state: PlayerState) -> str:
-        """Map media player state to Viaplay receiver-state status."""
         if player_state in {
             PlayerState.PLAYING,
             PlayerState.PAUSED,
@@ -832,43 +548,8 @@ class ViaplayProvider(Provider):
             return "CASTING"
         return "IDLE"
 
-    def _build_media_status(
-        self,
-        state: _ViaplayState,
-        *,
-        idle_reason: IdleReason | None = None,
-    ) -> MediaStatus:
-        media: MediaInfo | None = None
-        if state.current_media and state.stream_url:
-            media = MediaInfo(
-                content_id=state.stream_url,
-                content_type=state.stream_content_type,
-                stream_type=state.current_media.stream_type,
-                metadata=state.current_media.metadata,
-                duration=state.current_media.duration,
-            )
-        return MediaStatus(
-            media_session_id=state.media_session_id,
-            media=media,
-            player_state=state.player_state,
-            current_time=state.current_time,
-            supported_media_commands=_SUPPORTED_MEDIA_COMMANDS,
-            volume=Volume(level=state.volume_level, muted=state.volume_muted),
-            idle_reason=idle_reason,
-        )
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 async def _cancel_task(task: asyncio.Task[None] | None) -> None:
-    """Cancel an asyncio task and await its completion.
-
-    Suppresses :class:`asyncio.CancelledError` and any other exception
-    the task may have raised.
-    """
     if task is None or task.done():
         return
     _ = task.cancel()
@@ -876,4 +557,4 @@ async def _cancel_task(task: asyncio.Task[None] | None) -> None:
         await task
 
 
-__all__ = ["ViaplayProvider"]
+__all__ = ["ViaplayProvider", "_NS_VIAPLAY"]

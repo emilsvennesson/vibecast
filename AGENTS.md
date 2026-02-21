@@ -12,6 +12,14 @@ receiver. It accepts TLS connections from iOS/Android/Chrome Cast senders,
 performs device authentication, handles the Cast platform protocol, and delegates
 app-specific behavior to modular **providers** (e.g. Viaplay).
 
+Media control uses a mediator architecture:
+
+- `PlaybackCoordinator` (per app session) owns canonical playback state
+- `Player` ABC is the internal playback interface
+- `PlayerServer` is the default `Player` implementation exposing:
+  - WebSocket `GET /player` for commands/state reports
+  - HTTP `POST /license/{session_id}` for DRM license proxying
+
 ## Backward Compatibility
 
 Do not preserve backward compatibility by default; if a direct API or behavior
@@ -169,8 +177,11 @@ Provider-specific namespaces (handled by app sessions):
    Sender -> CONNECT to transport "pid-1"
 
 7. APP-SPECIFIC COMMUNICATION
-   Messages routed to provider's session by destination transport_id
-   Media namespace: LOAD, PLAY, PAUSE, SEEK -> MEDIA_STATUS responses
+   Messages routed to provider session by destination transport_id
+   Media namespace handled by PlaybackCoordinator:
+   LOAD/PLAY/PAUSE/SEEK/STOP/SET_VOLUME -> MEDIA_STATUS responses
+   Coordinator invokes Provider.resolve_media(), Player callbacks,
+   and Provider.on_playback_update() as state changes
    Custom namespaces: provider-specific messages
 
 8. TEARDOWN
@@ -325,6 +336,27 @@ Viaplay API headers must mimic a real Chromecast:
 
 ## Architecture & Design Decisions
 
+### Playback Mediation: Coordinator + Player Server
+
+The receiver always starts an internal player bridge server (`PlayerServer`) in
+parallel with the Cast TLS server.
+
+- `CastReceiver` owns both servers (`:8009` Cast, `:8010` player by default)
+- `Device.start_session()` creates a `PlaybackCoordinator` for each app session
+- `AppSession` routes media namespace requests to its coordinator
+- Coordinator owns canonical `MEDIA_STATUS` state and broadcasts updates
+- Coordinator invokes provider hooks:
+  - `resolve_media(session, load_request) -> PlaybackMedia`
+  - `on_playback_update(session, state)`
+  - `resolve_license(session, request) -> LicenseResponse`
+
+`PlayerServer` behavior:
+
+- Primary WS client reports (`state` / `error`) update coordinator state
+- Observer WS clients receive commands but their reports are ignored
+- New WS clients are auto-synced (`load` + seek + play/pause) from snapshots
+- License POSTs are delegated per session via coordinator -> provider
+
 ### Concurrency: asyncio
 
 The library uses `asyncio` throughout. For Kodi integration, run the event loop
@@ -388,8 +420,9 @@ certs in their wire formats (DER for auth response, PEM for TLS context).
 ### Package Layout Convention
 
 - `castvibe/` — library root
-- Public modules: `receiver.py`, `provider.py`, `__init__.py`
+- Public modules: `receiver.py`, `provider.py`, `player.py`, `__init__.py`
 - Private modules: prefixed with `_` (e.g. `_server.py`, `_connection.py`)
+- Playback internals: `_coordinator.py`, `_player_server.py`
 - `_models/` — Pydantic message models subpackage
 - `_proto/` — protobuf definitions and generated code
 - `providers/` — bundled provider implementations
@@ -407,7 +440,7 @@ uv run pytest              # run tests
 ### Type Checking: basedpyright
 
 ```bash
-uv run basedpyright
+uv run basedpyright --warnings
 ```
 
 Configuration in `pyproject.toml`:
@@ -418,8 +451,9 @@ Configuration in `pyproject.toml`:
 - Duplicate imports: error
 - `reportAny`: hint (not error)
 
-All code must pass basedpyright with zero errors. Use proper type annotations
-everywhere — `dict[str, Any]`, return types, parameter types.
+All code must pass basedpyright with zero errors and zero warnings. Treat
+warnings as errors. Use proper type annotations everywhere — `dict[str, Any]`,
+return types, parameter types.
 
 ### Linting & Formatting: ruff
 
@@ -477,7 +511,9 @@ consumers don't need protoc installed.
 | `protobuf`     | `>=5.0`     | CastMessage wire format                    |
 | `zeroconf`     | `>=0.140`   | mDNS service advertisement                 |
 | `cryptography` | `>=44.0`    | PEM/DER parsing, cert digest               |
-| `aiohttp`      | `>=3.11`    | Async HTTP (provider API calls)            |
+| `httpx`        | `>=0.28`    | Async HTTP client (provider APIs)          |
+| `aiohttp`      | `>=3.11`    | Player bridge server (WebSocket + HTTP)    |
+| `uritemplate`  | `>=4.1`     | URI-template expansion for provider APIs   |
 
 Dev dependencies:
 | Package | Purpose |
