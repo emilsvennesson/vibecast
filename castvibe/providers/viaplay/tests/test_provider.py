@@ -213,6 +213,56 @@ class TestSetupInfo:
         # The auth flow coroutine should have been awaited via the task
         mock_auth.assert_awaited_once()
 
+    async def test_setup_info_resets_stale_auth_state(self, tmp_path: Any) -> None:
+        p = ViaplayProvider(data_dir=tmp_path)
+        session, _, _ = _make_session()
+        await p.on_launch(session, LaunchCredentials(credentials="tok"))
+
+        state = p._sessions["sess-1"]  # noqa: SLF001
+
+        blocker = asyncio.Event()
+
+        async def _pending() -> None:
+            _ = await blocker.wait()
+
+        stale_auth_task = asyncio.create_task(_pending())
+        stale_poll_task = asyncio.create_task(_pending())
+        state.auth_task = stale_auth_task
+        state.poll_task = stale_poll_task
+        state.authenticated = True
+        state.auth_pending = True
+        state.auth_event.set()
+        state.user_display_name = "Old User"
+
+        with patch.object(p, "_run_auth_flow", new_callable=AsyncMock) as mock_auth:
+            await p.on_message(
+                session,
+                _NS_VIAPLAY,
+                {
+                    "type": "SETUP_INFO",
+                    "contentRoot": "https://content.viaplay.se/stotta",
+                    "countryCode": "se",
+                    "userId": "user-2",
+                    "profileId": "prof-2",
+                },
+            )
+
+            assert stale_auth_task.done() is True
+            assert stale_auth_task.cancelled() is True
+            assert stale_poll_task.done() is True
+            assert stale_poll_task.cancelled() is True
+            assert state.authenticated is False
+            assert state.auth_pending is False
+            assert state.auth_event.is_set() is False
+            assert state.user_display_name == ""
+            assert state.auth_task is not stale_auth_task
+            assert state.poll_task is None
+
+            if state.auth_task:
+                await state.auth_task
+
+        mock_auth.assert_awaited_once()
+
 
 # ---------------------------------------------------------------------------
 # on_message — AUTHORIZATION_DONE
@@ -552,7 +602,7 @@ class TestMediaMessages:
         self,
         launched: tuple[ViaplayProvider, ProviderSession, AsyncMock, AsyncMock],
     ) -> None:
-        p, session, handler, _broadcast = launched
+        p, session, handler, broadcast = launched
         await p.on_media_message(
             session,
             MediaSetVolumeRequest(
@@ -563,6 +613,38 @@ class TestMediaMessages:
         )
 
         handler.on_volume.assert_awaited_once_with("sess-1", 0.5, True)
+        state = p._sessions["sess-1"]  # noqa: SLF001
+        assert state.volume_level == 0.5
+        assert state.volume_muted is True
+
+        call_ns, data = broadcast.call_args.args
+        assert call_ns == "urn:x-cast:com.google.cast.media"
+        assert data["status"][0]["volume"] == {"level": 0.5, "muted": True}
+
+    async def test_volume_partial_update_preserves_existing_level(
+        self,
+        launched: tuple[ViaplayProvider, ProviderSession, AsyncMock, AsyncMock],
+    ) -> None:
+        p, session, handler, broadcast = launched
+        state = p._sessions["sess-1"]  # noqa: SLF001
+        state.volume_level = 0.35
+        state.volume_muted = False
+
+        await p.on_media_message(
+            session,
+            MediaSetVolumeRequest(
+                request_id=19,
+                media_session_id=1,
+                volume=Volume.model_validate({"muted": True}),
+            ),
+        )
+
+        handler.on_volume.assert_awaited_once_with("sess-1", 0.35, True)
+        assert state.volume_level == 0.35
+        assert state.volume_muted is True
+
+        _, data = broadcast.call_args.args
+        assert data["status"][0]["volume"] == {"level": 0.35, "muted": True}
 
     async def test_queue_get_item_ids(
         self,
@@ -867,6 +949,68 @@ class TestLoadHandling:
         assert state.current_media is not None
         assert state.current_media.stream_type == StreamType.BUFFERED
         assert state.current_media.duration is None
+
+    async def test_load_handler_error_sends_load_failed_and_resets_state(
+        self, tmp_path: Any
+    ) -> None:
+        handler = _make_handler()
+        handler.on_load.side_effect = RuntimeError("player failed")
+
+        p = ViaplayProvider(media_handler=handler, data_dir=tmp_path)
+        session, broadcast, send = _make_session()
+        await p.on_launch(session, LaunchCredentials())
+
+        state = p._sessions["sess-1"]  # noqa: SLF001
+        state.authenticated = True
+        state.auth_event.set()
+
+        mock_stream = StreamInfo(
+            url="https://cdn/v.mpd",
+            content_type="application/dash+xml",
+        )
+        with patch.object(
+            state.api,
+            "fetch_stream",
+            new_callable=AsyncMock,
+            return_value=mock_stream,
+        ):
+            load_req = LoadRequest(
+                request_id=20,
+                media=MediaInfo(
+                    content_id="https://x",
+                    content_type="video/mp4",
+                    stream_type=StreamType.BUFFERED,
+                ),
+                custom_data={"playUrl": "https://content.viaplay.se/play/1234"},
+            )
+            await p.on_media_message(session, load_req)
+            if state.load_task:
+                await state.load_task
+
+        _, data = send.await_args_list[0].args
+        assert data["type"] == "LOAD_FAILED"
+        assert data["reason"] == "PLAYER_LOAD_FAILED"
+
+        assert state.player_state == PlayerState.IDLE
+        assert state.current_media is None
+        assert state.stream_url == ""
+
+        media_status_messages = [
+            payload
+            for namespace, payload in (call.args for call in broadcast.await_args_list)
+            if namespace == "urn:x-cast:com.google.cast.media"
+            and payload.get("type") == "MEDIA_STATUS"
+        ]
+        assert media_status_messages
+        assert media_status_messages[-1]["status"] == []
+
+        receiver_state_messages = [
+            payload
+            for namespace, payload in (call.args for call in broadcast.await_args_list)
+            if namespace == _NS_VIAPLAY and payload.get("type") == "RECEIVER_STATE"
+        ]
+        assert receiver_state_messages
+        assert receiver_state_messages[-1]["receiverState"]["status"] == "IDLE"
 
     async def test_load_fails_without_auth(self, tmp_path: Any) -> None:
         p = ViaplayProvider(data_dir=tmp_path)

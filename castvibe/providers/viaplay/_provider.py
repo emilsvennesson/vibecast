@@ -112,6 +112,8 @@ class _ViaplayState:
     subtitle_active_language_code: str | None = None
     subtitle_enabled: bool | dict[str, Any] | None = True
     audio_active_track: str | None = None
+    volume_level: float = 1.0
+    volume_muted: bool = False
 
     # Background tasks
     auth_task: asyncio.Task[None] | None = field(default=None, repr=False)
@@ -275,10 +277,16 @@ class ViaplayProvider(Provider):
                 )
                 await self._media_handler.on_stop(session.session_id)
             case MediaSetVolumeRequest():
+                volume_fields = message.volume.model_fields_set
+                if "level" in volume_fields:
+                    state.volume_level = message.volume.level
+                if "muted" in volume_fields:
+                    state.volume_muted = message.volume.muted
+
                 await self._media_handler.on_volume(
                     session.session_id,
-                    message.volume.level,
-                    message.volume.muted,
+                    state.volume_level,
+                    state.volume_muted,
                 )
                 await self._send_media_status(session, state, message.request_id)
             case QueueGetItemIdsRequest():
@@ -372,6 +380,12 @@ class ViaplayProvider(Provider):
         )
 
         await _cancel_task(state.auth_task)
+        await _cancel_task(state.poll_task)
+        state.authenticated = False
+        state.auth_pending = False
+        state.auth_event.clear()
+        state.user_display_name = ""
+        state.poll_task = None
         state.auth_task = asyncio.create_task(self._run_auth_flow(session, state))
 
     # -- Auth flow -----------------------------------------------------------
@@ -678,7 +692,23 @@ class ViaplayProvider(Provider):
             drm=drm,
             custom_data=custom,
         )
-        await self._media_handler.on_load(info)
+        try:
+            await self._media_handler.on_load(info)
+        except Exception:
+            log.exception("media handler on_load failed")
+            self._clear_media_state(state)
+
+            fail = LoadFailedResponse(
+                request_id=load_req.request_id,
+                reason="PLAYER_LOAD_FAILED",
+            )
+            await session.send_custom(ns.MEDIA, fail.model_dump(exclude_none=True))
+
+            empty = MediaStatusResponse(request_id=load_req.request_id, status=[])
+            await session.broadcast_custom(
+                ns.MEDIA, empty.model_dump(exclude_none=True)
+            )
+            await self._broadcast_receiver_state(state, "IDLE")
 
     # -- Message helpers -----------------------------------------------------
 
@@ -699,6 +729,10 @@ class ViaplayProvider(Provider):
     async def _reset_media_state(self, state: _ViaplayState) -> None:
         await _cancel_task(state.load_task)
         state.load_task = None
+        self._clear_media_state(state)
+
+    @staticmethod
+    def _clear_media_state(state: _ViaplayState) -> None:
         state.player_state = PlayerState.IDLE
         state.current_media = None
         state.current_time = 0.0
@@ -822,7 +856,7 @@ class ViaplayProvider(Provider):
             player_state=state.player_state,
             current_time=state.current_time,
             supported_media_commands=_SUPPORTED_MEDIA_COMMANDS,
-            volume=Volume(level=1.0, muted=False),
+            volume=Volume(level=state.volume_level, muted=state.volume_muted),
             idle_reason=idle_reason,
         )
 
