@@ -112,7 +112,8 @@ class DummyProvider(Provider):
 def _patch_runtime(monkeypatch: Any, *, crl: bytes = b"test-crl") -> None:
     monkeypatch.setattr("castvibe.receiver.CastAdvertisement", DummyAdvertisement)
 
-    async def fake_fetch_crl() -> bytes:
+    async def fake_fetch_crl(*, client: Any | None = None) -> bytes:
+        _ = client
         return crl
 
     monkeypatch.setattr("castvibe.receiver.fetch_crl", fake_fetch_crl)

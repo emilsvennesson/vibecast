@@ -11,6 +11,7 @@ from castvibe.provider import (
     MediaLoadInfo,
     Provider,
     ProviderSession,
+    ReceiverContext,
 )
 from castvibe.receiver import CastReceiver, ReceiverConfig
 
@@ -25,4 +26,5 @@ __all__ = [
     "Provider",
     "ProviderSession",
     "ReceiverConfig",
+    "ReceiverContext",
 ]

@@ -12,7 +12,8 @@ from uuid import uuid4
 from castvibe._certificate import CertificateBundle
 from castvibe.receiver import CastReceiver, ReceiverConfig
 
-_DEFAULT_DEVICE_ID_PATH = Path.home() / ".castvibe" / "cast_receiver_device_id"
+_DEFAULT_DATA_DIR = Path.home() / ".castvibe"
+_DEVICE_ID_FILE_NAME = "cast_receiver_device_id"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -40,6 +41,12 @@ def _parse_args() -> argparse.Namespace:
             "Stable device ID for mDNS/discovery. "
             "If omitted, castvibe persists one at ~/.castvibe/cast_receiver_device_id"
         ),
+    )
+    _ = parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=_DEFAULT_DATA_DIR,
+        help="Persistent receiver data (cookies, device IDs, provider state)",
     )
     _ = parser.add_argument(
         "--host",
@@ -82,13 +89,16 @@ def _load_or_create_device_id(path: Path) -> str:
 
 async def _run(args: argparse.Namespace) -> None:
     bundle = CertificateBundle.from_manifest(args.manifest)
-    device_id = args.device_id or _load_or_create_device_id(_DEFAULT_DEVICE_ID_PATH)
+    data_dir = args.data_dir
+    device_id_path = data_dir / _DEVICE_ID_FILE_NAME
+    device_id = args.device_id or _load_or_create_device_id(device_id_path)
     config = ReceiverConfig(
         friendly_name=args.name,
         device_model=args.model,
         device_id=device_id,
         host=args.host,
         port=args.port,
+        data_dir=data_dir,
     )
     receiver = CastReceiver(config=config, certificates=bundle)
     await receiver.run_forever()

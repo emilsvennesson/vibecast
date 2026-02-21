@@ -24,9 +24,19 @@ from castvibe._models import (
     media_request_adapter,
 )
 from castvibe._util import extract_request_id, parse_json_payload
-from castvibe.provider import LaunchCredentials, Provider, ProviderSession
+from castvibe.provider import (
+    LaunchCredentials,
+    Provider,
+    ProviderSession,
+    ReceiverContext,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+
+    from httpx import AsyncClient
+
     from castvibe._connection import Connection
     from castvibe._proto.cast_channel_pb2 import CastMessage
 
@@ -81,6 +91,7 @@ class AppSession(TransportHandler):
     session_id: str
     transport_id: str
     provider: Provider
+    receiver: ReceiverContext
     credentials: LaunchCredentials
     namespaces: tuple[str, ...]
     status_text: str = ""
@@ -209,6 +220,8 @@ class AppSession(TransportHandler):
             session_id=self.session_id,
             transport_id=self.transport_id,
             app_id=self.app_id,
+            http_client=self.device.http_client,
+            receiver=self.receiver,
             send_custom=send_custom,
             broadcast_custom=broadcast_custom,
             send_media_status=send_media_status,
@@ -219,6 +232,8 @@ class Device:
     """Central hub for Cast transport registration, subscriptions, and routing."""
 
     __slots__ = (
+        "_data_dir",
+        "_get_http_client",
         "_subscriptions",
         "_transport_counter",
         "config",
@@ -227,8 +242,17 @@ class Device:
         "volume",
     )
 
-    def __init__(self, config: DeviceIdentity) -> None:
+    def __init__(
+        self,
+        config: DeviceIdentity,
+        *,
+        get_http_client: Callable[[], AsyncClient],
+        data_dir: Path,
+    ) -> None:
         self.config = config
+        self._get_http_client = get_http_client
+        self._data_dir = data_dir
+        self._data_dir.mkdir(parents=True, exist_ok=True)
         self.transports: dict[str, Transport] = {}
         self.sessions: dict[str, AppSession] = {}
         self._subscriptions: dict[tuple[Connection, str], str] = {}
@@ -239,6 +263,10 @@ class Device:
             control_type="attenuation",
             step_interval=0.05,
         )
+
+    @property
+    def http_client(self) -> AsyncClient:
+        return self._get_http_client()
 
     # ------------------------------------------------------------------
     # Transport management
@@ -408,6 +436,9 @@ class Device:
         )
         provider_namespaces.append(ns.MEDIA)
 
+        provider_data_dir = self._data_dir / "providers" / provider.provider_key()
+        provider_data_dir.mkdir(parents=True, exist_ok=True)
+
         session = AppSession(
             device=self,
             app_id=app_id,
@@ -415,6 +446,12 @@ class Device:
             session_id=session_id,
             transport_id=transport_id,
             provider=provider,
+            receiver=ReceiverContext(
+                friendly_name=self.config.friendly_name,
+                device_model=self.config.device_model,
+                device_id=self.config.device_id,
+                data_dir=provider_data_dir,
+            ),
             credentials=credentials,
             namespaces=tuple(provider_namespaces),
         )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from importlib.metadata import EntryPoint, EntryPoints, entry_points
@@ -21,6 +22,9 @@ from castvibe._models import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
+    from pathlib import Path
+
+    from httpx import AsyncClient
 
 log = get_logger("provider")
 
@@ -119,11 +123,23 @@ class LaunchCredentials:
     credentials_type: str | None = None
 
 
+@dataclass(slots=True, frozen=True)
+class ReceiverContext:
+    """Receiver metadata made available to provider sessions."""
+
+    friendly_name: str
+    device_model: str
+    device_id: str
+    data_dir: Path
+
+
 class ProviderSession:
     """Provider callback context for interacting with Cast senders."""
 
     __slots__ = (
         "app_id",
+        "http_client",
+        "receiver",
         "session_id",
         "transport_id",
         "_broadcast_custom",
@@ -137,6 +153,8 @@ class ProviderSession:
         session_id: str,
         transport_id: str,
         app_id: str,
+        http_client: AsyncClient,
+        receiver: ReceiverContext,
         send_custom: Callable[[str, dict[str, Any]], Awaitable[None]],
         broadcast_custom: Callable[[str, dict[str, Any]], Awaitable[None]],
         send_media_status: Callable[[MediaStatus, int], Awaitable[None]],
@@ -144,6 +162,8 @@ class ProviderSession:
         self.session_id = session_id
         self.transport_id = transport_id
         self.app_id = app_id
+        self.http_client = http_client
+        self.receiver = receiver
         self._send_custom = send_custom
         self._broadcast_custom = broadcast_custom
         self._send_media_status = send_media_status
@@ -175,6 +195,25 @@ class Provider(ABC):
     @abstractmethod
     def namespaces(self) -> frozenset[str]:
         """Return custom namespaces handled by this provider."""
+
+    def provider_key(self) -> str:
+        """Stable filesystem-safe key for receiver-managed provider data.
+
+        Derived from the class name: strips a ``Provider`` suffix (if
+        present) and converts PascalCase to snake_case.  For example,
+        ``ViaplayProvider`` yields ``"viaplay"``; ``MyCustomProvider``
+        yields ``"my_custom"``.
+
+        Override this method if the default derivation is unsuitable
+        (e.g. acronym-heavy names like ``ABCProvider`` produce
+        ``"a_b_c"``), or if two providers share a class name.
+        """
+        name = self.__class__.__name__
+        if name.endswith("Provider"):
+            name = name[:-8]
+        if not name:
+            name = self.__class__.__name__
+        return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
     @abstractmethod
     async def on_launch(
@@ -324,5 +363,6 @@ __all__ = [
     "Provider",
     "ProviderRegistry",
     "ProviderSession",
+    "ReceiverContext",
     "discover_providers",
 ]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, override
 
 from castvibe import _namespace as ns
@@ -20,6 +21,8 @@ from tests.conftest import make_cast_message
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from httpx import AsyncClient
 
     from castvibe._connection import Connection
 
@@ -80,7 +83,9 @@ def _build_device(provider_lookup: Callable[[str], Provider | None]) -> Device:
             device_model="Chromecast",
             device_id="device-1234",
             ssdp_udn="device-1234",
-        )
+        ),
+        get_http_client=lambda: cast("AsyncClient", object()),
+        data_dir=Path("/tmp/castvibe-tests"),
     )
     platform = PlatformHandler(device, provider_lookup=provider_lookup)
     device.register_transport("receiver-0", platform)

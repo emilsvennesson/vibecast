@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Any, override
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-    from pathlib import Path
 
 import castvibe._namespace as ns
 from castvibe._models import (
@@ -133,7 +132,6 @@ class ViaplayProvider(Provider):
         media_handler: Optional handler for media events.  When a stream is
             resolved the handler's :meth:`~MediaEventHandler.on_load` method
             is called with a :class:`~castvibe.provider.MediaLoadInfo`.
-        data_dir: Directory for cookie / device-id persistence.
     """
 
     _APP_IDS = frozenset({"6313CF39", "2DB7CC49"})
@@ -143,12 +141,10 @@ class ViaplayProvider(Provider):
         self,
         *,
         media_handler: MediaEventHandler | None = None,
-        data_dir: Path | None = None,
     ) -> None:
         self._media_handler: MediaEventHandler = (
             media_handler or DefaultMediaEventHandler()
         )
-        self._data_dir = data_dir
         self._sessions: dict[str, _ViaplayState] = {}
 
     # -- Provider ABC --------------------------------------------------------
@@ -171,7 +167,9 @@ class ViaplayProvider(Provider):
         session: ProviderSession,
         credentials: LaunchCredentials,
     ) -> None:
-        api = ViaplayAPI(data_dir=self._data_dir)
+        api = ViaplayAPI(
+            client=session.http_client, device_id=session.receiver.device_id
+        )
         state = _ViaplayState(
             api=api,
             credentials=credentials,
@@ -326,7 +324,6 @@ class ViaplayProvider(Provider):
         # Cancel and await background tasks
         for task in (state.auth_task, state.poll_task, state.load_task):
             await _cancel_task(task)
-        await state.api.close()
         log.info("viaplay session %s stopped", session.session_id)
 
     @override

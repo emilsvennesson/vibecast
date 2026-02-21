@@ -12,6 +12,11 @@ receiver. It accepts TLS connections from iOS/Android/Chrome Cast senders,
 performs device authentication, handles the Cast platform protocol, and delegates
 app-specific behavior to modular **providers** (e.g. Viaplay).
 
+## Backward Compatibility
+
+Do not preserve backward compatibility by default; if a direct API or behavior
+change is clearly better for the project, implement it directly.
+
 ## Reference Implementations
 
 Two existing codebases serve as implementation references. **Do not port code
@@ -486,4 +491,4 @@ Dev dependencies:
 
 ## Tool usage
 
-Always use Context7 when you need code generation, setup or configuration steps, or library/API documentation. This means you should automatically use the Context7 MCP tools to resolve library IDs and get library docs without me having to explicitly ask. You can also search the web for up-to-date documentation using the web-search tool.
+Always use Context7 when you need code generation, setup or configuration steps, or library/API documentation. This means you should automatically use the Context7 MCP tools to resolve library IDs and get library docs without me having to explicitly ask. You can also search the web for up-to-date documentation using the web-search tool. You can also search the web for up-to-date documentation using the web-search tool.

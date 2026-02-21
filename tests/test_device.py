@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, override
 
 from castvibe import _namespace as ns
@@ -11,6 +12,8 @@ from castvibe.provider import LaunchCredentials, Provider
 from tests.conftest import make_cast_message
 
 if TYPE_CHECKING:
+    from httpx import AsyncClient
+
     from castvibe._connection import Connection
     from castvibe._proto.cast_channel_pb2 import CastMessage
 
@@ -106,7 +109,9 @@ def _build_device() -> Device:
             friendly_name="Living Room",
             device_model="Chromecast",
             device_id="device-1234",
-        )
+        ),
+        get_http_client=lambda: cast("AsyncClient", object()),
+        data_dir=Path("/tmp/castvibe-tests"),
     )
 
 
@@ -215,6 +220,18 @@ class TestRouting:
 
 
 class TestSessionLifecycle:
+    def test_session_receiver_context_uses_receiver_managed_data_dir(self) -> None:
+        device = _build_device()
+        provider = FakeProvider(display_name="Viaplay", namespaces=frozenset())
+
+        session = device.start_session("6313CF39", provider, LaunchCredentials())
+
+        assert session.receiver.friendly_name == "Living Room"
+        assert session.receiver.device_model == "Chromecast"
+        assert session.receiver.device_id == "device-1234"
+        assert session.receiver.data_dir == Path("/tmp/castvibe-tests/providers/fake")
+        assert session.receiver.data_dir.exists()
+
     async def test_start_and_stop_session(self) -> None:
         device = _build_device()
         provider = FakeProvider(
