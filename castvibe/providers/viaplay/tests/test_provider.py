@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
+if TYPE_CHECKING:
+    from httpx import AsyncClient
 
 from castvibe._models import (
     LoadRequest,
@@ -27,6 +31,7 @@ from castvibe.provider import (
     MediaEventHandler,
     MediaLoadInfo,
     ProviderSession,
+    ReceiverContext,
 )
 from castvibe.providers.viaplay._api import (
     DeviceAuthInfo,
@@ -53,10 +58,18 @@ def _make_session(
     """
     broadcast_mock = AsyncMock()
     send_mock = AsyncMock()
+    receiver_data_dir = Path("/tmp/castvibe-tests/providers/viaplay")
     session = ProviderSession(
         session_id=session_id,
         transport_id=transport_id,
         app_id=app_id,
+        http_client=cast("AsyncClient", object()),
+        receiver=ReceiverContext(
+            friendly_name="Living Room",
+            device_model="Chromecast",
+            device_id="receiver-device-id",
+            data_dir=receiver_data_dir,
+        ),
         send_custom=send_mock,
         broadcast_custom=broadcast_mock,
         send_media_status=AsyncMock(),
@@ -67,6 +80,11 @@ def _make_session(
 def _make_handler() -> AsyncMock:
     """Create an AsyncMock that satisfies MediaEventHandler."""
     return AsyncMock(spec=MediaEventHandler)
+
+
+@pytest.fixture
+def _tmp_path(tmp_path: Path) -> Path:  # pyright: ignore[reportUnusedFunction]
+    return tmp_path
 
 
 # ---------------------------------------------------------------------------
@@ -94,8 +112,8 @@ class TestProviderProperties:
 
 
 class TestLaunchStop:
-    async def test_on_launch_creates_session(self, tmp_path: Any) -> None:
-        p = ViaplayProvider(data_dir=tmp_path)
+    async def test_on_launch_creates_session(self, _tmp_path: Any) -> None:
+        p = ViaplayProvider()
         session, _, _ = _make_session()
         creds = LaunchCredentials(credentials="token", credentials_type="iOS")
 
@@ -103,8 +121,8 @@ class TestLaunchStop:
 
         assert "sess-1" in p._sessions  # noqa: SLF001
 
-    async def test_on_stop_removes_session(self, tmp_path: Any) -> None:
-        p = ViaplayProvider(data_dir=tmp_path)
+    async def test_on_stop_removes_session(self, _tmp_path: Any) -> None:
+        p = ViaplayProvider()
         session, _, _ = _make_session()
         creds = LaunchCredentials()
 
@@ -113,9 +131,9 @@ class TestLaunchStop:
 
         assert "sess-1" not in p._sessions  # noqa: SLF001
 
-    async def test_on_stop_idempotent(self, tmp_path: Any) -> None:
+    async def test_on_stop_idempotent(self, _tmp_path: Any) -> None:
         """Stopping a non-existent session should not raise."""
-        p = ViaplayProvider(data_dir=tmp_path)
+        p = ViaplayProvider()
         session, _, _ = _make_session()
         await p.on_stop(session)  # no prior launch — should be fine
 
@@ -127,9 +145,9 @@ class TestLaunchStop:
 
 class TestOnSenderConnected:
     async def test_broadcasts_empty_media_status_and_receiver_state(
-        self, tmp_path: Any
+        self, _tmp_path: Any
     ) -> None:
-        p = ViaplayProvider(data_dir=tmp_path)
+        p = ViaplayProvider()
         session, broadcast, _ = _make_session()
         await p.on_launch(session, LaunchCredentials())
 
@@ -151,9 +169,9 @@ class TestOnSenderConnected:
         assert second_data["receiverState"]["isScrubbable"] is True
 
     async def test_reconnect_with_active_media_sends_full_status(
-        self, tmp_path: Any
+        self, _tmp_path: Any
     ) -> None:
-        p = ViaplayProvider(data_dir=tmp_path)
+        p = ViaplayProvider()
         session, broadcast, _ = _make_session()
         await p.on_launch(session, LaunchCredentials())
 
@@ -187,8 +205,8 @@ class TestOnSenderConnected:
 
 
 class TestSetupInfo:
-    async def test_setup_info_triggers_auth_flow(self, tmp_path: Any) -> None:
-        p = ViaplayProvider(data_dir=tmp_path)
+    async def test_setup_info_triggers_auth_flow(self, _tmp_path: Any) -> None:
+        p = ViaplayProvider()
         session, _, _ = _make_session()
         await p.on_launch(session, LaunchCredentials(credentials="tok"))
 
@@ -213,8 +231,8 @@ class TestSetupInfo:
         # The auth flow coroutine should have been awaited via the task
         mock_auth.assert_awaited_once()
 
-    async def test_setup_info_resets_stale_auth_state(self, tmp_path: Any) -> None:
-        p = ViaplayProvider(data_dir=tmp_path)
+    async def test_setup_info_resets_stale_auth_state(self, _tmp_path: Any) -> None:
+        p = ViaplayProvider()
         session, _, _ = _make_session()
         await p.on_launch(session, LaunchCredentials(credentials="tok"))
 
@@ -271,9 +289,9 @@ class TestSetupInfo:
 
 class TestAuthorizationDone:
     async def test_success_false_does_not_trigger_completion(
-        self, tmp_path: Any
+        self, _tmp_path: Any
     ) -> None:
-        p = ViaplayProvider(data_dir=tmp_path)
+        p = ViaplayProvider()
         session, _, _ = _make_session()
         await p.on_launch(session, LaunchCredentials())
 
@@ -294,8 +312,8 @@ class TestAuthorizationDone:
 
         mock_complete.assert_not_awaited()
 
-    async def test_success_true_triggers_completion(self, tmp_path: Any) -> None:
-        p = ViaplayProvider(data_dir=tmp_path)
+    async def test_success_true_triggers_completion(self, _tmp_path: Any) -> None:
+        p = ViaplayProvider()
         session, _, _ = _make_session()
         await p.on_launch(session, LaunchCredentials())
 
@@ -318,8 +336,8 @@ class TestAuthorizationDone:
 
         mock_complete.assert_awaited_once()
 
-    async def test_goto_idle_resets_media_state(self, tmp_path: Any) -> None:
-        p = ViaplayProvider(data_dir=tmp_path)
+    async def test_goto_idle_resets_media_state(self, _tmp_path: Any) -> None:
+        p = ViaplayProvider()
         session, broadcast, _ = _make_session()
         await p.on_launch(session, LaunchCredentials())
 
@@ -370,9 +388,9 @@ class TestAuthorizationDone:
 
 class TestCompleteDeviceAuth:
     async def test_does_not_authenticate_without_session_user(
-        self, tmp_path: Any
+        self, _tmp_path: Any
     ) -> None:
-        p = ViaplayProvider(data_dir=tmp_path)
+        p = ViaplayProvider()
         session, broadcast, _ = _make_session()
         await p.on_launch(session, LaunchCredentials())
 
@@ -393,8 +411,8 @@ class TestCompleteDeviceAuth:
         assert state.auth_event.is_set() is False
         broadcast.assert_not_awaited()
 
-    async def test_does_not_authenticate_on_user_mismatch(self, tmp_path: Any) -> None:
-        p = ViaplayProvider(data_dir=tmp_path)
+    async def test_does_not_authenticate_on_user_mismatch(self, _tmp_path: Any) -> None:
+        p = ViaplayProvider()
         session, broadcast, _ = _make_session()
         await p.on_launch(session, LaunchCredentials())
 
@@ -423,9 +441,9 @@ class TestCompleteDeviceAuth:
 
 class TestAuthFlow:
     async def test_persistent_login_mismatch_falls_back_to_device_auth(
-        self, tmp_path: Any
+        self, _tmp_path: Any
     ) -> None:
-        p = ViaplayProvider(data_dir=tmp_path)
+        p = ViaplayProvider()
         session, _, _ = _make_session()
         await p.on_launch(session, LaunchCredentials())
 
@@ -466,9 +484,9 @@ class TestAuthFlow:
 
 class TestStartDeviceAuth:
     async def test_uses_expanded_activate_url_without_duplicating_user_code(
-        self, tmp_path: Any
+        self, _tmp_path: Any
     ) -> None:
-        p = ViaplayProvider(data_dir=tmp_path)
+        p = ViaplayProvider()
         session, broadcast, _ = _make_session()
         await p.on_launch(session, LaunchCredentials())
 
@@ -514,10 +532,10 @@ class TestStartDeviceAuth:
 class TestMediaMessages:
     @pytest.fixture
     async def launched(
-        self, tmp_path: Any
+        self, _tmp_path: Any
     ) -> tuple[ViaplayProvider, ProviderSession, AsyncMock, AsyncMock]:
         handler = _make_handler()
-        p = ViaplayProvider(media_handler=handler, data_dir=tmp_path)
+        p = ViaplayProvider(media_handler=handler)
         session, broadcast, _ = _make_session()
         await p.on_launch(session, LaunchCredentials())
         # Mark as authenticated and give it some media
@@ -648,9 +666,9 @@ class TestMediaMessages:
 
     async def test_queue_get_item_ids(
         self,
-        tmp_path: Any,
+        _tmp_path: Any,
     ) -> None:
-        p = ViaplayProvider(data_dir=tmp_path)
+        p = ViaplayProvider()
         session, _broadcast, send = _make_session()
         await p.on_launch(session, LaunchCredentials())
 
@@ -676,8 +694,10 @@ class TestMediaMessages:
             "sequenceNumber": 0,
         }
 
-    async def test_queue_get_item_ids_during_inflight_load(self, tmp_path: Any) -> None:
-        p = ViaplayProvider(data_dir=tmp_path)
+    async def test_queue_get_item_ids_during_inflight_load(
+        self, _tmp_path: Any
+    ) -> None:
+        p = ViaplayProvider()
         session, _broadcast, send = _make_session()
         await p.on_launch(session, LaunchCredentials())
 
@@ -711,9 +731,9 @@ class TestMediaMessages:
         }
 
     async def test_queue_get_item_ids_during_auth_flow_without_load(
-        self, tmp_path: Any
+        self, _tmp_path: Any
     ) -> None:
-        p = ViaplayProvider(data_dir=tmp_path)
+        p = ViaplayProvider()
         session, _broadcast, send = _make_session()
         await p.on_launch(session, LaunchCredentials())
 
@@ -753,8 +773,8 @@ class TestMediaMessages:
 
 
 class TestUpdatePlayback:
-    async def test_broadcasts_media_status(self, tmp_path: Any) -> None:
-        p = ViaplayProvider(data_dir=tmp_path)
+    async def test_broadcasts_media_status(self, _tmp_path: Any) -> None:
+        p = ViaplayProvider()
         session, broadcast, _ = _make_session()
         await p.on_launch(session, LaunchCredentials())
 
@@ -782,13 +802,13 @@ class TestUpdatePlayback:
         assert state_data["type"] == "RECEIVER_STATE"
         assert state_data["receiverState"]["status"] == "CASTING"
 
-    async def test_noop_for_unknown_session(self, tmp_path: Any) -> None:
+    async def test_noop_for_unknown_session(self, _tmp_path: Any) -> None:
         """update_playback should silently return for unknown sessions."""
-        p = ViaplayProvider(data_dir=tmp_path)
+        p = ViaplayProvider()
         await p.update_playback("nonexistent", PlayerState.IDLE)
 
-    async def test_emits_posdur_when_duration_known(self, tmp_path: Any) -> None:
-        p = ViaplayProvider(data_dir=tmp_path)
+    async def test_emits_posdur_when_duration_known(self, _tmp_path: Any) -> None:
+        p = ViaplayProvider()
         session, broadcast, _ = _make_session()
         await p.on_launch(session, LaunchCredentials())
 
@@ -818,10 +838,10 @@ class TestUpdatePlayback:
 
 class TestLoadHandling:
     async def test_load_resolves_stream_and_notifies_handler(
-        self, tmp_path: Any
+        self, _tmp_path: Any
     ) -> None:
         handler = _make_handler()
-        p = ViaplayProvider(media_handler=handler, data_dir=tmp_path)
+        p = ViaplayProvider(media_handler=handler)
         session, _, _ = _make_session()
         await p.on_launch(session, LaunchCredentials())
 
@@ -868,9 +888,9 @@ class TestLoadHandling:
         assert state.current_media.stream_type == StreamType.LIVE
         assert state.current_media.duration == 3600.0
 
-    async def test_load_propagates_drm_info(self, tmp_path: Any) -> None:
+    async def test_load_propagates_drm_info(self, _tmp_path: Any) -> None:
         handler = _make_handler()
-        p = ViaplayProvider(media_handler=handler, data_dir=tmp_path)
+        p = ViaplayProvider(media_handler=handler)
         session, _, _ = _make_session()
         await p.on_launch(session, LaunchCredentials())
 
@@ -908,9 +928,9 @@ class TestLoadHandling:
         assert info.drm.system == "widevine"
         assert info.drm.license_url == "https://drm.example.com/license"
 
-    async def test_load_normalizes_none_stream_type(self, tmp_path: Any) -> None:
+    async def test_load_normalizes_none_stream_type(self, _tmp_path: Any) -> None:
         handler = _make_handler()
-        p = ViaplayProvider(media_handler=handler, data_dir=tmp_path)
+        p = ViaplayProvider(media_handler=handler)
         session, _, _ = _make_session()
         await p.on_launch(session, LaunchCredentials())
 
@@ -951,12 +971,12 @@ class TestLoadHandling:
         assert state.current_media.duration is None
 
     async def test_load_handler_error_sends_load_failed_and_resets_state(
-        self, tmp_path: Any
+        self, _tmp_path: Any
     ) -> None:
         handler = _make_handler()
         handler.on_load.side_effect = RuntimeError("player failed")
 
-        p = ViaplayProvider(media_handler=handler, data_dir=tmp_path)
+        p = ViaplayProvider(media_handler=handler)
         session, broadcast, send = _make_session()
         await p.on_launch(session, LaunchCredentials())
 
@@ -1012,8 +1032,8 @@ class TestLoadHandling:
         assert receiver_state_messages
         assert receiver_state_messages[-1]["receiverState"]["status"] == "IDLE"
 
-    async def test_load_fails_without_auth(self, tmp_path: Any) -> None:
-        p = ViaplayProvider(data_dir=tmp_path)
+    async def test_load_fails_without_auth(self, _tmp_path: Any) -> None:
+        p = ViaplayProvider()
         session, _, send = _make_session()
         await p.on_launch(session, LaunchCredentials())
 
@@ -1050,8 +1070,8 @@ class TestLoadHandling:
         _, data = send.call_args.args
         assert data["type"] == "LOAD_FAILED"
 
-    async def test_load_fails_without_play_url(self, tmp_path: Any) -> None:
-        p = ViaplayProvider(data_dir=tmp_path)
+    async def test_load_fails_without_play_url(self, _tmp_path: Any) -> None:
+        p = ViaplayProvider()
         session, _, send = _make_session()
         await p.on_launch(session, LaunchCredentials())
 
@@ -1077,9 +1097,9 @@ class TestLoadHandling:
         assert data["reason"] == "NO_PLAY_URL"
 
     async def test_load_buffering_broadcasts_casting_receiver_state(
-        self, tmp_path: Any
+        self, _tmp_path: Any
     ) -> None:
-        p = ViaplayProvider(data_dir=tmp_path)
+        p = ViaplayProvider()
         session, broadcast, _send = _make_session()
         await p.on_launch(session, LaunchCredentials())
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import aiohttp
+import httpx
 
 from castvibe._proto.cast_channel_pb2 import (
     AuthResponse,
@@ -19,6 +19,8 @@ from castvibe._proto.cast_channel_pb2 import (
 )
 
 if TYPE_CHECKING:
+    from httpx import AsyncClient
+
     from castvibe._certificate import CertificateBundle
 
 #: Google's public endpoint serving the Cast device CRL.
@@ -63,7 +65,11 @@ def build_auth_response(
     return message.SerializeToString()
 
 
-async def fetch_crl(url: str = CRL_URL) -> bytes:
+async def fetch_crl(
+    url: str = CRL_URL,
+    *,
+    client: AsyncClient | None = None,
+) -> bytes:
     """Download the Cast device CRL from Google.
 
     The CRL is an opaque protobuf-encoded binary blob included in the
@@ -71,8 +77,16 @@ async def fetch_crl(url: str = CRL_URL) -> bytes:
     and reused for all subsequent auth challenges.
 
     Raises:
-        aiohttp.ClientError: On network or HTTP errors.
+        httpx.HTTPError: On network or HTTP errors.
     """
-    async with aiohttp.ClientSession() as session, session.get(url) as resp:
-        resp.raise_for_status()
-        return await resp.read()
+    if client is not None:
+        return await _fetch_crl_with_client(client, url)
+
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as session:
+        return await _fetch_crl_with_client(session, url)
+
+
+async def _fetch_crl_with_client(client: AsyncClient, url: str) -> bytes:
+    response = await client.get(url)
+    _ = response.raise_for_status()
+    return response.content

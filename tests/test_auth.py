@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
-from unittest.mock import AsyncMock, patch
-
+import httpx
 import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -230,54 +228,31 @@ class TestBuildAuthResponse:
         assert msg.response.intermediate_certificate[1] == ica2_der
 
 
-# ---------------------------------------------------------------------------
-# fetch_crl tests
-# ---------------------------------------------------------------------------
-
-
-def _make_mock_response(data: bytes) -> AsyncMock:
-    """Create a mock aiohttp response returning *data*."""
-    resp = AsyncMock()
-    resp.raise_for_status = lambda: None
-    resp.read = AsyncMock(return_value=data)
-    return resp
-
-
 class TestFetchCrl:
     """Tests for the async fetch_crl() function."""
 
     async def test_returns_bytes(self) -> None:
         """fetch_crl returns the raw response body as bytes."""
         expected = b"\x0a\xd0\x10"
-        mock_response = _make_mock_response(expected)
 
-        def mock_get(_url: str) -> _AsyncContextManager:
-            return _AsyncContextManager(mock_response)
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=expected)
 
-        mock_session = AsyncMock()
-        mock_session.get = mock_get
-
-        with patch("castvibe._auth.aiohttp.ClientSession") as mock_cls:
-            mock_cls.return_value = _AsyncContextManager(mock_session)
-            result = await fetch_crl()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            result = await fetch_crl(client=client)
 
         assert result == expected
 
     async def test_uses_default_url(self) -> None:
         """fetch_crl uses the CRL_URL constant by default."""
         captured_urls: list[str] = []
-        mock_response = _make_mock_response(b"data")
 
-        def capture_get(url: str) -> Any:
-            captured_urls.append(url)
-            return _AsyncContextManager(mock_response)
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured_urls.append(str(request.url))
+            return httpx.Response(200, content=b"data")
 
-        mock_session = AsyncMock()
-        mock_session.get = capture_get
-
-        with patch("castvibe._auth.aiohttp.ClientSession") as mock_cls:
-            mock_cls.return_value = _AsyncContextManager(mock_session)
-            _ = await fetch_crl()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            _ = await fetch_crl(client=client)
 
         assert captured_urls == [CRL_URL]
 
@@ -285,35 +260,12 @@ class TestFetchCrl:
         """fetch_crl accepts a custom URL."""
         captured_urls: list[str] = []
         custom = "https://example.com/custom-crl"
-        mock_response = _make_mock_response(b"data")
 
-        def capture_get(url: str) -> Any:
-            captured_urls.append(url)
-            return _AsyncContextManager(mock_response)
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured_urls.append(str(request.url))
+            return httpx.Response(200, content=b"data")
 
-        mock_session = AsyncMock()
-        mock_session.get = capture_get
-
-        with patch("castvibe._auth.aiohttp.ClientSession") as mock_cls:
-            mock_cls.return_value = _AsyncContextManager(mock_session)
-            _ = await fetch_crl(custom)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            _ = await fetch_crl(custom, client=client)
 
         assert captured_urls == [custom]
-
-
-# ---------------------------------------------------------------------------
-# Test helper for mocking async context managers
-# ---------------------------------------------------------------------------
-
-
-class _AsyncContextManager:
-    """Wraps an object so it can be used as ``async with ...``."""
-
-    def __init__(self, obj: Any) -> None:
-        self._obj = obj
-
-    async def __aenter__(self) -> Any:
-        return self._obj
-
-    async def __aexit__(self, *args: object) -> None:
-        return

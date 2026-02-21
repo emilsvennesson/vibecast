@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import patch
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+import httpx
 import pytest
-from aioresponses import aioresponses
 
 from castvibe._models import StreamType
 from castvibe.providers.viaplay._api import (
@@ -23,10 +24,77 @@ from castvibe.providers.viaplay._api import (
 # ---------------------------------------------------------------------------
 
 
+class _NoopClient:
+    async def get(self, url: str, *args: Any, **kwargs: Any) -> httpx.Response:
+        _ = args
+        _ = kwargs
+        msg = f"unexpected HTTP request: {url}"
+        raise AssertionError(msg)
+
+
+class aioresponses:  # noqa: N801
+    """Tiny compatibility shim for existing aioresponses-style tests."""
+
+    def __init__(self) -> None:
+        self._routes: list[
+            tuple[re.Pattern[str] | str, dict[str, Any] | None, bytes | None, int]
+        ] = []
+        self._patcher: Any = None
+
+    def get(
+        self,
+        url: re.Pattern[str] | str,
+        *,
+        payload: dict[str, Any] | None = None,
+        body: bytes | None = None,
+        status: int = 200,
+    ) -> None:
+        self._routes.append((url, payload, body, status))
+
+    def __enter__(self) -> aioresponses:
+        routes = self._routes
+
+        async def _mock_get(
+            _client: httpx.AsyncClient,
+            url: str,
+            *args: Any,
+            **kwargs: Any,
+        ) -> httpx.Response:
+            _ = args
+            _ = kwargs
+            url_str = str(url)
+            for pattern, payload, body, status in routes:
+                if _matches_url(pattern, url_str):
+                    request = httpx.Request("GET", url_str)
+                    if payload is not None:
+                        return httpx.Response(status, json=payload, request=request)
+                    if body is not None:
+                        return httpx.Response(status, content=body, request=request)
+                    return httpx.Response(status, json={}, request=request)
+            msg = f"unexpected mocked GET request: {url_str}"
+            raise AssertionError(msg)
+
+        self._patcher = patch("httpx.AsyncClient.get", new=_mock_get)
+        self._patcher.start()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        _ = args
+        if self._patcher is not None:
+            self._patcher.stop()
+
+
+def _matches_url(pattern: re.Pattern[str] | str, url: str) -> bool:
+    if isinstance(pattern, str):
+        return pattern == url
+    return pattern.match(url) is not None
+
+
 @pytest.fixture
-async def api(tmp_path: Any) -> AsyncIterator[ViaplayAPI]:
-    """Create a ViaplayAPI instance using a temporary data directory."""
-    a = ViaplayAPI(data_dir=tmp_path)
+async def api() -> AsyncIterator[ViaplayAPI]:
+    """Create a ViaplayAPI instance using a real httpx client."""
+    client = httpx.AsyncClient()
+    a = ViaplayAPI(client=client, device_id="receiver-device-id")
     a.set_setup_info(
         content_root="https://content.viaplay.se/stotta",
         country_code="se",
@@ -34,36 +102,26 @@ async def api(tmp_path: Any) -> AsyncIterator[ViaplayAPI]:
         profile_id="prof-1",
     )
     yield a
-    await a.close()
+    await client.aclose()
 
 
 # ---------------------------------------------------------------------------
-# Persistence tests
+# Receiver identity tests
 # ---------------------------------------------------------------------------
 
 
-class TestDeviceIdPersistence:
-    async def test_creates_device_id(self, tmp_path: Any) -> None:
-        a = ViaplayAPI(data_dir=tmp_path)
-        id_path = tmp_path / "viaplay_device_id"
-        assert id_path.exists()
-        stored = id_path.read_text().strip()
-        assert len(stored) == 36  # UUID format
-        assert a._device_id == stored  # noqa: SLF001
-
-    async def test_reuses_existing_device_id(self, tmp_path: Any) -> None:
-        id_path = tmp_path / "viaplay_device_id"
-        _ = id_path.write_text("existing-id-123")
-        a = ViaplayAPI(data_dir=tmp_path)
-        assert a._device_id == "existing-id-123"  # noqa: SLF001
+class TestReceiverIdentity:
+    async def test_uses_receiver_device_id(self) -> None:
+        a = ViaplayAPI(client=cast("Any", _NoopClient()), device_id="receiver-123")
+        assert a._device_id == "receiver-123"  # noqa: SLF001
 
 
 class TestDeviceKey:
     async def test_device_key_format(self, api: ViaplayAPI) -> None:
         assert api.device_key == "chromecastgoogletv4k-se"
 
-    async def test_device_key_changes_with_country(self, tmp_path: Any) -> None:
-        a = ViaplayAPI(data_dir=tmp_path)
+    async def test_device_key_changes_with_country(self) -> None:
+        a = ViaplayAPI(client=cast("Any", _NoopClient()), device_id="receiver-123")
         a.set_setup_info("https://x", "no", "u", "p")
         assert a.device_key == "chromecastgoogletv4k-no"
 
@@ -120,8 +178,8 @@ class TestCheckSession:
         assert result.user.first_name == "Test"
         assert result.persistent_login_url == "https://login.viaplay.com/pl"
 
-    async def test_raises_without_content_root(self, tmp_path: Any) -> None:
-        a = ViaplayAPI(data_dir=tmp_path)
+    async def test_raises_without_content_root(self) -> None:
+        a = ViaplayAPI(client=cast("Any", _NoopClient()), device_id="receiver-123")
         with pytest.raises(RuntimeError, match="content root not set"):
             _ = await a.check_session()
 

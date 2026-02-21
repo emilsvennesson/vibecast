@@ -1,19 +1,16 @@
 """Async HTTP client for the Viaplay API.
 
 Handles authentication flows (persistent login, token login, device-code
-authorization) and stream resolution.  Uses :mod:`aiohttp` with a cookie
-jar for session persistence.
+authorization) and stream resolution. Uses the receiver-managed
+:class:`httpx.AsyncClient` for request and cookie handling.
 """
 
 from __future__ import annotations
 
 import logging
-import uuid
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import aiohttp
 from uritemplate import expand as uri_expand
 
 from castvibe._models import StreamType
@@ -23,6 +20,9 @@ from castvibe.providers.viaplay._models import (
     ViaplaySessionResponse,
     ViaplayStreamResponse,
 )
+
+if TYPE_CHECKING:
+    from httpx import AsyncClient
 
 log = logging.getLogger("castvibe.viaplay.api")
 
@@ -103,41 +103,15 @@ class StreamInfo:
 class ViaplayAPI:
     """Async HTTP client for the Viaplay API."""
 
-    def __init__(self, data_dir: Path | None = None) -> None:
-        self._data_dir = data_dir or Path.home() / ".castvibe"
-        self._data_dir.mkdir(parents=True, exist_ok=True)
-
-        self._device_id = self._load_or_create_device_id()
-        # unsafe=True disables domain/path validation so cookies set by
-        # login.viaplay.com are sent to content.viaplay.se and other
-        # Viaplay subdomains — required for the cross-domain auth flow.
-        self._jar = aiohttp.CookieJar(unsafe=True)
-        self._session: aiohttp.ClientSession | None = None
+    def __init__(self, *, client: AsyncClient, device_id: str) -> None:
+        self._client = client
+        self._device_id = device_id
 
         # Populated by set_setup_info()
         self._content_root = ""
         self._country_code = ""
         self._user_id = ""
         self._profile_id = ""
-
-        self._load_cookies()
-
-    # -- lifecycle -----------------------------------------------------------
-
-    def _ensure_session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(
-                cookie_jar=self._jar,
-                timeout=aiohttp.ClientTimeout(total=15),
-            )
-        return self._session
-
-    async def close(self) -> None:
-        """Close the HTTP session and save cookies."""
-        self._save_cookies()
-        if self._session is not None and not self._session.closed:
-            await self._session.close()
-            self._session = None
 
     # -- setup ---------------------------------------------------------------
 
@@ -200,10 +174,9 @@ class ViaplayAPI:
         """GET *url*, optionally expanding URI templates.  Returns (json, status)."""
         if expand:
             url = self._expand(url, extra_vars)
-        session = self._ensure_session()
-        async with session.get(url, headers=self._default_headers()) as resp:
-            body = await resp.json(content_type=None)
-            return body, resp.status
+        response = await self._client.get(url, headers=self._default_headers())
+        body = response.json()
+        return body, response.status_code
 
     async def _get_raw(
         self,
@@ -215,10 +188,8 @@ class ViaplayAPI:
         """GET *url* returning raw bytes."""
         if expand:
             url = self._expand(url, extra_vars)
-        session = self._ensure_session()
-        async with session.get(url, headers=self._default_headers()) as resp:
-            body = await resp.read()
-            return body, resp.status
+        response = await self._client.get(url, headers=self._default_headers())
+        return response.content, response.status_code
 
     # -- authentication methods ----------------------------------------------
 
@@ -264,7 +235,6 @@ class ViaplayAPI:
             log.debug("session check returned status %d", status)
         elif result.user and result.user.user_id == self._user_id:
             log.info("session valid for user %s", self._user_id)
-            self._save_cookies()
         else:
             log.debug("session check: no matching user")
 
@@ -274,7 +244,6 @@ class ViaplayAPI:
         """Attempt persistent login at *url*.  Returns True on success."""
         _, status = await self._get(url)
         if status == 200:
-            self._save_cookies()
             log.info("persistent login succeeded")
             return True
         log.debug("persistent login returned %d", status)
@@ -285,7 +254,6 @@ class ViaplayAPI:
         url = self._expand(url_template, {"accessToken": access_token})
         _, status = await self._get_raw(url, expand=False)
         if status == 200:
-            self._save_cookies()
             log.info("token login succeeded")
             return True
         log.debug("token login returned %d", status)
@@ -354,7 +322,6 @@ class ViaplayAPI:
         body, status = await self._get(auth_info.authorized_url, extra_vars=extra)
 
         if status == 200:
-            self._save_cookies()
             # Try persistent login from the response
             resp = ViaplayAuthorizedPollResponse.model_validate(body)
             if resp.links and resp.links.persistent_login:
@@ -481,35 +448,3 @@ class ViaplayAPI:
         if resp.links is None:
             return ()
         return tuple(fb.href for fb in resp.links.fallback_media)
-
-    # -- device ID / cookie persistence --------------------------------------
-
-    def _load_or_create_device_id(self) -> str:
-        path = self._data_dir / "viaplay_device_id"
-        if path.exists():
-            device_id = path.read_text().strip()
-            if device_id:
-                return device_id
-        device_id = str(uuid.uuid4())
-        _ = path.write_text(device_id)
-        return device_id
-
-    def _cookie_path(self) -> Path:
-        return self._data_dir / "viaplay_cookies.json"
-
-    def _save_cookies(self) -> None:
-        """Persist cookies using aiohttp's built-in file saving."""
-        try:
-            self._jar.save(self._cookie_path())
-        except Exception:
-            log.debug("failed to save cookies", exc_info=True)
-
-    def _load_cookies(self) -> None:
-        """Load previously persisted cookies."""
-        path = self._cookie_path()
-        if not path.exists():
-            return
-        try:
-            self._jar.load(path)
-        except Exception:
-            log.debug("failed to load cookies", exc_info=True)

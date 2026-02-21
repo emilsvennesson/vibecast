@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -11,6 +12,7 @@ from castvibe._auth import fetch_crl
 from castvibe._device import Device, DeviceIdentity
 from castvibe._discovery import CastAdvertisement
 from castvibe._handlers import PlatformHandler
+from castvibe._http import ReceiverHTTPClient
 from castvibe._log import get_logger
 from castvibe._server import CastServer
 from castvibe.provider import Provider, ProviderRegistry, discover_providers
@@ -32,6 +34,7 @@ class ReceiverConfig:
     device_id: str | None = None
     host: str = "0.0.0.0"
     port: int = 8009
+    data_dir: Path = field(default_factory=lambda: Path.home() / ".castvibe")
 
 
 class CastReceiver:
@@ -40,6 +43,7 @@ class CastReceiver:
     __slots__ = (
         "_advertisement",
         "_certificates",
+        "_http",
         "_server",
         "_started",
         "_stop_event",
@@ -59,6 +63,7 @@ class CastReceiver:
 
         self.config = config
         self._certificates = certificates
+        self._http = ReceiverHTTPClient(data_dir=config.data_dir)
         self.providers = ProviderRegistry(
             discover_providers() if providers is None else providers
         )
@@ -68,7 +73,9 @@ class CastReceiver:
                 friendly_name=config.friendly_name,
                 device_model=config.device_model,
                 device_id=device_id,
-            )
+            ),
+            http_client=self._http.client,
+            data_dir=config.data_dir,
         )
 
         self.device.register_transport(
@@ -97,10 +104,14 @@ class CastReceiver:
         if self._started:
             return
 
+        if self._http.client.is_closed:
+            self._http = ReceiverHTTPClient(data_dir=self.config.data_dir)
+            self.device.set_http_client(self._http.client)
+
         crl = self._certificates.crl
         if crl is None:
             try:
-                crl = await fetch_crl()
+                crl = await fetch_crl(client=self._http.client)
                 log.info("fetched Cast CRL (%d bytes)", len(crl))
             except Exception as exc:
                 msg = "failed to fetch Cast CRL"
@@ -153,6 +164,7 @@ class CastReceiver:
         Safe to call multiple times; subsequent calls are no-ops.
         """
         if not self._started:
+            await self._http.close()
             return
         self._stop_event.set()
 
@@ -166,6 +178,7 @@ class CastReceiver:
                 await advertisement.stop()
         finally:
             await self._server.stop()
+            await self._http.close()
             self._started = False
             log.info("cast receiver stopped")
 
