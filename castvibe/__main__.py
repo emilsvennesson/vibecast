@@ -60,6 +60,17 @@ def _parse_args() -> argparse.Namespace:
         help="Port to bind the TLS Cast server to",
     )
     _ = parser.add_argument(
+        "--player-host",
+        default="0.0.0.0",
+        help="Host/interface to bind the player HTTP/WebSocket server to",
+    )
+    _ = parser.add_argument(
+        "--player-port",
+        type=int,
+        default=8010,
+        help="Port to bind the player HTTP/WebSocket server to",
+    )
+    _ = parser.add_argument(
         "--log-level",
         default="INFO",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
@@ -98,6 +109,8 @@ async def _run(args: argparse.Namespace) -> None:
         device_id=device_id,
         host=args.host,
         port=args.port,
+        player_host=args.player_host,
+        player_port=args.player_port,
         data_dir=data_dir,
     )
     receiver = CastReceiver(config=config, certificates=bundle)

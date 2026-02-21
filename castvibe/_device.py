@@ -9,14 +9,13 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 import castvibe._namespace as ns
+from castvibe._coordinator import PlaybackCoordinator
 from castvibe._log import get_logger
 from castvibe._models import (
     ApplicationStatus,
     CastNamespace,
     ConnectRequest,
     MediaInvalidRequestResponse,
-    MediaStatus,
-    MediaStatusResponse,
     ReceiverStatus,
     ReceiverStatusResponse,
     Volume,
@@ -38,7 +37,9 @@ if TYPE_CHECKING:
     from httpx import AsyncClient
 
     from castvibe._connection import Connection
+    from castvibe._player_server import PlayerServer
     from castvibe._proto.cast_channel_pb2 import CastMessage
+    from castvibe.player import Player
 
 log = get_logger("device")
 
@@ -94,6 +95,7 @@ class AppSession(TransportHandler):
     receiver: ReceiverContext
     credentials: LaunchCredentials
     namespaces: tuple[str, ...]
+    coordinator: PlaybackCoordinator | None = None
     status_text: str = ""
 
     async def on_launch(self, connection: Connection, sender_id: str) -> None:
@@ -103,6 +105,8 @@ class AppSession(TransportHandler):
 
     async def on_stop(self) -> None:
         """Invoke provider stop callback."""
+        if self.coordinator is not None:
+            await self.coordinator.close()
         context = self._build_context(connection=None, sender_id=None)
         await self.provider.on_stop(context)
 
@@ -120,9 +124,7 @@ class AppSession(TransportHandler):
         context = self._build_context(connection=connection, sender_id=msg.source_id)
 
         if msg.namespace == ns.MEDIA:
-            await self._handle_media_message(
-                connection, msg.source_id, payload, context
-            )
+            await self._handle_media_message(connection, msg.source_id, payload)
             return
 
         if msg.namespace in self.namespaces and msg.namespace != ns.MEDIA:
@@ -149,6 +151,8 @@ class AppSession(TransportHandler):
 
         if isinstance(request, ConnectRequest):
             self.device.add_subscription(connection, sender_id, self.transport_id)
+            if self.coordinator is not None:
+                await self.coordinator.send_current_status(connection, sender_id)
             context = self._build_context(connection=connection, sender_id=sender_id)
             await self.provider.on_sender_connected(context, sender_id)
             return
@@ -160,7 +164,6 @@ class AppSession(TransportHandler):
         connection: Connection,
         sender_id: str,
         payload: dict[str, Any],
-        context: ProviderSession,
     ) -> None:
         try:
             request = media_request_adapter.validate_python(payload)
@@ -178,7 +181,22 @@ class AppSession(TransportHandler):
             )
             return
 
-        await self.provider.on_media_message(context, request)
+        coordinator = self.coordinator
+        if coordinator is None:
+            response = MediaInvalidRequestResponse(
+                request_id=extract_request_id(payload),
+                reason="No playback coordinator",
+            )
+            await self.device.send_to_sender(
+                connection=connection,
+                source_id=self.transport_id,
+                dest_id=sender_id,
+                namespace=ns.MEDIA,
+                data=response.model_dump(exclude_none=True),
+            )
+            return
+
+        await coordinator.handle_media_message(connection, sender_id, request)
 
     def _build_context(
         self,
@@ -209,13 +227,6 @@ class AppSession(TransportHandler):
                 data=data,
             )
 
-        async def send_media_status(status: MediaStatus, request_id: int) -> None:
-            payload = MediaStatusResponse(
-                request_id=request_id,
-                status=[status],
-            ).model_dump(exclude_none=True)
-            await send_custom(ns.MEDIA, payload)
-
         return ProviderSession(
             session_id=self.session_id,
             transport_id=self.transport_id,
@@ -224,8 +235,11 @@ class AppSession(TransportHandler):
             receiver=self.receiver,
             send_custom=send_custom,
             broadcast_custom=broadcast_custom,
-            send_media_status=send_media_status,
         )
+
+    def create_provider_session(self) -> ProviderSession:
+        """Build a provider session context for internal service callbacks."""
+        return self._build_context(connection=None, sender_id=None)
 
 
 class Device:
@@ -425,6 +439,9 @@ class Device:
         app_id: str,
         provider: Provider,
         credentials: LaunchCredentials,
+        *,
+        player: Player,
+        player_server: PlayerServer | None,
     ) -> AppSession:
         """Create and register an app session transport."""
         transport_id = f"pid-{self._transport_counter}"
@@ -455,6 +472,42 @@ class Device:
             credentials=credentials,
             namespaces=tuple(provider_namespaces),
         )
+
+        provider_session = session.create_provider_session()
+
+        async def broadcast_fn(namespace: str, data: dict[str, Any]) -> None:
+            await self.broadcast(
+                source_id=transport_id,
+                namespace=namespace,
+                data=data,
+            )
+
+        async def send_fn(
+            connection: Connection,
+            sender_id: str,
+            namespace: str,
+            data: dict[str, Any],
+        ) -> None:
+            await self.send_to_sender(
+                connection=connection,
+                source_id=transport_id,
+                dest_id=sender_id,
+                namespace=namespace,
+                data=data,
+            )
+
+        session.coordinator = PlaybackCoordinator(
+            session_id=session_id,
+            transport_id=transport_id,
+            provider=provider,
+            provider_session=provider_session,
+            player=player,
+            player_server=player_server,
+            broadcast_fn=broadcast_fn,
+            send_fn=send_fn,
+            initial_volume=self.volume,
+        )
+
         self.sessions[session_id] = session
         self.register_transport(transport_id, session)
         return session

@@ -4,21 +4,11 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from importlib.metadata import EntryPoint, EntryPoints, entry_points
-from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, cast
 
-import castvibe._namespace as ns
 from castvibe._log import get_logger
-from castvibe._models import (
-    IdleReason,
-    MediaImage,
-    MediaRequest,
-    MediaStatus,
-    MediaStatusResponse,
-    PlayerState,
-    StreamType,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -26,93 +16,17 @@ if TYPE_CHECKING:
 
     from httpx import AsyncClient
 
+    from castvibe._models import LoadRequest
+    from castvibe.player import (
+        LicenseRequest,
+        LicenseResponse,
+        PlaybackMedia,
+        PlaybackState,
+    )
+
 log = get_logger("provider")
 
 _ENTRY_POINT_GROUP = "castvibe.providers"
-
-
-# ---------------------------------------------------------------------------
-# Data types for external media-player integration
-# ---------------------------------------------------------------------------
-
-
-@dataclass(slots=True, frozen=True)
-class DrmInfo:
-    """DRM configuration for protected content."""
-
-    system: str
-    """DRM system identifier (e.g. ``"widevine"``, ``"playready"``)."""
-
-    license_url: str
-    """URL of the license server."""
-
-    headers: dict[str, str] = field(default_factory=dict)
-    """Extra headers required for license requests."""
-
-
-@dataclass(slots=True, frozen=True)
-class MediaLoadInfo:
-    """Everything an external player needs to start playback."""
-
-    session_id: str
-    stream_url: str
-    content_type: str
-    stream_type: StreamType
-    title: str | None = None
-    subtitle: str | None = None
-    images: tuple[MediaImage, ...] = ()
-    duration: float | None = None
-    autoplay: bool = True
-    start_time: float = 0.0
-    drm: DrmInfo | None = None
-    custom_data: dict[str, Any] = field(default_factory=dict)
-
-
-@runtime_checkable
-class MediaEventHandler(Protocol):
-    """Integration point for external media players.
-
-    Implement this protocol to receive media events from any provider.
-    A Kodi addon, for example, would implement ``on_load`` to start
-    playback and ``on_pause`` to pause the player.
-    """
-
-    async def on_load(self, info: MediaLoadInfo) -> None: ...
-    async def on_play(self, session_id: str) -> None: ...
-    async def on_pause(self, session_id: str) -> None: ...
-    async def on_seek(self, session_id: str, position: float) -> None: ...
-    async def on_stop(self, session_id: str) -> None: ...
-    async def on_volume(self, session_id: str, level: float, muted: bool) -> None: ...
-
-
-class DefaultMediaEventHandler:
-    """No-op :class:`MediaEventHandler` used when no handler is provided."""
-
-    async def on_load(self, info: MediaLoadInfo) -> None:
-        _ = info
-
-    async def on_play(self, session_id: str) -> None:
-        _ = session_id
-
-    async def on_pause(self, session_id: str) -> None:
-        _ = session_id
-
-    async def on_seek(self, session_id: str, position: float) -> None:
-        _ = session_id
-        _ = position
-
-    async def on_stop(self, session_id: str) -> None:
-        _ = session_id
-
-    async def on_volume(self, session_id: str, level: float, muted: bool) -> None:
-        _ = session_id
-        _ = level
-        _ = muted
-
-
-# ---------------------------------------------------------------------------
-# Credentials
-# ---------------------------------------------------------------------------
 
 
 @dataclass(slots=True, frozen=True)
@@ -144,7 +58,6 @@ class ProviderSession:
         "transport_id",
         "_broadcast_custom",
         "_send_custom",
-        "_send_media_status",
     )
 
     def __init__(
@@ -157,7 +70,6 @@ class ProviderSession:
         receiver: ReceiverContext,
         send_custom: Callable[[str, dict[str, Any]], Awaitable[None]],
         broadcast_custom: Callable[[str, dict[str, Any]], Awaitable[None]],
-        send_media_status: Callable[[MediaStatus, int], Awaitable[None]],
     ) -> None:
         self.session_id = session_id
         self.transport_id = transport_id
@@ -166,7 +78,6 @@ class ProviderSession:
         self.receiver = receiver
         self._send_custom = send_custom
         self._broadcast_custom = broadcast_custom
-        self._send_media_status = send_media_status
 
     async def send_custom(self, namespace: str, data: dict[str, Any]) -> None:
         """Send a message to the sender associated with this callback."""
@@ -175,10 +86,6 @@ class ProviderSession:
     async def broadcast_custom(self, namespace: str, data: dict[str, Any]) -> None:
         """Broadcast a message to all senders connected to this transport."""
         await self._broadcast_custom(namespace, data)
-
-    async def send_media_status(self, status: MediaStatus, request_id: int) -> None:
-        """Send a ``MEDIA_STATUS`` response with a single status entry."""
-        await self._send_media_status(status, request_id)
 
 
 class Provider(ABC):
@@ -200,13 +107,9 @@ class Provider(ABC):
         """Stable filesystem-safe key for receiver-managed provider data.
 
         Derived from the class name: strips a ``Provider`` suffix (if
-        present) and converts PascalCase to snake_case.  For example,
+        present) and converts PascalCase to snake_case. For example,
         ``ViaplayProvider`` yields ``"viaplay"``; ``MyCustomProvider``
         yields ``"my_custom"``.
-
-        Override this method if the default derivation is unsuitable
-        (e.g. acronym-heavy names like ``ABCProvider`` produce
-        ``"a_b_c"``), or if two providers share a class name.
         """
         name = self.__class__.__name__
         if name.endswith("Provider"):
@@ -230,20 +133,15 @@ class Provider(ABC):
         namespace: str,
         data: dict[str, Any],
     ) -> None:
-        """Handle non-media messages for provider namespaces."""
+        """Handle provider namespace messages (excluding media namespace)."""
 
-    async def on_media_message(
+    @abstractmethod
+    async def resolve_media(
         self,
         session: ProviderSession,
-        message: MediaRequest,
-    ) -> None:
-        """Handle media namespace messages.
-
-        Default behavior mirrors the minimum receiver behavior by responding
-        with an empty ``MEDIA_STATUS`` payload.
-        """
-        response = MediaStatusResponse(request_id=message.request_id, status=[])
-        await session.send_custom(ns.MEDIA, response.model_dump(exclude_none=True))
+        load_request: LoadRequest,
+    ) -> PlaybackMedia:
+        """Translate a Cast ``LOAD`` request into canonical playback media."""
 
     async def on_sender_connected(
         self,
@@ -258,35 +156,29 @@ class Provider(ABC):
         """Called before an app session is removed."""
         _ = session
 
-    async def update_playback(
+    async def on_playback_update(
         self,
-        session_id: str,
-        player_state: PlayerState,
-        current_time: float = 0.0,
-        idle_reason: IdleReason | None = None,
+        session: ProviderSession,
+        state: PlaybackState,
     ) -> None:
-        """Push playback state from an external player.
+        """Called when canonical playback state changes."""
+        _ = session
+        _ = state
 
-        Integration code (e.g. a Kodi addon) calls this when the player's
-        state changes.  The provider translates it into a ``MEDIA_STATUS``
-        broadcast so connected senders stay in sync.
-
-        The default implementation is a no-op.  Override in providers that
-        support external playback control.
-        """
-        _ = session_id
-        _ = player_state
-        _ = current_time
-        _ = idle_reason
+    async def resolve_license(
+        self,
+        session: ProviderSession,
+        request: LicenseRequest,
+    ) -> LicenseResponse:
+        """Resolve a DRM license request proxied by the player server."""
+        _ = session
+        _ = request
+        msg = "provider does not support DRM license proxy"
+        raise NotImplementedError(msg)
 
 
 def discover_providers() -> list[Provider]:
-    """Discover and instantiate providers from package entry points.
-
-    Providers are constructed with **no arguments**.  Providers that
-    require constructor parameters (e.g. ``media_handler``) should be
-    instantiated manually and registered via :class:`ProviderRegistry`.
-    """
+    """Discover and instantiate providers from package entry points."""
     providers: list[Provider] = []
 
     eps = entry_points()
@@ -355,11 +247,7 @@ class ProviderRegistry:
 
 
 __all__ = [
-    "DefaultMediaEventHandler",
-    "DrmInfo",
     "LaunchCredentials",
-    "MediaEventHandler",
-    "MediaLoadInfo",
     "Provider",
     "ProviderRegistry",
     "ProviderSession",

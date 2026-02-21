@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any, cast, override
 
 from castvibe import _namespace as ns
 from castvibe._device import Device, DeviceIdentity, build_receiver_status
+from castvibe._models import LoadRequest, StreamType
+from castvibe.player import DefaultPlayer, PlaybackMedia
 from castvibe.provider import LaunchCredentials, Provider
 from tests.conftest import make_cast_message
 
@@ -98,6 +100,21 @@ class FakeProvider(Provider):
         _ = session
         self.stop_calls += 1
 
+    @override
+    async def resolve_media(
+        self,
+        session: Any,
+        load_request: LoadRequest,
+    ) -> PlaybackMedia:
+        _ = session
+        _ = load_request
+        return PlaybackMedia(
+            session_id="sess",
+            url="https://example.com/video.mpd",
+            content_type="application/dash+xml",
+            stream_type=StreamType.BUFFERED,
+        )
+
 
 def _as_connection(connection: RecordingConnection) -> Connection:
     return cast("Connection", cast("object", connection))
@@ -113,6 +130,10 @@ def _build_device() -> Device:
         get_http_client=lambda: cast("AsyncClient", object()),
         data_dir=Path("/tmp/castvibe-tests"),
     )
+
+
+def _build_player() -> DefaultPlayer:
+    return DefaultPlayer()
 
 
 class TestTransportManagement:
@@ -224,8 +245,14 @@ class TestSessionLifecycle:
         device = _build_device()
         provider = FakeProvider(display_name="Viaplay", namespaces=frozenset())
 
-        session = device.start_session("6313CF39", provider, LaunchCredentials())
-
+        # New coordinator pipeline always wires a player.
+        session = device.start_session(
+            "6313CF39",
+            provider,
+            LaunchCredentials(),
+            player=_build_player(),
+            player_server=None,
+        )
         assert session.receiver.friendly_name == "Living Room"
         assert session.receiver.device_model == "Chromecast"
         assert session.receiver.device_id == "device-1234"
@@ -245,6 +272,8 @@ class TestSessionLifecycle:
             credentials=LaunchCredentials(
                 credentials="token", credentials_type="bearer"
             ),
+            player=_build_player(),
+            player_server=None,
         )
 
         assert session.session_id in device.sessions
@@ -261,8 +290,20 @@ class TestSessionLifecycle:
         device = _build_device()
         provider = FakeProvider(display_name="App", namespaces=frozenset())
 
-        first = device.start_session("app-1", provider, LaunchCredentials())
-        second = device.start_session("app-2", provider, LaunchCredentials())
+        first = device.start_session(
+            "app-1",
+            provider,
+            LaunchCredentials(),
+            player=_build_player(),
+            player_server=None,
+        )
+        second = device.start_session(
+            "app-2",
+            provider,
+            LaunchCredentials(),
+            player=_build_player(),
+            player_server=None,
+        )
 
         assert first.transport_id == "pid-1"
         assert second.transport_id == "pid-2"
@@ -270,7 +311,13 @@ class TestSessionLifecycle:
     async def test_stop_orphaned_session_when_last_subscription_removed(self) -> None:
         device = _build_device()
         provider = FakeProvider(display_name="Viaplay", namespaces=frozenset())
-        session = device.start_session("6313CF39", provider, LaunchCredentials())
+        session = device.start_session(
+            "6313CF39",
+            provider,
+            LaunchCredentials(),
+            player=_build_player(),
+            player_server=None,
+        )
 
         conn = _as_connection(RecordingConnection())
         device.add_subscription(conn, "sender-1", session.transport_id)
@@ -287,7 +334,13 @@ class TestSessionLifecycle:
     async def test_keeps_session_when_other_subscribers_remain(self) -> None:
         device = _build_device()
         provider = FakeProvider(display_name="Viaplay", namespaces=frozenset())
-        session = device.start_session("6313CF39", provider, LaunchCredentials())
+        session = device.start_session(
+            "6313CF39",
+            provider,
+            LaunchCredentials(),
+            player=_build_player(),
+            player_server=None,
+        )
 
         conn1 = _as_connection(RecordingConnection())
         conn2 = _as_connection(RecordingConnection())
@@ -304,7 +357,13 @@ class TestSessionLifecycle:
     def test_receiver_status_sender_connected_tracks_subscriptions(self) -> None:
         device = _build_device()
         provider = FakeProvider(display_name="Viaplay", namespaces=frozenset())
-        session = device.start_session("6313CF39", provider, LaunchCredentials())
+        session = device.start_session(
+            "6313CF39",
+            provider,
+            LaunchCredentials(),
+            player=_build_player(),
+            player_server=None,
+        )
 
         status = build_receiver_status(device)
         app = status.status.applications[0]

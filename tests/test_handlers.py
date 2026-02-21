@@ -12,10 +12,13 @@ from castvibe._handlers import PlatformHandler
 from castvibe._models import (
     DeviceInfoResponse,
     LaunchErrorResponse,
+    LoadRequest,
     MultizoneStatusResponse,
     ReceiverStatusResponse,
     SetupResponse,
+    StreamType,
 )
+from castvibe.player import DefaultPlayer, PlaybackMedia
 from castvibe.provider import LaunchCredentials, Provider
 from tests.conftest import make_cast_message
 
@@ -71,6 +74,21 @@ class FakeProvider(Provider):
         _ = namespace
         _ = data
 
+    @override
+    async def resolve_media(
+        self,
+        session: Any,
+        load_request: LoadRequest,
+    ) -> PlaybackMedia:
+        _ = session
+        _ = load_request
+        return PlaybackMedia(
+            session_id="session",
+            url="https://example.com/video.mpd",
+            content_type="application/dash+xml",
+            stream_type=StreamType.BUFFERED,
+        )
+
 
 def _as_connection(connection: RecordingConnection) -> Connection:
     return cast("Connection", cast("object", connection))
@@ -87,7 +105,12 @@ def _build_device(provider_lookup: Callable[[str], Provider | None]) -> Device:
         get_http_client=lambda: cast("AsyncClient", object()),
         data_dir=Path("/tmp/castvibe-tests"),
     )
-    platform = PlatformHandler(device, provider_lookup=provider_lookup)
+    platform = PlatformHandler(
+        device,
+        player=DefaultPlayer(),
+        player_server=None,
+        provider_lookup=provider_lookup,
+    )
     device.register_transport("receiver-0", platform)
     return device
 
@@ -161,7 +184,13 @@ class TestPlatformNamespaces:
         device = _build_device(
             lambda app_id: provider if app_id == "6313CF39" else None
         )
-        _ = device.start_session("6313CF39", provider, LaunchCredentials())
+        _ = device.start_session(
+            "6313CF39",
+            provider,
+            LaunchCredentials(),
+            player=DefaultPlayer(),
+            player_server=None,
+        )
         connection = RecordingConnection()
 
         await _route(

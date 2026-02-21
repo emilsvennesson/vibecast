@@ -208,3 +208,4 @@ __marimo__/
 
 # Cast protocol capture logs
 capture_*.jsonl
+manifest.json

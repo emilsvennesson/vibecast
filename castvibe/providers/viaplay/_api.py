@@ -397,6 +397,12 @@ class ViaplayAPI:
         msg = "no stream URL found in API response"
         raise RuntimeError(msg)
 
+    async def fetch_license(self, license_url: str, challenge: bytes) -> bytes:
+        """Forward a DRM license challenge (placeholder implementation)."""
+        _ = license_url
+        _ = challenge
+        return b"placeholder-license-response"
+
     @staticmethod
     def _extract_drm_url(resp: ViaplayStreamResponse) -> str | None:
         """Return the best DRM license URL from a stream response."""

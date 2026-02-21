@@ -9,6 +9,9 @@ providers (for example Viaplay).
 ## Current capabilities
 
 - TLS Cast receiver on port `8009` (configurable)
+- Built-in player mediator server on port `8010` (configurable):
+  - `GET /player` (WebSocket command/report channel)
+  - `POST /license/{session_id}` (DRM license proxy)
 - Device auth response with cert chain + CRL
 - Core platform namespaces:
   - `urn:x-cast:com.google.cast.tp.connection`
@@ -18,6 +21,7 @@ providers (for example Viaplay).
   - `urn:x-cast:com.google.cast.multizone`
   - `urn:x-cast:com.google.cast.setup`
 - Provider API with app launch/session callbacks
+- Playback coordinator handling generic media namespace flows for providers
 - mDNS advertisement (`_googlecast._tcp.local`)
 
 ## Requirements
@@ -83,7 +87,7 @@ uv run python -m castvibe \
   --log-level INFO
 ```
 
-Bind explicit host/port:
+Bind explicit Cast + player server host/ports:
 
 ```bash
 uv run python -m castvibe \
@@ -91,6 +95,8 @@ uv run python -m castvibe \
   --name "Living Room" \
   --host 0.0.0.0 \
   --port 8009 \
+  --player-host 0.0.0.0 \
+  --player-port 8010 \
   --log-level DEBUG
 ```
 
@@ -101,7 +107,17 @@ CLI options:
 - `--model`: advertised model (default `Chromecast`)
 - `--host`: bind host/interface (default `0.0.0.0`)
 - `--port`: bind port (default `8009`)
+- `--player-host`: bind host/interface for player server (default `0.0.0.0`)
+- `--player-port`: bind port for player server (default `8010`)
 - `--log-level`: `DEBUG|INFO|WARNING|ERROR` (default `INFO`)
+
+## External player endpoints
+
+Once the receiver is running, external players connect to:
+
+- WebSocket: `ws://<receiver-ip>:8010/player`
+  - optional role query: `?role=primary` or `?role=observer`
+- License proxy: `http://<receiver-ip>:8010/license/<session-id>`
 
 ## Quick verification
 
@@ -109,6 +125,7 @@ CLI options:
 
 ```bash
 lsof -nP -iTCP:8009 -sTCP:LISTEN
+lsof -nP -iTCP:8010 -sTCP:LISTEN
 ```
 
 2. Confirm Cast mDNS service appears:
@@ -150,7 +167,7 @@ you use to run `castvibe`.
 uv run pytest
 uv run ruff check .
 uv run ruff format --check .
-uv run basedpyright
+uv run basedpyright --warnings
 uv run deptry .
 ```
 
