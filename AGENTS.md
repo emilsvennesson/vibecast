@@ -491,4 +491,4 @@ Dev dependencies:
 
 ## Tool usage
 
-Always use Context7 when you need code generation, setup or configuration steps, or library/API documentation. This means you should automatically use the Context7 MCP tools to resolve library IDs and get library docs without me having to explicitly ask. You can also search the web for up-to-date documentation using the web-search tool.
+Always use Context7 when you need code generation, setup or configuration steps, or library/API documentation. This means you should automatically use the Context7 MCP tools to resolve library IDs and get library docs without me having to explicitly ask. You can also search the web for up-to-date documentation using the web-search tool. You can also search the web for up-to-date documentation using the web-search tool.
