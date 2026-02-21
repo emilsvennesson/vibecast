@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib.metadata import EntryPoint, EntryPoints, entry_points
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 import castvibe._namespace as ns
 from castvibe._log import get_logger
-from castvibe._models import MediaRequest, MediaStatus, MediaStatusResponse
+from castvibe._models import (
+    IdleReason,
+    MediaImage,
+    MediaRequest,
+    MediaStatus,
+    MediaStatusResponse,
+    PlayerState,
+    StreamType,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -17,6 +25,90 @@ if TYPE_CHECKING:
 log = get_logger("provider")
 
 _ENTRY_POINT_GROUP = "castvibe.providers"
+
+
+# ---------------------------------------------------------------------------
+# Data types for external media-player integration
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True, frozen=True)
+class DrmInfo:
+    """DRM configuration for protected content."""
+
+    system: str
+    """DRM system identifier (e.g. ``"widevine"``, ``"playready"``)."""
+
+    license_url: str
+    """URL of the license server."""
+
+    headers: dict[str, str] = field(default_factory=dict)
+    """Extra headers required for license requests."""
+
+
+@dataclass(slots=True, frozen=True)
+class MediaLoadInfo:
+    """Everything an external player needs to start playback."""
+
+    session_id: str
+    stream_url: str
+    content_type: str
+    stream_type: StreamType
+    title: str | None = None
+    subtitle: str | None = None
+    images: tuple[MediaImage, ...] = ()
+    duration: float | None = None
+    autoplay: bool = True
+    start_time: float = 0.0
+    drm: DrmInfo | None = None
+    custom_data: dict[str, Any] = field(default_factory=dict)
+
+
+@runtime_checkable
+class MediaEventHandler(Protocol):
+    """Integration point for external media players.
+
+    Implement this protocol to receive media events from any provider.
+    A Kodi addon, for example, would implement ``on_load`` to start
+    playback and ``on_pause`` to pause the player.
+    """
+
+    async def on_load(self, info: MediaLoadInfo) -> None: ...
+    async def on_play(self, session_id: str) -> None: ...
+    async def on_pause(self, session_id: str) -> None: ...
+    async def on_seek(self, session_id: str, position: float) -> None: ...
+    async def on_stop(self, session_id: str) -> None: ...
+    async def on_volume(self, session_id: str, level: float, muted: bool) -> None: ...
+
+
+class DefaultMediaEventHandler:
+    """No-op :class:`MediaEventHandler` used when no handler is provided."""
+
+    async def on_load(self, info: MediaLoadInfo) -> None:
+        _ = info
+
+    async def on_play(self, session_id: str) -> None:
+        _ = session_id
+
+    async def on_pause(self, session_id: str) -> None:
+        _ = session_id
+
+    async def on_seek(self, session_id: str, position: float) -> None:
+        _ = session_id
+        _ = position
+
+    async def on_stop(self, session_id: str) -> None:
+        _ = session_id
+
+    async def on_volume(self, session_id: str, level: float, muted: bool) -> None:
+        _ = session_id
+        _ = level
+        _ = muted
+
+
+# ---------------------------------------------------------------------------
+# Credentials
+# ---------------------------------------------------------------------------
 
 
 @dataclass(slots=True, frozen=True)
@@ -127,9 +219,35 @@ class Provider(ABC):
         """Called before an app session is removed."""
         _ = session
 
+    async def update_playback(
+        self,
+        session_id: str,
+        player_state: PlayerState,
+        current_time: float = 0.0,
+        idle_reason: IdleReason | None = None,
+    ) -> None:
+        """Push playback state from an external player.
+
+        Integration code (e.g. a Kodi addon) calls this when the player's
+        state changes.  The provider translates it into a ``MEDIA_STATUS``
+        broadcast so connected senders stay in sync.
+
+        The default implementation is a no-op.  Override in providers that
+        support external playback control.
+        """
+        _ = session_id
+        _ = player_state
+        _ = current_time
+        _ = idle_reason
+
 
 def discover_providers() -> list[Provider]:
-    """Discover and instantiate providers from package entry points."""
+    """Discover and instantiate providers from package entry points.
+
+    Providers are constructed with **no arguments**.  Providers that
+    require constructor parameters (e.g. ``media_handler``) should be
+    instantiated manually and registered via :class:`ProviderRegistry`.
+    """
     providers: list[Provider] = []
 
     eps = entry_points()
@@ -198,7 +316,11 @@ class ProviderRegistry:
 
 
 __all__ = [
+    "DefaultMediaEventHandler",
+    "DrmInfo",
     "LaunchCredentials",
+    "MediaEventHandler",
+    "MediaLoadInfo",
     "Provider",
     "ProviderRegistry",
     "ProviderSession",

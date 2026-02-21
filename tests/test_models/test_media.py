@@ -12,6 +12,8 @@ from castvibe._models import (
     PauseRequest,
     PlayerState,
     PlayRequest,
+    QueueGetItemIdsRequest,
+    QueueItemIdsResponse,
     QueueLoadRequest,
     SeekRequest,
     StreamType,
@@ -110,6 +112,18 @@ class TestMediaStatusResponse:
         assert entry["supportedMediaCommands"] == 15
 
 
+class TestQueueItemIdsResponse:
+    def test_serialization(self) -> None:
+        response = QueueItemIdsResponse(request_id=8, item_ids=[1], sequence_number=0)
+        data = response.model_dump(exclude_none=True)
+        assert data == {
+            "type": "QUEUE_ITEM_IDS",
+            "requestId": 8,
+            "itemIds": [1],
+            "sequenceNumber": 0,
+        }
+
+
 class TestMediaRequestDiscriminator:
     """media_request_adapter dispatches on type field."""
 
@@ -176,3 +190,9 @@ class TestMediaRequestDiscriminator:
             {"type": "QUEUE_LOAD", "requestId": 8}
         )
         assert isinstance(msg, QueueLoadRequest)
+
+    def test_queue_get_item_ids_dispatch(self) -> None:
+        msg = media_request_adapter.validate_python(
+            {"type": "QUEUE_GET_ITEM_IDS", "requestId": 9, "mediaSessionId": 1}
+        )
+        assert isinstance(msg, QueueGetItemIdsRequest)

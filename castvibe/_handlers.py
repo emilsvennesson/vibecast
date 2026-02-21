@@ -95,7 +95,7 @@ class PlatformHandler:
                     connection, msg.source_id, msg.destination_id
                 )
             case _:
-                self._device.remove_subscription(connection, msg.source_id)
+                _ = self._device.remove_subscription(connection, msg.source_id)
 
     async def _handle_receiver(self, connection: Connection, msg: CastMessage) -> None:
         payload = parse_json_payload(msg)

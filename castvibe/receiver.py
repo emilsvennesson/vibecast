@@ -181,7 +181,7 @@ class CastReceiver:
         await self.device.route_message(connection, msg)
 
     async def _on_disconnect(self, connection: Connection) -> None:
-        self.device.remove_all_subscriptions(connection)
+        _ = self.device.remove_all_subscriptions(connection)
 
 
 __all__ = ["CastReceiver", "ReceiverConfig"]

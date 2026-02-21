@@ -7,9 +7,12 @@ import asyncio
 import contextlib
 import logging
 from pathlib import Path
+from uuid import uuid4
 
 from castvibe._certificate import CertificateBundle
 from castvibe.receiver import CastReceiver, ReceiverConfig
+
+_DEFAULT_DEVICE_ID_PATH = Path.home() / ".castvibe" / "cast_receiver_device_id"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -29,6 +32,14 @@ def _parse_args() -> argparse.Namespace:
         "--model",
         default="Chromecast",
         help="Device model string advertised via mDNS",
+    )
+    _ = parser.add_argument(
+        "--device-id",
+        default=None,
+        help=(
+            "Stable device ID for mDNS/discovery. "
+            "If omitted, castvibe persists one at ~/.castvibe/cast_receiver_device_id"
+        ),
     )
     _ = parser.add_argument(
         "--host",
@@ -57,11 +68,25 @@ def _configure_logging(level: str) -> None:
     )
 
 
+def _load_or_create_device_id(path: Path) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        existing = path.read_text(encoding="utf-8").strip()
+        if existing:
+            return existing
+
+    device_id = uuid4().hex
+    _ = path.write_text(device_id, encoding="utf-8")
+    return device_id
+
+
 async def _run(args: argparse.Namespace) -> None:
     bundle = CertificateBundle.from_manifest(args.manifest)
+    device_id = args.device_id or _load_or_create_device_id(_DEFAULT_DEVICE_ID_PATH)
     config = ReceiverConfig(
         friendly_name=args.name,
         device_model=args.model,
+        device_id=device_id,
         host=args.host,
         port=args.port,
     )

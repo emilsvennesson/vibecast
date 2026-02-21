@@ -1,10 +1,11 @@
 """Media namespace messages.
 
 Inbound (from sender):
-    GET_STATUS, LOAD, PLAY, PAUSE, SEEK, STOP, SET_VOLUME, QUEUE_LOAD
+    GET_STATUS, LOAD, PLAY, PAUSE, SEEK, STOP, SET_VOLUME,
+    QUEUE_LOAD, QUEUE_GET_ITEM_IDS
 
 Outbound (from receiver):
-    MEDIA_STATUS, LOAD_FAILED, INVALID_REQUEST
+    MEDIA_STATUS, LOAD_FAILED, INVALID_REQUEST, QUEUE_ITEM_IDS
 """
 
 from typing import Annotated, Any, Literal
@@ -92,6 +93,14 @@ class QueueLoadRequest(CastModel):
     custom_data: dict[str, Any] | None = None
 
 
+class QueueGetItemIdsRequest(CastModel):
+    """Sender requests queue item IDs for current media session."""
+
+    type: Literal["QUEUE_GET_ITEM_IDS"] = "QUEUE_GET_ITEM_IDS"
+    request_id: int
+    media_session_id: int | None = None
+
+
 # ---------------------------------------------------------------------------
 # Outbound messages (receiver -> sender)
 # ---------------------------------------------------------------------------
@@ -103,6 +112,15 @@ class MediaStatusResponse(CastModel):
     type: Literal["MEDIA_STATUS"] = "MEDIA_STATUS"
     request_id: int
     status: list[MediaStatus] = []
+
+
+class QueueItemIdsResponse(CastModel):
+    """Queue item ID response for ``QUEUE_GET_ITEM_IDS``."""
+
+    type: Literal["QUEUE_ITEM_IDS"] = "QUEUE_ITEM_IDS"
+    request_id: int
+    item_ids: list[int] = []
+    sequence_number: int = 0
 
 
 class LoadFailedResponse(CastModel):
@@ -126,14 +144,17 @@ class MediaInvalidRequestResponse(CastModel):
 # ---------------------------------------------------------------------------
 
 MediaRequest = Annotated[
-    MediaGetStatusRequest
-    | LoadRequest
-    | PlayRequest
-    | PauseRequest
-    | SeekRequest
-    | MediaStopRequest
-    | MediaSetVolumeRequest
-    | QueueLoadRequest,
+    (
+        MediaGetStatusRequest
+        | LoadRequest
+        | PlayRequest
+        | PauseRequest
+        | SeekRequest
+        | MediaStopRequest
+        | MediaSetVolumeRequest
+        | QueueLoadRequest
+        | QueueGetItemIdsRequest
+    ),
     Discriminator("type"),
 ]
 """Discriminated union of all inbound media namespace messages."""
