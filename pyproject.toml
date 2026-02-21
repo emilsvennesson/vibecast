@@ -27,6 +27,9 @@ dev = [
     "ruff>=0.15.1",
 ]
 
+[tool.setuptools.package-data]
+castvibe = ["_web/*.html", "_web/*.js"]
+
 [tool.ruff]
 # Generated protobuf files are not linted or formatted.
 extend-exclude = ["castvibe/_proto/cast_channel_pb2.py", "castvibe/_proto/cast_channel_pb2.pyi"]

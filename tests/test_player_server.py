@@ -58,6 +58,43 @@ async def _read_json_message(ws: Any) -> dict[str, object]:
 
 
 class TestPlayerServer:
+    async def test_serves_default_shaka_player_page(self) -> None:
+        server = PlayerServer(host="127.0.0.1", port=0)
+        await server.start()
+        port = server.serving_port
+        assert port is not None
+
+        async with ClientSession() as client:
+            response = await client.get(f"http://127.0.0.1:{port}/")
+            body = await response.text()
+
+        assert response.status == 200
+        assert response.content_type == "text/html"
+        assert "shaka-player.compiled.js" in body
+        assert 'src="/player.js"' in body
+        assert '<video id="video" class="video" playsinline></video>' in body
+        assert '<video id="video" class="video" controls' not in body
+        assert "/player?role=primary" in body
+
+        await server.stop()
+
+    async def test_serves_player_script(self) -> None:
+        server = PlayerServer(host="127.0.0.1", port=0)
+        await server.start()
+        port = server.serving_port
+        assert port is not None
+
+        async with ClientSession() as client:
+            response = await client.get(f"http://127.0.0.1:{port}/player.js")
+            body = await response.text()
+
+        assert response.status == 200
+        assert response.content_type == "application/javascript"
+        assert "new shaka.Player" in body
+        assert "/player?role=primary" in body
+
+        await server.stop()
+
     async def test_start_and_stop(self) -> None:
         server = PlayerServer(host="127.0.0.1", port=0)
         await server.start()
