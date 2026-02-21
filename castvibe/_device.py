@@ -32,6 +32,7 @@ from castvibe.provider import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from httpx import AsyncClient
@@ -232,8 +233,8 @@ class Device:
 
     __slots__ = (
         "_data_dir",
+        "_get_http_client",
         "_subscriptions",
-        "_http_client",
         "_transport_counter",
         "config",
         "sessions",
@@ -245,11 +246,11 @@ class Device:
         self,
         config: DeviceIdentity,
         *,
-        http_client: AsyncClient,
+        get_http_client: Callable[[], AsyncClient],
         data_dir: Path,
     ) -> None:
         self.config = config
-        self._http_client = http_client
+        self._get_http_client = get_http_client
         self._data_dir = data_dir
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self.transports: dict[str, Transport] = {}
@@ -265,10 +266,7 @@ class Device:
 
     @property
     def http_client(self) -> AsyncClient:
-        return self._http_client
-
-    def set_http_client(self, http_client: AsyncClient) -> None:
-        self._http_client = http_client
+        return self._get_http_client()
 
     # ------------------------------------------------------------------
     # Transport management

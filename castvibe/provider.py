@@ -197,7 +197,17 @@ class Provider(ABC):
         """Return custom namespaces handled by this provider."""
 
     def provider_key(self) -> str:
-        """Stable key used for receiver-managed provider data directories."""
+        """Stable filesystem-safe key for receiver-managed provider data.
+
+        Derived from the class name: strips a ``Provider`` suffix (if
+        present) and converts PascalCase to snake_case.  For example,
+        ``ViaplayProvider`` yields ``"viaplay"``; ``MyCustomProvider``
+        yields ``"my_custom"``.
+
+        Override this method if the default derivation is unsuitable
+        (e.g. acronym-heavy names like ``ABCProvider`` produce
+        ``"a_b_c"``), or if two providers share a class name.
+        """
         name = self.__class__.__name__
         if name.endswith("Provider"):
             name = name[:-8]
@@ -352,7 +362,7 @@ __all__ = [
     "MediaLoadInfo",
     "Provider",
     "ProviderRegistry",
-    "ReceiverContext",
     "ProviderSession",
+    "ReceiverContext",
     "discover_providers",
 ]

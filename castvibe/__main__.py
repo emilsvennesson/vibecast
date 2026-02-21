@@ -46,7 +46,7 @@ def _parse_args() -> argparse.Namespace:
         "--data-dir",
         type=Path,
         default=_DEFAULT_DATA_DIR,
-        help="Receiver data directory (cookies, IDs, provider state)",
+        help="Persistent receiver data (cookies, device IDs, provider state)",
     )
     _ = parser.add_argument(
         "--host",

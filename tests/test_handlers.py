@@ -84,7 +84,7 @@ def _build_device(provider_lookup: Callable[[str], Provider | None]) -> Device:
             device_id="device-1234",
             ssdp_udn="device-1234",
         ),
-        http_client=cast("AsyncClient", object()),
+        get_http_client=lambda: cast("AsyncClient", object()),
         data_dir=Path("/tmp/castvibe-tests"),
     )
     platform = PlatformHandler(device, provider_lookup=provider_lookup)

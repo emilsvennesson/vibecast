@@ -25,6 +25,6 @@ __all__ = [
     "MediaLoadInfo",
     "Provider",
     "ProviderSession",
-    "ReceiverContext",
     "ReceiverConfig",
+    "ReceiverContext",
 ]

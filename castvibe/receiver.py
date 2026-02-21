@@ -74,7 +74,7 @@ class CastReceiver:
                 device_model=config.device_model,
                 device_id=device_id,
             ),
-            http_client=self._http.client,
+            get_http_client=lambda: self._http.client,
             data_dir=config.data_dir,
         )
 
@@ -106,7 +106,6 @@ class CastReceiver:
 
         if self._http.client.is_closed:
             self._http = ReceiverHTTPClient(data_dir=self.config.data_dir)
-            self.device.set_http_client(self._http.client)
 
         crl = self._certificates.crl
         if crl is None:

@@ -11,7 +11,6 @@ from castvibe._log import get_logger
 
 log = get_logger("http")
 
-_DEFAULT_DATA_DIR = Path.home() / ".castvibe"
 _COOKIE_FILE_NAME = "receiver_cookies.lwp"
 
 
@@ -23,14 +22,13 @@ class ReceiverHTTPClient:
     def __init__(
         self,
         *,
-        data_dir: Path | None = None,
+        data_dir: Path,
         timeout_seconds: float = 15.0,
     ) -> None:
-        root = data_dir or _DEFAULT_DATA_DIR
-        root.mkdir(parents=True, exist_ok=True)
+        data_dir.mkdir(parents=True, exist_ok=True)
 
         # TODO: Split cookie storage per provider instead of sharing one global jar.
-        cookie_path = root / _COOKIE_FILE_NAME
+        cookie_path = data_dir / _COOKIE_FILE_NAME
         self._cookie_jar = LWPCookieJar(filename=str(cookie_path))
         _load_cookie_jar(self._cookie_jar)
 
