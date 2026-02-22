@@ -10,13 +10,15 @@ all checks.
 **castvibe** is a Python asyncio library implementing a Google Cast (CastV2)
 receiver. It accepts TLS connections from iOS/Android/Chrome Cast senders,
 performs device authentication, handles the Cast platform protocol, and delegates
-app-specific behavior to modular **providers** (e.g. Viaplay).
+app-specific behavior to modular **providers** (bundled: Viaplay, SVT Play).
 
 Media control uses a mediator architecture:
 
 - `PlaybackCoordinator` (per app session) owns canonical playback state
 - `Player` ABC is the internal playback interface
 - `PlayerServer` is the default `Player` implementation exposing:
+  - `GET /` and `GET /index.html` (embedded web player)
+  - `GET /player.js` (embedded player script)
   - WebSocket `GET /player` for commands/state reports
   - HTTP `POST /license/{session_id}` for DRM license proxying
 
@@ -99,6 +101,8 @@ Provider-specific namespaces (handled by app sessions):
 | ---------------------------------- | -------- |
 | `urn:x-cast:tv.viaplay.chromecast` | Viaplay  |
 
+SVT Play uses only the standard media namespace (no custom provider namespace).
+
 ### Connection Lifecycle
 
 ```
@@ -113,10 +117,10 @@ Provider-specific namespaces (handled by app sessions):
 3. DEVICE AUTHENTICATION (binary protobuf on deviceauth namespace)
    Sender -> DeviceAuthMessage { challenge: AuthChallenge {} }
    Receiver -> DeviceAuthMessage { response: AuthResponse {
-     signature: <SHA1 of peer_cert_DER signed with device_private_key>,
+     signature: <hash(peer_cert_DER) signed with device_private_key>,
      client_auth_certificate: <device_cert_DER>,
      intermediate_certificate: [<ica_cert_DER>],
-     hash_algorithm: SHA1
+     hash_algorithm: SHA1 (sig_sha1) or SHA256 (legacy sig)
    }}
 
 4. VIRTUAL CONNECTION (JSON on connection namespace)
@@ -158,13 +162,15 @@ Provider-specific namespaces (handled by app sessions):
 The auth exchange uses **binary protobuf** (not JSON) on the `deviceauth`
 namespace. This is the only namespace that uses binary payloads.
 
-For our implementation (SHA1 only, no nonce, static signature):
+For our implementation (static signature, no sender nonce binding):
 
-- The `signature` field contains a pre-computed RSASSA-PKCS1v15 signature of
-  `SHA1(peer_cert_DER)` using the device's manufacturing private key
+- The `signature` field contains a pre-computed RSASSA-PKCS1v15 signature
+- Preferred manifest key `sig_sha1` means signature over `SHA1(peer_cert_DER)`
+- Legacy manifest key `sig` means signature over `SHA256(peer_cert_DER)`
+- `hash_algorithm` is set to `SHA1` or `SHA256` to match the loaded signature
 - The `client_auth_certificate` is the device cert DER (manufacturing-provisioned)
 - The `intermediate_certificate` list contains the ICA chain DER bytes
-- `hash_algorithm` is set to `SHA1`
+- `crl` is embedded from manifest when present, otherwise fetched at startup
 
 The certificate bundle is loaded from a go-cast compatible JSON manifest:
 
@@ -174,9 +180,13 @@ The certificate bundle is loaded from a go-cast compatible JSON manifest:
   "pr": "<peer private key PEM>",
   "cpu": "<device auth cert PEM>",
   "ica": "<intermediate CA cert(s) PEM>",
-  "sig_sha1": "<base64 SHA1 signature>"
+  "sig_sha1": "<base64 SHA1 signature>",
+  "sig": "<base64 SHA256 signature>",
+  "crl": "<base64 CRL blob>"
 }
 ```
+
+At least one of `sig_sha1` or `sig` must be present.
 
 ### Receiver Namespace Messages
 
@@ -276,8 +286,8 @@ App IDs: `"6313CF39"`, `"2DB7CC49"`
 **Auth flow** (after LAUNCH):
 
 1. Sender sends `SETUP_INFO` with contentRoot, countryCode, userId, profileId
-2. Receiver tries token login (using credentials from LAUNCH)
-3. If token fails, tries persistent login (stored cookies)
+2. Receiver checks existing session + tries persistent login (stored cookies)
+3. If still unauthenticated, tries token login (using credentials from LAUNCH)
 4. If all fail, gets device code via API, sends `AUTHORIZATION_REQUIRED` to sender
 5. Sender shows device code to user, sends `AUTHORIZATION_DONE` when activated
 6. Receiver polls authorized endpoint, completes auth
@@ -320,6 +330,11 @@ parallel with the Cast TLS server.
 - Observer WS clients receive commands but their reports are ignored
 - New WS clients are auto-synced (`load` + seek + play/pause) from snapshots
 - License POSTs are delegated per session via coordinator -> provider
+
+Session lifecycle behavior:
+
+- Sender disconnect does **not** stop app sessions automatically
+- Sessions stop on explicit Cast `STOP` or receiver shutdown
 
 ### Concurrency: asyncio
 
@@ -371,7 +386,8 @@ Providers implement the `Provider` ABC and register via Python entry points:
 ```toml
 # pyproject.toml
 [project.entry-points."castvibe.providers"]
-viaplay = "castvibe.providers.viaplay:ViaplayProvider"
+svt_play = "castvibe.providers.svt_play._provider:SvtPlayProvider"
+viaplay = "castvibe.providers.viaplay._provider:ViaplayProvider"
 ```
 
 Discovery: `importlib.metadata.entry_points(group="castvibe.providers")`
@@ -389,7 +405,7 @@ certs in their wire formats (DER for auth response, PEM for TLS context).
 - Playback internals: `_coordinator.py`, `_player_server.py`
 - `_models/` — Pydantic message models subpackage
 - `_proto/` — protobuf definitions and generated code
-- `providers/` — bundled provider implementations
+- `castvibe/providers/` — bundled provider implementations
 
 ## Tooling & Quality Checks
 
@@ -467,6 +483,17 @@ uv run python scripts/compile_proto.py
 Generated files (`_pb2.py`, `.pyi`) are committed to the repo so library
 consumers don't need protoc installed.
 
+### Provider Capture Utility
+
+For reverse-engineering new providers, use:
+
+```bash
+uv run python scripts/capture_provider.py --manifest manifest.json --upstream <ip>
+```
+
+This runs a Cast proxy and logs traffic to JSONL. Add `--enable-mitm` to also
+capture provider HTTP traffic via mitmproxy WireGuard mode.
+
 ## Dependencies
 
 | Package        | Min Version | Purpose                                    |
@@ -491,4 +518,8 @@ Dev dependencies:
 
 ## Tool usage
 
-Always use Context7 when you need code generation, setup or configuration steps, or library/API documentation. This means you should automatically use the Context7 MCP tools to resolve library IDs and get library docs without me having to explicitly ask. You can also search the web for up-to-date documentation using the web-search tool. You can also search the web for up-to-date documentation using the web-search tool.
+Always use Context7 when you need code generation, setup or configuration
+steps, or library/API documentation. This means you should automatically use
+the Context7 MCP tools to resolve library IDs and get library docs without me
+having to explicitly ask. You can also search the web for up-to-date
+documentation using the web-search tool.
