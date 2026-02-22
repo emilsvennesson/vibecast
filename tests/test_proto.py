@@ -1,6 +1,6 @@
 """Tests verifying protobuf compilation and imports."""
 
-from castvibe._proto.cast_channel_pb2 import (
+from vibecast._proto.cast_channel_pb2 import (
     AuthChallenge,
     AuthResponse,
     CastMessage,

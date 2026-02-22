@@ -6,10 +6,11 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, override
 
-from castvibe import _namespace as ns
-from castvibe._device import Device, DeviceIdentity
-from castvibe._handlers import PlatformHandler
-from castvibe._models import (
+from tests.conftest import make_cast_message
+from vibecast import _namespace as ns
+from vibecast._device import Device, DeviceIdentity
+from vibecast._handlers import PlatformHandler
+from vibecast._models import (
     DeviceInfoResponse,
     LaunchErrorResponse,
     LoadRequest,
@@ -18,16 +19,15 @@ from castvibe._models import (
     SetupResponse,
     StreamType,
 )
-from castvibe.player import DefaultPlayer, PlaybackMedia, PlaybackStream
-from castvibe.provider import LaunchCredentials, Provider
-from tests.conftest import make_cast_message
+from vibecast.player import DefaultPlayer, PlaybackMedia, PlaybackStream
+from vibecast.provider import LaunchCredentials, Provider
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from httpx import AsyncClient
 
-    from castvibe._connection import Connection
+    from vibecast._connection import Connection
 
 
 class RecordingConnection:
@@ -107,7 +107,7 @@ def _build_device(provider_lookup: Callable[[str], Provider | None]) -> Device:
             ssdp_udn="device-1234",
         ),
         get_http_client=lambda: cast("AsyncClient", object()),
-        data_dir=Path("/tmp/castvibe-tests"),
+        data_dir=Path("/tmp/vibecast-tests"),
     )
     platform = PlatformHandler(
         device,

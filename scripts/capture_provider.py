@@ -7,7 +7,7 @@ to also capture the receiver's outbound HTTP/HTTPS traffic (API calls to
 provider backends).
 
 The resulting ``.jsonl`` file contains everything an LLM needs to
-understand a provider's protocol and implement it as a castvibe provider.
+understand a provider's protocol and implement it as a vibecast provider.
 
 Usage::
 
@@ -41,18 +41,18 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from castvibe._auth import build_auth_response, fetch_crl
-from castvibe._certificate import CertificateBundle
-from castvibe._discovery import CastAdvertisement
-from castvibe._framing import FramingError, read_message, write_message
-from castvibe._namespace import DEVICE_AUTH, HEARTBEAT, MEDIA, MULTIZONE, RECEIVER
-from castvibe._proto.cast_channel_pb2 import (
+from vibecast._auth import build_auth_response, fetch_crl
+from vibecast._certificate import CertificateBundle
+from vibecast._discovery import CastAdvertisement
+from vibecast._framing import FramingError, read_message, write_message
+from vibecast._namespace import DEVICE_AUTH, HEARTBEAT, MEDIA, MULTIZONE, RECEIVER
+from vibecast._proto.cast_channel_pb2 import (
     CastMessage,
     DeviceAuthMessage,
     HashAlgorithm,
     SignatureAlgorithm,
 )
-from castvibe._util import parse_json_payload
+from vibecast._util import parse_json_payload
 
 # ---------------------------------------------------------------------------
 # Sequence counter shared across the process (not across OS processes).
@@ -61,7 +61,7 @@ from castvibe._util import parse_json_payload
 # ---------------------------------------------------------------------------
 
 _seq = count(1)
-_DEFAULT_DEVICE_ID_PATH = Path.home() / ".castvibe" / "capture_proxy_device_id"
+_DEFAULT_DEVICE_ID_PATH = Path.home() / ".vibecast" / "capture_proxy_device_id"
 
 
 # ---------------------------------------------------------------------------
@@ -560,7 +560,7 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Stable mDNS device ID. If omitted, capture_provider persists one at "
-            "~/.castvibe/capture_proxy_device_id"
+            "~/.vibecast/capture_proxy_device_id"
         ),
     )
     _ = p.add_argument(

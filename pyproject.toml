@@ -1,5 +1,5 @@
 [project]
-name = "castvibe"
+name = "vibecast"
 version = "0.1.0"
 description = "Python Google Cast receiver implementation"
 readme = "README.md"
@@ -14,9 +14,9 @@ dependencies = [
     "uritemplate>=4.1",
 ]
 
-[project.entry-points."castvibe.providers"]
-svt_play = "castvibe.providers.svt_play._provider:SvtPlayProvider"
-viaplay = "castvibe.providers.viaplay._provider:ViaplayProvider"
+[project.entry-points."vibecast.providers"]
+svt_play = "vibecast.providers.svt_play._provider:SvtPlayProvider"
+viaplay = "vibecast.providers.viaplay._provider:ViaplayProvider"
 
 [dependency-groups]
 dev = [
@@ -29,11 +29,11 @@ dev = [
 ]
 
 [tool.setuptools.package-data]
-castvibe = ["_web/*.html", "_web/*.js"]
+vibecast = ["_web/*.html", "_web/*.js"]
 
 [tool.ruff]
 # Generated protobuf files are not linted or formatted.
-extend-exclude = ["castvibe/_proto/cast_channel_pb2.py", "castvibe/_proto/cast_channel_pb2.pyi"]
+extend-exclude = ["vibecast/_proto/cast_channel_pb2.py", "vibecast/_proto/cast_channel_pb2.pyi"]
 
 [tool.ruff.lint]
 preview = true
@@ -104,12 +104,12 @@ reportExplicitAny = "hint"
 reportMissingTypeStubs = "hint"
 reportUnannotatedClassAttribute = "none"
 # Generated protobuf files have type issues we can't fix.
-exclude = [".venv", "castvibe/_proto/cast_channel_pb2.py", "castvibe/_proto/cast_channel_pb2.pyi", "scripts/_mitm_addon.py"]
+exclude = [".venv", "vibecast/_proto/cast_channel_pb2.py", "vibecast/_proto/cast_channel_pb2.pyi", "scripts/_mitm_addon.py"]
 venvPath = "."
 venv = ".venv"
 
 executionEnvironments = [
-  { root = "castvibe/providers/viaplay/tests", reportPrivateUsage = "none", reportUnknownMemberType = "none", extraPaths = ["."] },
+  { root = "vibecast/providers/viaplay/tests", reportPrivateUsage = "none", reportUnknownMemberType = "none", extraPaths = ["."] },
   { root = "tests", reportPrivateUsage = "none", extraPaths = ["."] },
   { root = "." },
 ]

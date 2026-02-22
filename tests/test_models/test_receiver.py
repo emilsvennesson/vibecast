@@ -1,6 +1,6 @@
 """Tests for receiver namespace models."""
 
-from castvibe._models import (
+from vibecast._models import (
     AppAvailabilityResponse,
     ApplicationStatus,
     CastNamespace,

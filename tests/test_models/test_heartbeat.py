@@ -1,6 +1,6 @@
 """Tests for heartbeat namespace models."""
 
-from castvibe._models import Ping, Pong, heartbeat_message_adapter
+from vibecast._models import Ping, Pong, heartbeat_message_adapter
 
 
 class TestPingPong:

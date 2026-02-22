@@ -13,10 +13,10 @@ import pytest
 from zeroconf import ServiceStateChange
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 
-from castvibe._discovery import CastAdvertisement, CastServiceTxt
+from vibecast._discovery import CastAdvertisement, CastServiceTxt
 
 if TYPE_CHECKING:
-    from castvibe._certificate import CertificateBundle
+    from vibecast._certificate import CertificateBundle
 
 
 class TestTxtRecords:
@@ -80,7 +80,7 @@ class TestTxtRecords:
 
         assert (
             ad.service_name
-            == "castvibe-3e3f3db013164f6fa8dbd8d9aa123456._googlecast._tcp.local."
+            == "vibecast-3e3f3db013164f6fa8dbd8d9aa123456._googlecast._tcp.local."
         )
 
     def test_service_name_truncates_to_mdns_label_limit(
@@ -98,8 +98,8 @@ class TestTxtRecords:
 
         instance_label = ad.service_name.split(".", maxsplit=1)[0]
         assert len(instance_label) == 63
-        assert instance_label.startswith("castvibe-")
-        assert instance_label == f"castvibe-{device_id[:54]}"
+        assert instance_label.startswith("vibecast-")
+        assert instance_label == f"vibecast-{device_id[:54]}"
 
     def test_server_name_uses_hyphenated_uuid_local(
         self, bundle: CertificateBundle
@@ -155,10 +155,10 @@ class TestTxtRecords:
 
         with (
             patch(
-                "castvibe._discovery.socket.getaddrinfo",
+                "vibecast._discovery.socket.getaddrinfo",
                 return_value=getaddrinfo_result,
             ),
-            patch("castvibe._discovery.socket.socket", side_effect=OSError),
+            patch("vibecast._discovery.socket.socket", side_effect=OSError),
         ):
             ad = CastAdvertisement(
                 friendly_name="Bedroom",
@@ -179,8 +179,8 @@ class TestTxtRecords:
         fake_socket.getsockname.return_value = ("10.0.0.55", 42424)
 
         with (
-            patch("castvibe._discovery.socket.getaddrinfo", return_value=[]),
-            patch("castvibe._discovery.socket.socket", return_value=fake_socket),
+            patch("vibecast._discovery.socket.getaddrinfo", return_value=[]),
+            patch("vibecast._discovery.socket.socket", return_value=fake_socket),
         ):
             ad = CastAdvertisement(
                 friendly_name="Bedroom",
@@ -198,8 +198,8 @@ class TestTxtRecords:
     ) -> None:
         """Loopback fallback is used when all address lookups fail."""
         with (
-            patch("castvibe._discovery.socket.getaddrinfo", side_effect=OSError),
-            patch("castvibe._discovery.socket.socket", side_effect=OSError),
+            patch("vibecast._discovery.socket.getaddrinfo", side_effect=OSError),
+            patch("vibecast._discovery.socket.socket", side_effect=OSError),
         ):
             ad = CastAdvertisement(
                 friendly_name="Bedroom",
@@ -227,7 +227,7 @@ class TestLifecycle:
             cert_digest=bundle.cert_digest_md5,
         )
 
-        with patch("castvibe._discovery.AsyncZeroconf") as mock_ctor:
+        with patch("vibecast._discovery.AsyncZeroconf") as mock_ctor:
             mock_zeroconf = AsyncMock()
             mock_zeroconf.async_register_service.return_value = asyncio.create_task(
                 asyncio.sleep(0)
@@ -260,7 +260,7 @@ class TestLifecycle:
             cert_digest=bundle.cert_digest_md5,
         )
 
-        with patch("castvibe._discovery.AsyncZeroconf") as mock_ctor:
+        with patch("vibecast._discovery.AsyncZeroconf") as mock_ctor:
             mock_zeroconf = AsyncMock()
             mock_zeroconf.async_register_service.return_value = asyncio.create_task(
                 asyncio.sleep(0)
@@ -292,7 +292,7 @@ class TestLifecycle:
             cert_digest=bundle.cert_digest_md5,
         )
 
-        with patch("castvibe._discovery.AsyncZeroconf") as mock_ctor:
+        with patch("vibecast._discovery.AsyncZeroconf") as mock_ctor:
             mock_zeroconf = AsyncMock()
             mock_zeroconf.async_register_service.side_effect = RuntimeError("boom")
             mock_ctor.return_value = mock_zeroconf
@@ -311,7 +311,7 @@ class TestIntegration:
     ) -> None:
         """Advertisement appears in browser results and disappears after stop()."""
         ad = CastAdvertisement(
-            friendly_name="CastVibe Test",
+            friendly_name="vibecast Test",
             device_model="Chromecast",
             device_id=str(uuid4()),
             port=8009,

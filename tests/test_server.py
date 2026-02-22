@@ -9,18 +9,18 @@ import ssl
 import struct
 from typing import TYPE_CHECKING
 
-from castvibe import _namespace as ns
-from castvibe._proto.cast_channel_pb2 import (
+from tests.conftest import make_cast_message
+from vibecast import _namespace as ns
+from vibecast._proto.cast_channel_pb2 import (
     AuthChallenge,
     CastMessage,
     DeviceAuthMessage,
 )
-from castvibe._server import CastServer
-from tests.conftest import make_cast_message
+from vibecast._server import CastServer
 
 if TYPE_CHECKING:
-    from castvibe._certificate import CertificateBundle
-    from castvibe._connection import Connection
+    from vibecast._certificate import CertificateBundle
+    from vibecast._connection import Connection
 
 
 # ---------------------------------------------------------------------------

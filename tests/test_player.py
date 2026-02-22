@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from castvibe._models import IdleReason, MediaImage, PlayerState, StreamType
-from castvibe.player import (
+from vibecast._models import IdleReason, MediaImage, PlayerState, StreamType
+from vibecast.player import (
     DefaultPlayer,
     LoadCommand,
     PlaybackError,

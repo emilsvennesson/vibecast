@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING, Any, cast, override
 
 import httpx
 
-from castvibe import _namespace as ns
-from castvibe._coordinator import PlaybackCoordinator
-from castvibe._models import (
+from vibecast import _namespace as ns
+from vibecast._coordinator import PlaybackCoordinator
+from vibecast._models import (
     LoadRequest,
     MediaInfo,
     MediaSetVolumeRequest,
@@ -22,7 +22,7 @@ from castvibe._models import (
     StreamType,
     Volume,
 )
-from castvibe.player import (
+from vibecast.player import (
     DrmInfo,
     DrmSystem,
     LicenseRequest,
@@ -34,7 +34,7 @@ from castvibe.player import (
     Player,
     PlayerContext,
 )
-from castvibe.provider import (
+from vibecast.provider import (
     LaunchCredentials,
     Provider,
     ProviderSession,
@@ -198,7 +198,7 @@ def _provider_session(
             friendly_name="Living Room",
             device_model="Chromecast",
             device_id="device-1",
-            data_dir=Path("/tmp/castvibe-tests/providers/fake"),
+            data_dir=Path("/tmp/vibecast-tests/providers/fake"),
         ),
         send_custom=_send_custom,
         broadcast_custom=_broadcast_custom,

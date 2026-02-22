@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>vibecast player</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    rel="stylesheet"
+    href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap"
+  >
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.16.3/shaka-player.compiled.js"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg-0: #050816;
+      --bg-1: #0d1735;
+      --card: rgba(8, 14, 33, 0.8);
+      --line: rgba(132, 164, 230, 0.28);
+      --text: #e6edf9;
+      --muted: #95a8cf;
+      --ok: #72f4b8;
+      --warn: #ffd98a;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Space Grotesk", "Avenir Next", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(120rem 55rem at 15% -20%, #2e8dd5 0%, transparent 55%),
+        radial-gradient(90rem 48rem at 100% 0%, #165f92 0%, transparent 60%),
+        linear-gradient(170deg, var(--bg-1), var(--bg-0));
+      display: flex;
+      justify-content: center;
+      padding: 1.5rem;
+    }
+
+    main {
+      width: min(74rem, 100%);
+      display: grid;
+      gap: 1rem;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 1rem;
+      background: var(--card);
+      backdrop-filter: blur(12px);
+      box-shadow: 0 1.25rem 2.5rem rgba(2, 8, 26, 0.35);
+    }
+
+    .top {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      padding: 1rem 1.1rem;
+    }
+
+    .label {
+      font-family: "IBM Plex Mono", "SF Mono", monospace;
+      font-size: 0.74rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--muted);
+      display: inline-flex;
+      gap: 0.4rem;
+      align-items: baseline;
+    }
+
+    .value {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--text);
+      text-transform: none;
+      letter-spacing: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .status {
+      border-radius: 99rem;
+      border: 1px solid rgba(114, 244, 184, 0.35);
+      padding: 0.32rem 0.72rem;
+      color: var(--ok);
+      background: rgba(114, 244, 184, 0.13);
+    }
+
+    .status[data-connected="false"] {
+      color: var(--warn);
+      border-color: rgba(255, 217, 138, 0.4);
+      background: rgba(255, 217, 138, 0.14);
+    }
+
+    .video {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      background: #000;
+      border-radius: 1rem;
+      display: block;
+    }
+
+    .meta {
+      padding: 0.95rem 1.1rem 1.2rem;
+      display: grid;
+      gap: 0.3rem;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(1.1rem, 1.25vw + 0.85rem, 1.7rem);
+      line-height: 1.2;
+    }
+
+    p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+
+    .log {
+      padding: 0.9rem 1.1rem;
+      max-height: 12rem;
+      overflow-y: auto;
+      font-family: "IBM Plex Mono", "SF Mono", monospace;
+      font-size: 0.78rem;
+      line-height: 1.45;
+      color: #c9d8f8;
+      display: grid;
+      gap: 0.3rem;
+    }
+
+    @media (max-width: 720px) {
+      body {
+        padding: 1rem;
+      }
+
+      .top,
+      .meta,
+      .log {
+        padding-left: 0.85rem;
+        padding-right: 0.85rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="card">
+      <div class="top">
+        <div class="label">Connection <span class="value status" data-connected="false" id="connection">connecting</span></div>
+        <div class="label">Session <span class="value" id="session">-</span></div>
+        <div class="label">State <span class="value" id="state">IDLE</span></div>
+      </div>
+      <video id="video" class="video" playsinline></video>
+      <div class="meta">
+        <h1 id="title">Waiting for LOAD</h1>
+        <p id="subtitle">Open this page on your playback device. It listens on <code>/player?role=primary</code>.</p>
+      </div>
+    </section>
+    <section class="card log" id="log"></section>
+  </main>
+  <script defer src="/player.js"></script>
+</body>
+</html>

@@ -1,6 +1,6 @@
-# castvibe
+# vibecast
 
-`castvibe` is a Python asyncio Google Cast receiver implementation.
+`vibecast` is a Python asyncio Google Cast receiver implementation.
 
 It accepts TLS CastV2 connections from real senders (Chrome/iOS/Android),
 handles device auth + platform namespaces, and routes app-specific behavior to
@@ -46,7 +46,7 @@ uv pip install -e .
 
 ## Certificate manifest
 
-`castvibe` expects a go-cast style manifest JSON with at least:
+`vibecast` expects a go-cast style manifest JSON with at least:
 
 - `pu`: peer cert PEM
 - `pr`: peer private key PEM
@@ -58,7 +58,7 @@ uv pip install -e .
 
 Optional:
 
-- `crl`: base64 CRL blob; if absent, `castvibe` fetches CRL at startup.
+- `crl`: base64 CRL blob; if absent, `vibecast` fetches CRL at startup.
 
 ## Getting fresh Shield certs
 
@@ -82,7 +82,7 @@ Do not commit extracted cert material or local cert scripts.
 Basic:
 
 ```bash
-uv run python -m castvibe \
+uv run python -m vibecast \
   --manifest /path/to/manifest.json \
   --name "Living Room" \
   --log-level INFO
@@ -91,7 +91,7 @@ uv run python -m castvibe \
 Bind explicit Cast + player server host/ports:
 
 ```bash
-uv run python -m castvibe \
+uv run python -m vibecast \
   --manifest /path/to/manifest.json \
   --name "Living Room" \
   --host 0.0.0.0 \
@@ -106,6 +106,9 @@ CLI options:
 - `--manifest` (required): path to manifest JSON
 - `--name` (required): friendly Cast device name
 - `--model`: advertised model (default `Chromecast`)
+- `--device-id`: stable mDNS/discovery device ID (default: persisted in
+  `~/.vibecast/cast_receiver_device_id`)
+- `--data-dir`: persistent receiver data directory (default `~/.vibecast`)
 - `--host`: bind host/interface (default `0.0.0.0`)
 - `--port`: bind port (default `8009`)
 - `--player-host`: bind host/interface for player server (default `0.0.0.0`)
@@ -145,7 +148,7 @@ dns-sd -B _googlecast._tcp local
 
 ## Providers
 
-Provider discovery uses Python entry points under `castvibe.providers`.
+Provider discovery uses Python entry points under `vibecast.providers`.
 
 Built-in provider in this repo:
 
@@ -156,14 +159,14 @@ Sanity-check discovery:
 
 ```bash
 uv run python - <<'PY'
-from castvibe.provider import discover_providers
+from vibecast.provider import discover_providers
 providers = discover_providers()
 print([type(p).__name__ for p in providers])
 PY
 ```
 
 If this prints `[]`, install editable (`uv pip install -e .`) in the same env
-you use to run `castvibe`.
+you use to run `vibecast`.
 
 ## Development checks
 

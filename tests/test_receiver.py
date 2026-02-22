@@ -9,22 +9,22 @@ from typing import TYPE_CHECKING, Any, override
 
 import pytest
 
-from castvibe import _namespace as ns
-from castvibe._models import LoadRequest, StreamType
-from castvibe._proto.cast_channel_pb2 import (
+from tests.conftest import make_cast_message
+from vibecast import _namespace as ns
+from vibecast._models import LoadRequest, StreamType
+from vibecast._proto.cast_channel_pb2 import (
     AuthChallenge,
     CastMessage,
     DeviceAuthMessage,
 )
-from castvibe.player import PlaybackMedia, PlaybackStream
-from castvibe.provider import LaunchCredentials, Provider, ProviderSession
-from castvibe.receiver import CastReceiver, ReceiverConfig
-from tests.conftest import make_cast_message
+from vibecast.player import PlaybackMedia, PlaybackStream
+from vibecast.provider import LaunchCredentials, Provider, ProviderSession
+from vibecast.receiver import CastReceiver, ReceiverConfig
 
 if TYPE_CHECKING:
     from ssl import SSLContext
 
-    from castvibe._certificate import CertificateBundle
+    from vibecast._certificate import CertificateBundle
 
 
 def _frame(msg: CastMessage) -> bytes:
@@ -57,7 +57,7 @@ class DummyAdvertisement:
         self.cert_digest = cert_digest
         self.started = False
         self.service_name = (
-            f"castvibe-{device_id.replace('-', '')}._googlecast._tcp.local."
+            f"vibecast-{device_id.replace('-', '')}._googlecast._tcp.local."
         )
         self.parsed_addresses = ("127.0.0.1",)
 
@@ -130,13 +130,13 @@ class DummyProvider(Provider):
 
 
 def _patch_runtime(monkeypatch: Any, *, crl: bytes = b"test-crl") -> None:
-    monkeypatch.setattr("castvibe.receiver.CastAdvertisement", DummyAdvertisement)
+    monkeypatch.setattr("vibecast.receiver.CastAdvertisement", DummyAdvertisement)
 
     async def fake_fetch_crl(*, client: Any | None = None) -> bytes:
         _ = client
         return crl
 
-    monkeypatch.setattr("castvibe.receiver.fetch_crl", fake_fetch_crl)
+    monkeypatch.setattr("vibecast.receiver.fetch_crl", fake_fetch_crl)
 
 
 class TestReceiverConfig:
@@ -162,7 +162,7 @@ class TestConstruction:
             msg = "discover_providers should not run"
             raise AssertionError(msg)
 
-        monkeypatch.setattr("castvibe.receiver.discover_providers", fail_discovery)
+        monkeypatch.setattr("vibecast.receiver.discover_providers", fail_discovery)
         provider = DummyProvider()
 
         receiver = CastReceiver(
@@ -392,13 +392,13 @@ class TestStartupLogging:
             certificates=bundle,
             providers=[DummyProvider()],
         )
-        caplog.set_level("INFO", logger="castvibe.receiver")
+        caplog.set_level("INFO", logger="vibecast.receiver")
 
         await receiver.start()
         await receiver.stop()
 
         assert any(
-            record.name == "castvibe.receiver"
+            record.name == "vibecast.receiver"
             and record.getMessage() == "enabled providers: Dummy (appIds=DUMMYAPP)"
             for record in caplog.records
         )

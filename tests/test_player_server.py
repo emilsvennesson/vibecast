@@ -8,9 +8,9 @@ from typing import Any, cast
 
 from aiohttp import ClientSession, WSMsgType
 
-from castvibe._models import PlayerState, StreamType
-from castvibe._player_server import PlayerServer
-from castvibe.player import (
+from vibecast._models import PlayerState, StreamType
+from vibecast._player_server import PlayerServer
+from vibecast.player import (
     LicenseRequest,
     LicenseResponse,
     PlaybackError,

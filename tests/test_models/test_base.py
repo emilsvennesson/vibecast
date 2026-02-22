@@ -1,6 +1,6 @@
 """Tests for the CastModel base class."""
 
-from castvibe._models._base import CastModel
+from vibecast._models._base import CastModel
 
 
 class _SampleModel(CastModel):

@@ -8,10 +8,10 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
-from castvibe._models import LoadRequest, MediaInfo, MediaMetadata, StreamType
-from castvibe.player import DrmSystem
-from castvibe.provider import LaunchCredentials, ProviderSession, ReceiverContext
-from castvibe.providers.svt_play._provider import SvtPlayProvider
+from vibecast._models import LoadRequest, MediaInfo, MediaMetadata, StreamType
+from vibecast.player import DrmSystem
+from vibecast.provider import LaunchCredentials, ProviderSession, ReceiverContext
+from vibecast.providers.svt_play._provider import SvtPlayProvider
 
 
 def _make_session(
@@ -30,7 +30,7 @@ def _make_session(
             friendly_name="Living Room",
             device_model="Chromecast",
             device_id="receiver-device-id",
-            data_dir=Path("/tmp/castvibe-tests/providers/svt_play"),
+            data_dir=Path("/tmp/vibecast-tests/providers/svt_play"),
         ),
         send_custom=AsyncMock(),
         broadcast_custom=AsyncMock(),

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any, override
 
-from castvibe._models import LoadRequest, StreamType
-from castvibe.player import PlaybackMedia, PlaybackStream
-from castvibe.provider import (
+from vibecast._models import LoadRequest, StreamType
+from vibecast.player import PlaybackMedia, PlaybackStream
+from vibecast.provider import (
     LaunchCredentials,
     Provider,
     ProviderRegistry,
@@ -86,7 +86,7 @@ class FakeEntryPoints:
         self._entries = entries
 
     def select(self, *, group: str) -> list[FakeEntryPoint]:
-        assert group == "castvibe.providers"
+        assert group == "vibecast.providers"
         return self._entries
 
 
@@ -124,7 +124,7 @@ class TestDiscoverProviders:
             FakeEntryPoint("two", lambda: DummyProvider("Two", frozenset({"two"}))),
         ]
         monkeypatch.setattr(
-            "castvibe.provider.entry_points",
+            "vibecast.provider.entry_points",
             lambda: FakeEntryPoints(entries),
         )
 
