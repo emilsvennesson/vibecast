@@ -1,13 +1,13 @@
-# AGENTS.md — CastVibe Development Guide
+# AGENTS.md — vibecast Development Guide
 
-This document is the primary reference for AI agents working on castvibe in fresh
+This document is the primary reference for AI agents working on vibecast in fresh
 context windows. It contains everything needed to understand the project, the
 Google Cast protocol, design decisions, and how to contribute code that passes
 all checks.
 
 ## Project Overview
 
-**castvibe** is a Python asyncio library implementing a Google Cast (CastV2)
+**vibecast** is a Python asyncio library implementing a Google Cast (CastV2)
 receiver. It accepts TLS connections from iOS/Android/Chrome Cast senders,
 performs device authentication, handles the Cast platform protocol, and delegates
 app-specific behavior to modular **providers** (bundled: Viaplay, SVT Play).
@@ -65,7 +65,7 @@ uint32 -> write payload
 
 ### CastMessage Protobuf
 
-Defined in `castvibe/_proto/cast_channel.proto`:
+Defined in `vibecast/_proto/cast_channel.proto`:
 
 ```protobuf
 message CastMessage {
@@ -385,12 +385,12 @@ Providers implement the `Provider` ABC and register via Python entry points:
 
 ```toml
 # pyproject.toml
-[project.entry-points."castvibe.providers"]
-svt_play = "castvibe.providers.svt_play._provider:SvtPlayProvider"
-viaplay = "castvibe.providers.viaplay._provider:ViaplayProvider"
+[project.entry-points."vibecast.providers"]
+svt_play = "vibecast.providers.svt_play._provider:SvtPlayProvider"
+viaplay = "vibecast.providers.viaplay._provider:ViaplayProvider"
 ```
 
-Discovery: `importlib.metadata.entry_points(group="castvibe.providers")`
+Discovery: `importlib.metadata.entry_points(group="vibecast.providers")`
 
 ### Certificate Handling
 
@@ -399,13 +399,13 @@ certs in their wire formats (DER for auth response, PEM for TLS context).
 
 ### Package Layout Convention
 
-- `castvibe/` — library root
+- `vibecast/` — library root
 - Public modules: `receiver.py`, `provider.py`, `player.py`, `__init__.py`
 - Private modules: prefixed with `_` (e.g. `_server.py`, `_connection.py`)
 - Playback internals: `_coordinator.py`, `_player_server.py`
 - `_models/` — Pydantic message models subpackage
 - `_proto/` — protobuf definitions and generated code
-- `castvibe/providers/` — bundled provider implementations
+- `vibecast/providers/` — bundled provider implementations
 
 ## Tooling & Quality Checks
 
@@ -413,7 +413,7 @@ certs in their wire formats (DER for auth response, PEM for TLS context).
 
 ```bash
 uv sync                    # install all deps
-uv run python -m castvibe  # run
+uv run python -m vibecast  # run
 uv run pytest              # run tests
 ```
 

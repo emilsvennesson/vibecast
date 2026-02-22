@@ -1,4 +1,4 @@
 def test_import() -> None:
-    import castvibe  # noqa: F811
+    import vibecast  # noqa: F811
 
-    assert castvibe.__doc__ is not None
+    assert vibecast.__doc__ is not None

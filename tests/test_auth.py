@@ -14,9 +14,9 @@ from cryptography.x509 import (
 )
 from cryptography.x509.oid import NameOID
 
-from castvibe._auth import CRL_URL, build_auth_response, fetch_crl
-from castvibe._certificate import CertificateBundle
-from castvibe._proto.cast_channel_pb2 import (
+from vibecast._auth import CRL_URL, build_auth_response, fetch_crl
+from vibecast._certificate import CertificateBundle
+from vibecast._proto.cast_channel_pb2 import (
     DeviceAuthMessage,
     HashAlgorithm,
     SignatureAlgorithm,

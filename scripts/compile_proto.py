@@ -1,6 +1,6 @@
 """Compile cast_channel.proto into Python protobuf modules.
 
-Generates cast_channel_pb2.py and cast_channel_pb2.pyi in castvibe/_proto/
+Generates cast_channel_pb2.py and cast_channel_pb2.pyi in vibecast/_proto/
 so that library consumers don't need protoc installed.
 
 Usage:
@@ -12,7 +12,7 @@ from pathlib import Path
 from grpc_tools import protoc
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-PROTO_DIR = REPO_ROOT / "castvibe" / "_proto"
+PROTO_DIR = REPO_ROOT / "vibecast" / "_proto"
 PROTO_FILE = PROTO_DIR / "cast_channel.proto"
 
 

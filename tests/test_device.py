@@ -6,18 +6,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, override
 
-from castvibe import _namespace as ns
-from castvibe._device import Device, DeviceIdentity, build_receiver_status
-from castvibe._models import LoadRequest, StreamType
-from castvibe.player import DefaultPlayer, PlaybackMedia, PlaybackStream
-from castvibe.provider import LaunchCredentials, Provider
 from tests.conftest import make_cast_message
+from vibecast import _namespace as ns
+from vibecast._device import Device, DeviceIdentity, build_receiver_status
+from vibecast._models import LoadRequest, StreamType
+from vibecast.player import DefaultPlayer, PlaybackMedia, PlaybackStream
+from vibecast.provider import LaunchCredentials, Provider
 
 if TYPE_CHECKING:
     from httpx import AsyncClient
 
-    from castvibe._connection import Connection
-    from castvibe._proto.cast_channel_pb2 import CastMessage
+    from vibecast._connection import Connection
+    from vibecast._proto.cast_channel_pb2 import CastMessage
 
 
 class RecordingConnection:
@@ -132,7 +132,7 @@ def _build_device() -> Device:
             device_id="device-1234",
         ),
         get_http_client=lambda: cast("AsyncClient", object()),
-        data_dir=Path("/tmp/castvibe-tests"),
+        data_dir=Path("/tmp/vibecast-tests"),
     )
 
 
@@ -203,7 +203,7 @@ class TestRouting:
             payload_utf8='{"type":"GET_STATUS","requestId":1}',
         )
 
-        with caplog.at_level("WARNING", logger="castvibe.device"):
+        with caplog.at_level("WARNING", logger="vibecast.device"):
             await device.route_message(conn, msg)
 
         assert "unknown destination transport" in caplog.text
@@ -260,7 +260,7 @@ class TestSessionLifecycle:
         assert session.receiver.friendly_name == "Living Room"
         assert session.receiver.device_model == "Chromecast"
         assert session.receiver.device_id == "device-1234"
-        assert session.receiver.data_dir == Path("/tmp/castvibe-tests/providers/fake")
+        assert session.receiver.data_dir == Path("/tmp/vibecast-tests/providers/fake")
         assert session.receiver.data_dir.exists()
 
     async def test_start_and_stop_session(self) -> None:

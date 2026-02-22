@@ -1,6 +1,6 @@
 """Tests for setup namespace models."""
 
-from castvibe._models import SetupData, SetupDeviceInfo, SetupRequest, SetupResponse
+from vibecast._models import SetupData, SetupDeviceInfo, SetupRequest, SetupResponse
 
 
 class TestSetupRequest:

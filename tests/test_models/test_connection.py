@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from castvibe._models import (
+from vibecast._models import (
     CloseRequest,
     ConnectRequest,
     SenderInfo,

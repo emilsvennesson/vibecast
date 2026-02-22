@@ -1,4 +1,4 @@
-"""Shared test fixtures for castvibe tests."""
+"""Shared test fixtures for vibecast tests."""
 
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ from cryptography.x509 import (
 )
 from cryptography.x509.oid import NameOID
 
-from castvibe._certificate import CertificateBundle
-from castvibe._proto.cast_channel_pb2 import CastMessage
+from vibecast._certificate import CertificateBundle
+from vibecast._proto.cast_channel_pb2 import CastMessage
 
 # ---------------------------------------------------------------------------
 # Crypto helpers

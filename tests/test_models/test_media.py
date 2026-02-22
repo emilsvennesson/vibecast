@@ -1,6 +1,6 @@
 """Tests for media namespace models."""
 
-from castvibe._models import (
+from vibecast._models import (
     LoadRequest,
     MediaGetStatusRequest,
     MediaInfo,

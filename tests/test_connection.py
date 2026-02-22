@@ -8,13 +8,13 @@ import struct
 from typing import TYPE_CHECKING, override
 from unittest.mock import AsyncMock
 
-from castvibe import _namespace as ns
-from castvibe._connection import Connection
-from castvibe._proto.cast_channel_pb2 import CastMessage, DeviceAuthMessage
 from tests.conftest import frame_message, make_cast_message
+from vibecast import _namespace as ns
+from vibecast._connection import Connection
+from vibecast._proto.cast_channel_pb2 import CastMessage, DeviceAuthMessage
 
 if TYPE_CHECKING:
-    from castvibe._certificate import CertificateBundle
+    from vibecast._certificate import CertificateBundle
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +242,7 @@ class TestDeviceAuth:
 
     async def test_auth_response_returned(self, bundle: CertificateBundle) -> None:
         """A device-auth challenge gets a valid DeviceAuthMessage response."""
-        from castvibe._proto.cast_channel_pb2 import AuthChallenge
+        from vibecast._proto.cast_channel_pb2 import AuthChallenge
 
         challenge_msg = DeviceAuthMessage(challenge=AuthChallenge())
         challenge = make_cast_message(
@@ -266,7 +266,7 @@ class TestDeviceAuth:
 
     async def test_auth_source_dest_swapped(self, bundle: CertificateBundle) -> None:
         """Auth response swaps source and destination IDs."""
-        from castvibe._proto.cast_channel_pb2 import AuthChallenge
+        from vibecast._proto.cast_channel_pb2 import AuthChallenge
 
         challenge_msg = DeviceAuthMessage(challenge=AuthChallenge())
         challenge = make_cast_message(
@@ -284,7 +284,7 @@ class TestDeviceAuth:
 
     async def test_auth_not_forwarded(self, bundle: CertificateBundle) -> None:
         """Device-auth messages are never forwarded to on_message."""
-        from castvibe._proto.cast_channel_pb2 import AuthChallenge
+        from vibecast._proto.cast_channel_pb2 import AuthChallenge
 
         on_msg = AsyncMock()
         challenge_msg = DeviceAuthMessage(challenge=AuthChallenge())

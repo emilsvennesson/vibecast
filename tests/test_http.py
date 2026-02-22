@@ -5,7 +5,7 @@ from __future__ import annotations
 from http.cookiejar import Cookie
 from typing import TYPE_CHECKING, Any
 
-from castvibe._http import ReceiverHTTPClient
+from vibecast._http import ReceiverHTTPClient
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -1,6 +1,6 @@
 """Tests for multizone namespace models."""
 
-from castvibe._models import (
+from vibecast._models import (
     MultizoneGetStatusRequest,
     MultizoneStatus,
     MultizoneStatusResponse,
