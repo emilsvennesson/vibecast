@@ -4,16 +4,18 @@
 
 It accepts TLS CastV2 connections from real senders (Chrome/iOS/Android),
 handles device auth + platform namespaces, and routes app-specific behavior to
-providers (for example Viaplay).
+providers (built-in providers: Viaplay and SVT Play).
 
 ## Current capabilities
 
 - TLS Cast receiver on port `8009` (configurable)
 - Built-in player mediator server on port `8010` (configurable):
-  - `GET /` (embedded Shaka web player)
+  - `GET /` and `GET /index.html` (embedded Shaka web player)
+  - `GET /player.js` (embedded player script)
   - `GET /player` (WebSocket command/report channel)
   - `POST /license/{session_id}?route=<route_id>` (DRM license proxy)
-- Device auth response with cert chain + CRL
+- Device auth response with cert chain + CRL (`sig_sha1`/SHA1 or legacy
+  `sig`/SHA256 signatures)
 - Core platform namespaces:
   - `urn:x-cast:com.google.cast.tp.connection`
   - `urn:x-cast:com.google.cast.tp.heartbeat`
@@ -23,6 +25,7 @@ providers (for example Viaplay).
   - `urn:x-cast:com.google.cast.setup`
 - Provider API with app launch/session callbacks
 - Playback coordinator handling generic media namespace flows for providers
+- Persistent receiver state under `--data-dir` (stable device ID, provider data)
 - mDNS advertisement (`_googlecast._tcp.local`)
 
 ## Requirements
@@ -30,6 +33,7 @@ providers (for example Viaplay).
 - Python `3.12+`
 - [`uv`](https://docs.astral.sh/uv/)
 - Cast certificate manifest JSON (see below)
+- Optional: `mitmproxy` (for provider protocol capture script)
 
 ## Install
 
@@ -53,8 +57,8 @@ uv pip install -e .
 - `cpu`: device auth cert PEM
 - `ica`: intermediate cert chain PEM (can include multiple cert blocks)
 - one signature field:
-  - preferred `sig_sha1` (base64 SHA1 static signature), or
-  - fallback `sig` (base64 SHA256 static signature)
+  - preferred `sig_sha1` (base64 signature for `SHA1(peer_cert_der)`), or
+  - fallback `sig` (base64 signature for `SHA256(peer_cert_der)`)
 
 Optional:
 
@@ -119,11 +123,13 @@ CLI options:
 
 Once the receiver is running, external players connect to:
 
-- Browser player: `http://<receiver-ip>:8010/`
-  - Built-in Shaka player that auto-connects as `role=primary`
-- WebSocket: `ws://<receiver-ip>:8010/player`
+- Browser player: `http://<receiver-ip>:<player-port>/`
+  - same page is also available at `http://<receiver-ip>:<player-port>/index.html`
+  - built-in Shaka player auto-connects as `role=primary`
+- Script asset: `http://<receiver-ip>:<player-port>/player.js`
+- WebSocket: `ws://<receiver-ip>:<player-port>/player`
   - optional role query: `?role=primary` or `?role=observer`
-- License proxy: `http://<receiver-ip>:8010/license/<session-id>`
+- License proxy: `http://<receiver-ip>:<player-port>/license/<session-id>`
 
 ## Quick verification
 
@@ -150,10 +156,30 @@ dns-sd -B _googlecast._tcp local
 
 Provider discovery uses Python entry points under `vibecast.providers`.
 
-Built-in provider in this repo:
+Built-in providers in this repo:
 
 - `SvtPlayProvider` (`appId` `95370A1C`)
 - `ViaplayProvider` (`appId` `6313CF39`, `2DB7CC49`)
+
+## Capturing new provider protocols (optional)
+
+Use `scripts/capture_provider.py` to proxy Cast traffic between a real sender
+and a real Cast receiver while writing a structured JSONL capture.
+
+```bash
+uv run python scripts/capture_provider.py \
+  --manifest /path/to/manifest.json \
+  --upstream <real-receiver-ip>
+```
+
+Optional full capture with HTTP interception:
+
+```bash
+uv run python scripts/capture_provider.py \
+  --manifest /path/to/manifest.json \
+  --upstream <real-receiver-ip> \
+  --enable-mitm
+```
 
 Sanity-check discovery:
 
@@ -194,7 +220,7 @@ Check receiver logs around:
 For iOS senders especially, ensure:
 
 - fresh cert material
-- `sig_sha1` available when needed
+- valid signature material is present (`sig_sha1` preferred, `sig` supported)
 - CRL is included
 
 ### `LAUNCH_ERROR: Application not available`
