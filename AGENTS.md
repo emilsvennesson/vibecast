@@ -31,42 +31,6 @@ Two existing codebases serve as implementation references. **Do not port code
 1:1** — use them for understanding protocol details and message flows, then write
 idiomatic Python.
 
-### go-cast (primary reference)
-
-Location: `/Users/emil/dev/gocast/go-cast`
-Repo: `github.com/tristanpenman/go-cast`
-
-Key files:
-
-| File                                  | What it contains                                                                       |
-| ------------------------------------- | -------------------------------------------------------------------------------------- |
-| `internal/channel/cast_channel.proto` | Protobuf definitions (already copied to `castvibe/_proto/`)                            |
-| `internal/cast_channel.go`            | Length-prefixed protobuf framing (4-byte BE uint32 + payload)                          |
-| `internal/server.go`                  | TLS server setup (X.509 keypair from manifest, `tls.Listen`)                           |
-| `internal/client_connection.go`       | Per-connection handler, device auth challenge/response (lines 150-281)                 |
-| `internal/receiver.go`                | Platform namespace handlers (heartbeat, receiver, discovery, multizone, setup)         |
-| `internal/device.go`                  | Device hub: transport registry, subscriptions, message routing, `AppSession` interface |
-| `internal/generic_session.go`         | Generic app session (media namespace, known apps map)                                  |
-| `internal/viaplay_session.go`         | Viaplay session (SETUP_INFO, auth flow, LOAD handling)                                 |
-| `internal/viaplay_api.go`             | Viaplay HTTP API client (cookie jar, URI templates, stream resolution)                 |
-| `internal/advertisement.go`           | mDNS advertisement (`_googlecast._tcp`, TXT records)                                   |
-| `internal/namespaces.go`              | Namespace URI constants                                                                |
-| `internal/peer_cert.go`               | Dynamic peer certificate generation                                                    |
-| `internal/manifest.go`                | Certificate manifest loading + algorithm detection                                     |
-| `internal/auth.go`                    | Shared `BuildAuthResponse()` helper                                                    |
-
-### pychromecast (secondary reference)
-
-Repo: `github.com/home-assistant-libs/pychromecast`
-
-pychromecast is a Cast **sender** (controller), not a receiver. Its value is in:
-
-- `pychromecast/controllers/__init__.py` — `BaseController` ABC pattern for namespace handlers
-- `pychromecast/controllers/media.py` — Media namespace message types and flow
-- `pychromecast/socket_client.py` — TLS socket, protobuf framing, message dispatch
-- `pychromecast/discovery.py` — zeroconf service browsing
-- `chromecast_protobuf/` — Python-compiled protobuf files
-
 ## Google Cast Protocol Reference
 
 ### Transport: TLS over TCP (port 8009)
