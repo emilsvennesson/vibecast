@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
@@ -33,6 +34,11 @@ IDLE_REASON_FINISHED = "FINISHED"
 IDLE_REASON_ERROR = "ERROR"
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+COMMAND_TICK_SECONDS = 0.1
+STATE_REPORT_INTERVAL_SECONDS = 1.0
+SEEK_COMMAND_DEBOUNCE_SECONDS = 0.25
+SEEK_SETTLE_REPORT_SECONDS = 0.4
 
 
 def log(message: str, level: int = xbmc.LOGINFO) -> None:
@@ -230,6 +236,12 @@ class VibecastService:
         self._last_state_key: tuple[Any, ...] | None = None
         self._last_known_time = 0.0
         self._last_known_duration: float | None = None
+        self._next_state_report_at = 0.0
+
+        self._deferred_seek_session_id: str | None = None
+        self._deferred_seek_position: float | None = None
+        self._deferred_seek_apply_at: float | None = None
+        self._deferred_seek_report_at: float | None = None
 
     def run(self) -> None:
         log(
@@ -238,7 +250,7 @@ class VibecastService:
         )
         self._start_ws_thread()
 
-        while not self._monitor.waitForAbort(1.0):
+        while not self._monitor.waitForAbort(COMMAND_TICK_SECONDS):
             self._tick()
 
         self.stop()
@@ -512,6 +524,7 @@ class VibecastService:
             self._last_known_duration = _coerce_float(
                 media.get("duration"), default=None
             )
+            self._clear_deferred_seek_locked()
 
         self._report_state(session_id, PLAYER_STATE_BUFFERING, force=True)
         if self._play_next_stream_candidate(session_id):
@@ -539,6 +552,7 @@ class VibecastService:
             self._state_hint = PLAYER_STATE_PLAYING
             should_toggle = self._is_paused and self._player.isPlaying()
             self._is_paused = False
+            self._clear_deferred_seek_locked()
 
         if should_toggle:
             self._player.pause()
@@ -553,6 +567,7 @@ class VibecastService:
             self._state_hint = PLAYER_STATE_PAUSED
             should_toggle = (not self._is_paused) and self._player.isPlaying()
             self._is_paused = True
+            self._clear_deferred_seek_locked()
 
         if should_toggle:
             self._player.pause()
@@ -571,13 +586,18 @@ class VibecastService:
         if position < 0:
             position = 0.0
 
+        now = time.monotonic()
         with self._state_lock:
             self._pending_seek = position
+            self._last_known_time = position
             self._state_hint = PLAYER_STATE_BUFFERING
+            self._deferred_seek_session_id = session_id
+            self._deferred_seek_position = position
+            self._deferred_seek_apply_at = now + SEEK_COMMAND_DEBOUNCE_SECONDS
+            self._deferred_seek_report_at = now + SEEK_SETTLE_REPORT_SECONDS
 
-        if self._player.isPlaying():
-            self._player.seekTime(position)
-
+        # Report position immediately so the sender UI tracks the drag.
+        # The actual Kodi seekTime() is deferred until the drag settles.
         self._report_state(session_id, PLAYER_STATE_BUFFERING, force=True)
 
     def _handle_stop(self, payload: dict[str, Any]) -> None:
@@ -590,6 +610,7 @@ class VibecastService:
         with self._state_lock:
             self._expected_stop_session_id = session_id
             self._expected_stop_reason = IDLE_REASON_CANCELLED
+            self._clear_deferred_seek_locked()
 
         if self._player.isPlaying():
             self._player.stop()
@@ -817,6 +838,7 @@ class VibecastService:
             self._pending_seek = 0.0
             self._autoplay_enabled = True
             self._last_state_key = None
+            self._clear_deferred_seek_locked()
 
     def _report_error(self, session_id: str, code: str, message: str) -> None:
         payload = {
@@ -955,19 +977,113 @@ class VibecastService:
         rewritten = parsed._replace(netloc=netloc_host)
         return urlunparse(rewritten)
 
+    def _coalesce_seek_commands(
+        self, commands: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        reduced: list[dict[str, Any]] = []
+        for command in commands:
+            command_type = _coerce_str(command.get("type"))
+            if command_type != "seek":
+                reduced.append(command)
+                continue
+
+            session_id = _coerce_str(command.get("sessionId"))
+            if session_id is None or not reduced:
+                reduced.append(command)
+                continue
+
+            previous = reduced[-1]
+            previous_type = _coerce_str(previous.get("type"))
+            previous_session = _coerce_str(previous.get("sessionId"))
+            if previous_type == "seek" and previous_session == session_id:
+                reduced[-1] = command
+                continue
+
+            reduced.append(command)
+        return reduced
+
+    def _process_deferred_seek(self) -> None:
+        now = time.monotonic()
+        with self._state_lock:
+            session_id = self._deferred_seek_session_id
+            position = self._deferred_seek_position
+            apply_at = self._deferred_seek_apply_at
+
+        if session_id is None or position is None or apply_at is None:
+            return
+        if now < apply_at:
+            return
+        if not self._is_active_session(session_id):
+            with self._state_lock:
+                self._clear_deferred_seek_locked()
+            return
+
+        if self._player.isPlaying():
+            self._player.seekTime(position)
+
+        with self._state_lock:
+            self._deferred_seek_position = None
+            self._deferred_seek_apply_at = None
+
+    def _flush_settled_seek_report(self) -> None:
+        now = time.monotonic()
+        with self._state_lock:
+            report_at = self._deferred_seek_report_at
+            session_id = self._active_session_id
+            is_paused = self._is_paused
+            state_hint = self._state_hint
+
+        if report_at is None or now < report_at:
+            return
+
+        if session_id is None:
+            with self._state_lock:
+                self._deferred_seek_report_at = None
+            return
+
+        report_state = state_hint
+        if self._player.isPlaying():
+            report_state = PLAYER_STATE_PAUSED if is_paused else PLAYER_STATE_PLAYING
+
+        with self._state_lock:
+            self._deferred_seek_report_at = None
+        self._report_state(session_id, report_state, force=True)
+
+    def _clear_deferred_seek_locked(self) -> None:
+        self._deferred_seek_session_id = None
+        self._deferred_seek_position = None
+        self._deferred_seek_apply_at = None
+        self._deferred_seek_report_at = None
+
     def _tick(self) -> None:
         queued_commands: list[dict[str, Any]] = []
         with self._queue_lock:
             while self._command_queue:
                 queued_commands.append(self._command_queue.popleft())
 
-        for command in queued_commands:
+        for command in self._coalesce_seek_commands(queued_commands):
             self._handle_command(command)
+
+        self._process_deferred_seek()
+        self._flush_settled_seek_report()
 
         with self._ws_lock:
             connected = self._ws_connected
         if not connected:
             return
+
+        with self._state_lock:
+            seeking = (
+                self._deferred_seek_report_at is not None
+                or self._deferred_seek_apply_at is not None
+            )
+        if seeking:
+            return
+
+        now = time.monotonic()
+        if now < self._next_state_report_at:
+            return
+        self._next_state_report_at = now + STATE_REPORT_INTERVAL_SECONDS
         self._report_current_state(force=False)
 
     def on_av_started(self) -> None:
@@ -975,6 +1091,7 @@ class VibecastService:
             session_id = self._active_session_id
             pending_seek = self._pending_seek
             autoplay_enabled = self._autoplay_enabled
+            self._clear_deferred_seek_locked()
             self._pending_seek = 0.0
             self._state_hint = PLAYER_STATE_PLAYING
             self._is_paused = False
@@ -1003,6 +1120,7 @@ class VibecastService:
             session_id = self._active_session_id
             self._state_hint = PLAYER_STATE_PAUSED
             self._is_paused = True
+            self._clear_deferred_seek_locked()
         if session_id is not None:
             self._report_state(session_id, PLAYER_STATE_PAUSED, force=True)
 
@@ -1011,6 +1129,7 @@ class VibecastService:
             session_id = self._active_session_id
             self._state_hint = PLAYER_STATE_PLAYING
             self._is_paused = False
+            self._clear_deferred_seek_locked()
         if session_id is not None:
             self._report_state(session_id, PLAYER_STATE_PLAYING, force=True)
 
@@ -1018,8 +1137,10 @@ class VibecastService:
         with self._state_lock:
             session_id = self._active_session_id
             self._state_hint = PLAYER_STATE_BUFFERING
-        if session_id is not None:
-            self._report_state(session_id, PLAYER_STATE_BUFFERING, force=True)
+            if session_id is not None:
+                self._deferred_seek_report_at = (
+                    time.monotonic() + SEEK_SETTLE_REPORT_SECONDS
+                )
 
     def on_playback_stopped(self) -> None:
         with self._state_lock:
