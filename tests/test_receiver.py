@@ -16,7 +16,7 @@ from castvibe._proto.cast_channel_pb2 import (
     CastMessage,
     DeviceAuthMessage,
 )
-from castvibe.player import PlaybackMedia
+from castvibe.player import PlaybackMedia, PlaybackStream
 from castvibe.provider import LaunchCredentials, Provider, ProviderSession
 from castvibe.receiver import CastReceiver, ReceiverConfig
 from tests.conftest import make_cast_message
@@ -114,8 +114,12 @@ class DummyProvider(Provider):
         _ = load_request
         return PlaybackMedia(
             session_id=session.session_id,
-            url="https://example.com/video.mpd",
-            content_type="application/dash+xml",
+            streams=(
+                PlaybackStream(
+                    url="https://example.com/video.mpd",
+                    content_type="application/dash+xml",
+                ),
+            ),
             stream_type=StreamType.BUFFERED,
         )
 

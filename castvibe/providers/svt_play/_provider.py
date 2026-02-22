@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, override
 from urllib.parse import urlsplit
 
 from castvibe._models import LoadRequest, StreamType
-from castvibe.player import PlaybackMedia
+from castvibe.player import PlaybackMedia, PlaybackStream
 from castvibe.provider import LaunchCredentials, Provider, ProviderSession
 from castvibe.providers.svt_play._api import SvtPlayAPI
 
@@ -89,10 +89,22 @@ class SvtPlayProvider(Provider):
         if stream_type is StreamType.NONE:
             stream_type = StreamType.BUFFERED
 
+        streams = tuple(
+            PlaybackStream(
+                url=stream.url,
+                content_type=stream.content_type,
+                drm=stream.drm,
+            )
+            for stream in resolved.streams
+        )
+
+        if not streams:
+            msg = "NO_RESOLVED_STREAMS"
+            raise RuntimeError(msg)
+
         return PlaybackMedia(
             session_id=session.session_id,
-            url=resolved.manifest_url,
-            content_type="application/dash+xml",
+            streams=streams,
             stream_type=stream_type,
             title=resolved.title or _metadata_title(metadata),
             subtitle=resolved.subtitle or _metadata_subtitle(metadata),

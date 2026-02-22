@@ -10,6 +10,8 @@ from castvibe.player import (
     PlaybackMedia,
     PlaybackMediaPayload,
     PlaybackState,
+    PlaybackStream,
+    PlaybackStreamPayload,
     PlayerContext,
     StateReport,
     player_report_adapter,
@@ -20,8 +22,12 @@ def test_load_command_serializes_with_camel_case() -> None:
     command = LoadCommand(
         session_id="session-1",
         media=PlaybackMediaPayload(
-            url="https://example.com/manifest.mpd",
-            content_type="application/dash+xml",
+            streams=[
+                PlaybackStreamPayload(
+                    url="https://example.com/manifest.mpd",
+                    content_type="application/dash+xml",
+                )
+            ],
             stream_type=StreamType.BUFFERED,
             title="Example",
             images=[MediaImage(url="https://example.com/poster.jpg")],
@@ -32,7 +38,7 @@ def test_load_command_serializes_with_camel_case() -> None:
 
     dumped = command.model_dump(exclude_none=True)
     assert dumped["sessionId"] == "session-1"
-    assert dumped["media"]["contentType"] == "application/dash+xml"
+    assert dumped["media"]["streams"][0]["contentType"] == "application/dash+xml"
     assert dumped["media"]["streamType"] == "BUFFERED"
     assert dumped["media"]["startTime"] == 12.0
     assert dumped["media"]["customData"] == {"foo": "bar"}
@@ -101,8 +107,12 @@ async def test_default_player_is_noop() -> None:
         ctx,
         PlaybackMedia(
             session_id="session-1",
-            url="https://example.com/manifest.mpd",
-            content_type="application/dash+xml",
+            streams=(
+                PlaybackStream(
+                    url="https://example.com/manifest.mpd",
+                    content_type="application/dash+xml",
+                ),
+            ),
             stream_type=StreamType.BUFFERED,
         ),
     )

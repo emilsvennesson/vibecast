@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 
 from castvibe._models import LoadRequest, MediaInfo, MediaMetadata, StreamType
+from castvibe.player import DrmSystem
 from castvibe.provider import LaunchCredentials, ProviderSession, ReceiverContext
 from castvibe.providers.svt_play._provider import SvtPlayProvider
 
@@ -159,7 +160,9 @@ class TestResolveMedia:
                 ),
             )
 
-        parsed = parse_qs(urlsplit(media.url).query)
+        assert len(media.streams) >= 2
+
+        parsed = parse_qs(urlsplit(media.streams[0].url).query)
         assert parsed["manifestUrl"] == [default_manifest]
         assert parsed["manifestUrlSignLanguage"] == [sign_manifest]
         assert parsed["manifestUrlAudioDescription"] == [audio_manifest]
@@ -167,6 +170,8 @@ class TestResolveMedia:
         assert parsed["platform"] == ["chromecast;cc-androidtv"]
         assert parsed["includeAudioCodecs"] == ["mp4a.40.2"]
         assert parsed["b"] == ["-6334"]
+
+        assert media.streams[1].url == default_manifest
 
         assert media.title == "Hundarna"
         assert media.subtitle == '1. "Nu kor vi!"'
@@ -247,12 +252,143 @@ class TestResolveMedia:
 
         assert requested_urls[0] == "https://video.svt.se/video/eXv13pb"
 
-        parsed = parse_qs(urlsplit(media.url).query)
+        assert len(media.streams) >= 2
+
+        parsed = parse_qs(urlsplit(media.streams[0].url).query)
         assert parsed["manifestUrl"] == [default_manifest]
         assert "manifestUrlSignLanguage" not in parsed
         assert "manifestUrlAudioDescription" not in parsed
         assert "preferredVideoTrack" not in parsed
 
+        assert media.streams[1].url == default_manifest
+
         assert media.title == "Fallback title"
         assert media.subtitle == "Fallback subtitle"
         assert media.duration == 56
+
+    async def test_detects_clearkey_and_includes_unencrypted_fallback(self) -> None:
+        provider = SvtPlayProvider()
+
+        primary_resolve = "https://switcher.cdn.svt.se/resolve/crypt-id/dash-full.mpd"
+        fallback_resolve = (
+            "https://switcher.cdn.svt.se/resolve/crypt-id/dash-hbbtv-avc.mpd"
+        )
+        primary_manifest = (
+            "https://ed8.cdn.svt.se/d0/crypt/20260222/crypt-id/dash-full.mpd"
+        )
+        fallback_manifest = (
+            "https://ed8.cdn.svt.se/d0/crypt/20260222/crypt-id/dash-hbbtv-avc.mpd"
+        )
+
+        video_payload = {
+            "svtId": "cryptAsset",
+            "programTitle": "Encrypted Test",
+            "contentDuration": 111,
+            "videoReferences": [
+                {
+                    "format": "dash-full",
+                    "url": "https://svt-vod.example/crypt-id/dash-full.mpd",
+                    "resolve": primary_resolve,
+                },
+                {
+                    "format": "dash-hbbtv-avc",
+                    "url": "https://svt-vod.example/crypt-id/dash-hbbtv-avc.mpd",
+                    "resolve": fallback_resolve,
+                },
+            ],
+            "variants": {
+                "default": {
+                    "videoReferences": [
+                        {
+                            "format": "dash-full",
+                            "url": "https://svt-vod.example/crypt-id/dash-full.mpd",
+                            "resolve": primary_resolve,
+                        },
+                        {
+                            "format": "dash-hbbtv-avc",
+                            "url": "https://svt-vod.example/crypt-id/dash-hbbtv-avc.mpd",
+                            "resolve": fallback_resolve,
+                        },
+                    ]
+                }
+            },
+        }
+
+        clearkey_manifest = (
+            "<MPD><Period><AdaptationSet><ContentProtection "
+            'schemeIdUri="urn:uuid:e2719d58-a985-b3c9-781a-b030af78d30e">'
+            '<dashif:Laurl xmlns:dashif="https://dashif.org/guidelines/clearKey">'
+            "https://license.example.com/clearkey"
+            "</dashif:Laurl>"
+            "</ContentProtection></AdaptationSet></Period></MPD>"
+        )
+        unencrypted_manifest = "<MPD><Period><AdaptationSet /></Period></MPD>"
+
+        async def _handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if url == "https://video.svt.se/video/cryptAsset":
+                return httpx.Response(200, json=video_payload, request=request)
+            if url == primary_resolve:
+                return httpx.Response(
+                    200,
+                    json={"location": primary_manifest},
+                    request=request,
+                )
+            if url == fallback_resolve:
+                return httpx.Response(
+                    200,
+                    json={"location": fallback_manifest},
+                    request=request,
+                )
+            if url.startswith("https://api.svt.se/ditto/api/v3/manifest?"):
+                return httpx.Response(
+                    200,
+                    text=clearkey_manifest,
+                    headers={"content-type": "application/dash+xml"},
+                    request=request,
+                )
+            if url == primary_manifest:
+                return httpx.Response(
+                    200,
+                    text=clearkey_manifest,
+                    headers={"content-type": "application/dash+xml"},
+                    request=request,
+                )
+            if url == fallback_manifest:
+                return httpx.Response(
+                    200,
+                    text=unencrypted_manifest,
+                    headers={"content-type": "application/dash+xml"},
+                    request=request,
+                )
+            return httpx.Response(404, request=request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+            session = _make_session(client)
+            await provider.on_launch(session, LaunchCredentials())
+
+            media = await provider.resolve_media(
+                session,
+                LoadRequest(
+                    request_id=11,
+                    media=MediaInfo(
+                        content_id="cryptAsset",
+                        content_type="video/mp4",
+                        stream_type=StreamType.BUFFERED,
+                    ),
+                ),
+            )
+
+        assert len(media.streams) >= 3
+        assert any(
+            stream.drm is not None and stream.drm.system is DrmSystem.CLEARKEY
+            for stream in media.streams
+        )
+        assert any(stream.drm is None for stream in media.streams)
+
+        clearkey_stream = next(
+            stream for stream in media.streams if stream.drm is not None
+        )
+        assert clearkey_stream.drm is not None
+        assert clearkey_stream.drm.system is DrmSystem.CLEARKEY
+        assert clearkey_stream.drm.license_url == "https://license.example.com/clearkey"

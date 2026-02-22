@@ -30,9 +30,11 @@ from castvibe._models import (
 from castvibe.player import (
     LicenseRequest,
     LicenseResponse,
+    LicenseRoute,
     PlaybackError,
     PlaybackMedia,
     PlaybackState,
+    PlaybackStream,
     Player,
     PlayerContext,
 )
@@ -67,6 +69,17 @@ log = get_logger("coordinator")
 #   UNFOLLOW    131072
 #   STREAM_TRANSFER 262144
 _SUPPORTED_MEDIA_COMMANDS = 1 | 2 | 4 | 8  # PAUSE | SEEK | STREAM_VOLUME | STREAM_MUTE
+_HOP_BY_HOP_REQUEST_HEADERS = {
+    "connection",
+    "content-length",
+    "host",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+}
 
 
 class PlaybackCoordinator:
@@ -77,6 +90,7 @@ class PlaybackCoordinator:
         "_current_media",
         "_current_time",
         "_idle_reason",
+        "_license_routes",
         "_media_session_id",
         "_playback_media",
         "_player",
@@ -116,6 +130,7 @@ class PlaybackCoordinator:
         self._broadcast_fn = broadcast_fn
         self._send_fn = send_fn
         self._media_session_id = 1
+        self._license_routes: dict[str, LicenseRoute] = {}
         self._player_state = PlayerState.IDLE
         self._current_time = 0.0
         self._current_media: MediaInfo | None = None
@@ -293,8 +308,21 @@ class PlaybackCoordinator:
         )
 
     async def handle_license(self, request: LicenseRequest) -> LicenseResponse:
-        """Delegate license proxy requests to the provider."""
-        return await self._provider.resolve_license(self._provider_session, request)
+        """Resolve one proxied DRM license request through provider/forwarder."""
+        route_id = request.route_id
+        if route_id is None:
+            return LicenseResponse(status=400, body=b"missing license route")
+
+        route = self._license_routes.get(route_id)
+        if route is None:
+            return LicenseResponse(status=404, body=b"unknown license route")
+
+        return await self._provider.resolve_license(
+            self._provider_session,
+            request,
+            route,
+            self._forward_license_request,
+        )
 
     async def send_current_status(
         self,
@@ -347,6 +375,20 @@ class PlaybackCoordinator:
 
         if media.session_id != self.session_id:
             media = replace(media, session_id=self.session_id)
+
+        if not media.streams:
+            log.warning("provider returned no streams for session %s", self.session_id)
+            failed = LoadFailedResponse(
+                request_id=request.request_id,
+                reason="LOAD_FAILED",
+            )
+            await self._send_fn(
+                connection,
+                sender_id,
+                ns.MEDIA,
+                failed.model_dump(exclude_none=True),
+            )
+            return
 
         media = self._with_license_proxy(media)
 
@@ -457,21 +499,80 @@ class PlaybackCoordinator:
         self._playback_media = None
 
     def _with_license_proxy(self, media: PlaybackMedia) -> PlaybackMedia:
-        drm = media.drm
         self._unregister_license_handler()
-        if drm is None or self._player_server is None:
+        if self._player_server is None:
+            return media
+
+        if not any(stream.drm is not None for stream in media.streams):
             return media
 
         proxy_url = self._player_server.register_license_handler(self.session_id, self)
-        return replace(media, drm=replace(drm, license_url=proxy_url))
+        rewritten_streams: list[PlaybackStream] = []
+        for index, stream in enumerate(media.streams):
+            drm = stream.drm
+            if drm is None:
+                rewritten_streams.append(stream)
+                continue
+
+            route_id = f"r{index}"
+            self._license_routes[route_id] = LicenseRoute(
+                route_id=route_id,
+                system=drm.system,
+                upstream_url=drm.license_url,
+                headers=dict(drm.headers),
+            )
+
+            proxied_url = f"{proxy_url}?route={route_id}"
+            rewritten_streams.append(
+                replace(
+                    stream,
+                    drm=replace(drm, license_url=proxied_url, headers={}),
+                )
+            )
+
+        return replace(media, streams=tuple(rewritten_streams))
 
     def _unregister_license_handler(self) -> None:
+        self._license_routes.clear()
         if self._player_server is None:
             return
         self._player_server.unregister_license_handler(self.session_id)
 
+    async def _forward_license_request(
+        self,
+        request: LicenseRequest,
+        route: LicenseRoute,
+    ) -> LicenseResponse:
+        headers = dict(route.headers)
+        for key, value in request.headers.items():
+            if key.lower() in _HOP_BY_HOP_REQUEST_HEADERS:
+                continue
+            if key not in headers:
+                headers[key] = value
+
+        if request.content_type:
+            headers["Content-Type"] = request.content_type
+
+        response = await self._provider_session.http_client.post(
+            route.upstream_url,
+            content=request.body,
+            headers=headers,
+        )
+        return LicenseResponse(
+            body=response.content,
+            content_type=response.headers.get(
+                "content-type", "application/octet-stream"
+            ),
+            status=response.status_code,
+        )
+
 
 def _build_media_info(media: PlaybackMedia) -> MediaInfo:
+    if not media.streams:
+        msg = "playback media contains no streams"
+        raise RuntimeError(msg)
+    primary_stream = media.streams[0]
+
     metadata = None
     if media.title or media.subtitle or media.images:
         metadata = MediaMetadata(
@@ -482,8 +583,8 @@ def _build_media_info(media: PlaybackMedia) -> MediaInfo:
 
     custom_data = media.custom_data or None
     return MediaInfo(
-        content_id=media.url,
-        content_type=media.content_type,
+        content_id=primary_stream.url,
+        content_type=primary_stream.content_type,
         stream_type=media.stream_type,
         metadata=metadata,
         duration=media.duration,

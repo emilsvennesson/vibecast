@@ -12,7 +12,7 @@ providers (for example Viaplay).
 - Built-in player mediator server on port `8010` (configurable):
   - `GET /` (embedded Shaka web player)
   - `GET /player` (WebSocket command/report channel)
-  - `POST /license/{session_id}` (DRM license proxy)
+  - `POST /license/{session_id}?route=<route_id>` (DRM license proxy)
 - Device auth response with cert chain + CRL
 - Core platform namespaces:
   - `urn:x-cast:com.google.cast.tp.connection`

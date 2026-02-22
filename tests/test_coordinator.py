@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, override
 
+import httpx
+
 from castvibe import _namespace as ns
 from castvibe._coordinator import PlaybackCoordinator
 from castvibe._models import (
@@ -22,10 +24,13 @@ from castvibe._models import (
 )
 from castvibe.player import (
     DrmInfo,
+    DrmSystem,
     LicenseRequest,
     LicenseResponse,
+    LicenseRoute,
     PlaybackMedia,
     PlaybackState,
+    PlaybackStream,
     Player,
     PlayerContext,
 )
@@ -41,10 +46,12 @@ if TYPE_CHECKING:
 
 
 class FakeProvider(Provider):
-    def __init__(self, media: PlaybackMedia) -> None:
+    def __init__(self, media: PlaybackMedia, *, use_forwarder: bool = False) -> None:
         self._media = media
+        self._use_forwarder = use_forwarder
         self.playback_updates: list[PlaybackState] = []
         self.license_requests: list[LicenseRequest] = []
+        self.license_routes: list[LicenseRoute] = []
 
     @override
     def app_ids(self) -> frozenset[str]:
@@ -102,9 +109,14 @@ class FakeProvider(Provider):
         self,
         session: ProviderSession,
         request: LicenseRequest,
+        route: LicenseRoute,
+        forward: Any,
     ) -> LicenseResponse:
         _ = session
         self.license_requests.append(request)
+        self.license_routes.append(route)
+        if self._use_forwarder:
+            return await forward(request, route)
         return LicenseResponse(body=b"license-response")
 
 
@@ -162,7 +174,11 @@ class FakePlayerServer:
         self.unregister_calls.append(session_id)
 
 
-def _provider_session(session_id: str = "session-1") -> ProviderSession:
+def _provider_session(
+    session_id: str = "session-1",
+    *,
+    http_client: AsyncClient | None = None,
+) -> ProviderSession:
     async def _send_custom(namespace: str, data: dict[str, Any]) -> None:
         _ = namespace
         _ = data
@@ -175,7 +191,9 @@ def _provider_session(session_id: str = "session-1") -> ProviderSession:
         session_id=session_id,
         transport_id="pid-1",
         app_id="APP",
-        http_client=cast("AsyncClient", object()),
+        http_client=(
+            http_client if http_client is not None else cast("AsyncClient", object())
+        ),
         receiver=ReceiverContext(
             friendly_name="Living Room",
             device_model="Chromecast",
@@ -191,11 +209,18 @@ class TestCoordinator:
     async def test_load_registers_license_proxy_and_notifies_player(self) -> None:
         media = PlaybackMedia(
             session_id="session-1",
-            url="https://cdn.example.com/manifest.mpd",
-            content_type="application/dash+xml",
+            streams=(
+                PlaybackStream(
+                    url="https://cdn.example.com/manifest.mpd",
+                    content_type="application/dash+xml",
+                    drm=DrmInfo(
+                        system=DrmSystem.WIDEVINE,
+                        license_url="https://drm.example.com",
+                    ),
+                ),
+            ),
             stream_type=StreamType.BUFFERED,
             start_time=5.0,
-            drm=DrmInfo(system="widevine", license_url="https://drm.example.com"),
         )
         provider = FakeProvider(media)
         player = FakePlayer()
@@ -244,10 +269,10 @@ class TestCoordinator:
 
         assert player_server.register_calls == ["session-1"]
         assert len(player.load_calls) == 1
-        assert player.load_calls[0].drm is not None
+        assert player.load_calls[0].streams[0].drm is not None
         assert (
-            player.load_calls[0].drm.license_url
-            == "http://127.0.0.1:8010/license/session-1"
+            player.load_calls[0].streams[0].drm.license_url
+            == "http://127.0.0.1:8010/license/session-1?route=r0"
         )
 
         namespace, payload = broadcast[0]
@@ -264,8 +289,12 @@ class TestCoordinator:
         provider = FakeProvider(
             PlaybackMedia(
                 session_id="session-1",
-                url="https://cdn.example.com/manifest.mpd",
-                content_type="application/dash+xml",
+                streams=(
+                    PlaybackStream(
+                        url="https://cdn.example.com/manifest.mpd",
+                        content_type="application/dash+xml",
+                    ),
+                ),
                 stream_type=StreamType.BUFFERED,
             )
         )
@@ -358,8 +387,12 @@ class TestCoordinator:
         provider = FakeProvider(
             PlaybackMedia(
                 session_id="session-1",
-                url="https://cdn.example.com/manifest.mpd",
-                content_type="application/dash+xml",
+                streams=(
+                    PlaybackStream(
+                        url="https://cdn.example.com/manifest.mpd",
+                        content_type="application/dash+xml",
+                    ),
+                ),
                 stream_type=StreamType.BUFFERED,
             )
         )
@@ -421,12 +454,21 @@ class TestCoordinator:
         provider = FakeProvider(
             PlaybackMedia(
                 session_id="session-1",
-                url="https://cdn.example.com/manifest.mpd",
-                content_type="application/dash+xml",
+                streams=(
+                    PlaybackStream(
+                        url="https://cdn.example.com/manifest.mpd",
+                        content_type="application/dash+xml",
+                        drm=DrmInfo(
+                            system=DrmSystem.WIDEVINE,
+                            license_url="https://drm.example.com",
+                        ),
+                    ),
+                ),
                 stream_type=StreamType.BUFFERED,
             )
         )
         player = FakePlayer()
+        player_server = FakePlayerServer()
         sent: list[tuple[str, str, dict[str, Any]]] = []
 
         async def _send_fn(
@@ -448,7 +490,7 @@ class TestCoordinator:
             provider=provider,
             provider_session=_provider_session(),
             player=player,
-            player_server=None,
+            player_server=cast("Any", player_server),
             broadcast_fn=_broadcast_fn,
             send_fn=_send_fn,
             initial_volume=Volume(level=1.0, muted=False),
@@ -470,7 +512,83 @@ class TestCoordinator:
         assert sent[-1][2]["type"] == "MEDIA_STATUS"
 
         response = await coordinator.handle_license(
-            LicenseRequest(session_id="session-1", body=b"challenge")
+            LicenseRequest(session_id="session-1", route_id="r0", body=b"challenge")
         )
         assert response.body == b"license-response"
         assert provider.license_requests[-1].body == b"challenge"
+        assert provider.license_routes[-1].upstream_url == "https://drm.example.com"
+
+    async def test_license_forwarder_posts_to_upstream(self) -> None:
+        media = PlaybackMedia(
+            session_id="session-1",
+            streams=(
+                PlaybackStream(
+                    url="https://cdn.example.com/manifest.mpd",
+                    content_type="application/dash+xml",
+                    drm=DrmInfo(
+                        system=DrmSystem.WIDEVINE,
+                        license_url="https://drm.example.com/license",
+                        headers={"X-Provider": "viaplay"},
+                    ),
+                ),
+            ),
+            stream_type=StreamType.BUFFERED,
+        )
+        provider = FakeProvider(media, use_forwarder=True)
+
+        captured_request: dict[str, Any] = {}
+
+        async def _handler(request: httpx.Request) -> httpx.Response:
+            captured_request["url"] = str(request.url)
+            captured_request["content_type"] = request.headers.get("Content-Type")
+            captured_request["provider_header"] = request.headers.get("X-Provider")
+            captured_request["body"] = request.content
+            return httpx.Response(
+                status_code=201,
+                content=b"upstream-license",
+                headers={"Content-Type": "application/octet-stream"},
+                request=request,
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+            coordinator = PlaybackCoordinator(
+                session_id="session-1",
+                transport_id="pid-1",
+                provider=provider,
+                provider_session=_provider_session(http_client=client),
+                player=FakePlayer(),
+                player_server=cast("Any", FakePlayerServer()),
+                broadcast_fn=lambda _namespace, _data: _noop_async(),
+                send_fn=lambda _c, _s, _n, _d: _noop_async(),
+                initial_volume=Volume(level=1.0, muted=False),
+            )
+
+            await coordinator.handle_media_message(
+                cast("Any", object()),
+                "sender-1",
+                LoadRequest(
+                    request_id=1,
+                    media=MediaInfo(content_id="x", stream_type=StreamType.BUFFERED),
+                    custom_data={"playUrl": "https://content.viaplay.se/play/123"},
+                ),
+            )
+
+            response = await coordinator.handle_license(
+                LicenseRequest(
+                    session_id="session-1",
+                    route_id="r0",
+                    body=b"challenge",
+                    content_type="application/octet-stream",
+                )
+            )
+
+        assert captured_request["url"] == "https://drm.example.com/license"
+        assert captured_request["content_type"] == "application/octet-stream"
+        assert captured_request["provider_header"] == "viaplay"
+        assert captured_request["body"] == b"challenge"
+        assert response.status == 201
+        assert response.body == b"upstream-license"
+
+
+async def _noop_async() -> None:
+    return None
