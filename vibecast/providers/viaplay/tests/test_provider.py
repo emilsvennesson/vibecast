@@ -18,6 +18,7 @@ from vibecast._models import (
 from vibecast.player import (
     DrmSystem,
     LicenseRequest,
+    LicenseResponse,
     LicenseRoute,
     PlaybackState,
 )
@@ -158,6 +159,7 @@ class TestResolveMedia:
         assert media.streams[0].drm is not None
         assert media.streams[0].drm.system is DrmSystem.WIDEVINE
         assert media.streams[0].drm.license_url == "https://drm.example.com/license"
+        assert "User-Agent" in media.streams[0].drm.headers
 
     async def test_requires_authentication(self) -> None:
         provider = ViaplayProvider()
@@ -218,42 +220,40 @@ class TestPlaybackAndLicense:
         assert second_payload["position"] == 260
         assert second_payload["duration"] == 2535
 
-    async def test_resolve_license_uses_api_fetch_license(self) -> None:
+    async def test_resolve_license_uses_generic_forwarder(self) -> None:
         provider = ViaplayProvider()
         session, _, _ = _make_session()
         await provider.on_launch(session, LaunchCredentials())
 
-        state = provider._sessions[session.session_id]  # noqa: SLF001
-        with patch.object(
-            state.api,
-            "fetch_license",
-            new_callable=AsyncMock,
-            return_value=(b"license-bytes", "application/octet-stream"),
-        ) as mock_fetch:
-            forward = AsyncMock()
-            route = LicenseRoute(
-                route_id="r0",
-                system=DrmSystem.WIDEVINE,
-                upstream_url="https://drm.example.com/license",
+        forward = AsyncMock(
+            return_value=LicenseResponse(
+                body=b"license-bytes",
+                content_type="application/octet-stream",
+                status=403,
             )
+        )
+        request = LicenseRequest(
+            session_id=session.session_id,
+            route_id="r0",
+            body=b"challenge",
+        )
+        route = LicenseRoute(
+            route_id="r0",
+            system=DrmSystem.WIDEVINE,
+            upstream_url="https://drm.example.com/license",
+        )
 
-            response = await provider.resolve_license(
-                session,
-                LicenseRequest(
-                    session_id=session.session_id,
-                    route_id="r0",
-                    body=b"challenge",
-                ),
-                route,
-                forward,
-            )
+        response = await provider.resolve_license(
+            session,
+            request,
+            route,
+            forward,
+        )
 
         assert response.body == b"license-bytes"
         assert response.content_type == "application/octet-stream"
-        mock_fetch.assert_awaited_once_with(
-            "https://drm.example.com/license", b"challenge"
-        )
-        forward.assert_not_awaited()
+        assert response.status == 403
+        forward.assert_awaited_once_with(request, route)
 
 
 class TestAuthFlowEdges:

@@ -328,6 +328,49 @@ class TestLifecycle:
             assert mock_zeroconf.async_register_service.await_count == 3
             assert mock_zeroconf.async_unregister_service.await_count == 3
 
+    async def test_stop_continues_cleanup_when_unregister_or_close_fail(
+        self, bundle: CertificateBundle
+    ) -> None:
+        """stop() attempts cleanup for all registrations even after failures."""
+        ad = CastAdvertisement(
+            friendly_name="Office",
+            device_model="Chromecast",
+            device_id=str(uuid4()),
+            port=8009,
+            cert_digest=bundle.cert_digest_md5,
+            app_ids={"6313CF39", "0F5096E8"},
+        )
+
+        with patch("vibecast._discovery.AsyncZeroconf") as mock_ctor:
+            base_zeroconf = AsyncMock()
+            subtype_zeroconf_a = AsyncMock()
+            subtype_zeroconf_b = AsyncMock()
+            zeroconfs = [base_zeroconf, subtype_zeroconf_a, subtype_zeroconf_b]
+
+            for mock_zeroconf in zeroconfs:
+                mock_zeroconf.async_register_service.return_value = asyncio.create_task(
+                    asyncio.sleep(0)
+                )
+                mock_zeroconf.async_unregister_service.return_value = (
+                    asyncio.create_task(asyncio.sleep(0))
+                )
+
+            subtype_zeroconf_b.async_unregister_service.side_effect = RuntimeError(
+                "unregister failed"
+            )
+            subtype_zeroconf_a.async_close.side_effect = RuntimeError("close failed")
+
+            mock_ctor.side_effect = zeroconfs
+
+            await ad.start()
+            await ad.stop()
+
+            assert mock_ctor.call_count == 3
+            for mock_zeroconf in zeroconfs:
+                mock_zeroconf.async_register_service.assert_awaited_once()
+                assert mock_zeroconf.async_unregister_service.await_count == 1
+                assert mock_zeroconf.async_close.await_count == 1
+
     async def test_start_failure_closes_zeroconf(
         self, bundle: CertificateBundle
     ) -> None:

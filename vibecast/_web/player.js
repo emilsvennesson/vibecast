@@ -123,7 +123,9 @@
     const lines = [];
     for (const el of logEl.children) {
       // Only copy visible entries.
-      if (el.offsetParent !== null || el.style.display !== "none") {
+      const isVisible =
+        el.offsetParent !== null && window.getComputedStyle(el).display !== "none";
+      if (isVisible) {
         lines.push(el.textContent);
       }
     }

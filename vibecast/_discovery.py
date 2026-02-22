@@ -381,12 +381,12 @@ class CastAdvertisement:
                 registration.info.name,
                 registration.info.type,
             )
-            try:
+            with contextlib.suppress(Exception):
                 unregister_task = await registration.zeroconf.async_unregister_service(
                     registration.info
                 )
                 await unregister_task
-            finally:
+            with contextlib.suppress(Exception):
                 await registration.zeroconf.async_close()
 
         log.info(

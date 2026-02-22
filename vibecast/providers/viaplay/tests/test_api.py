@@ -502,19 +502,3 @@ class TestFetchStream:
         api = _mock_api((re.compile(r".*"), {}, 404))
         with pytest.raises(RuntimeError, match="status 404"):
             _ = await api.fetch_stream("https://x")
-
-
-class TestFetchLicense:
-    async def test_posts_challenge_and_returns_body_with_content_type(self) -> None:
-        api = _mock_api(
-            (
-                re.compile(r"https://drm\.example\.com"),
-                b"license-response-bytes",
-                200,
-            ),
-        )
-        body, content_type = await api.fetch_license(
-            "https://drm.example.com", b"challenge"
-        )
-        assert body == b"license-response-bytes"
-        assert isinstance(content_type, str)

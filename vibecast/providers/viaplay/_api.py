@@ -162,6 +162,10 @@ class ViaplayAPI:
             "CAST-DEVICE-CAPABILITIES": _CAST_DEVICE_CAPABILITIES,
         }
 
+    def request_headers(self) -> dict[str, str]:
+        """Return default Viaplay headers mimicking a real Chromecast."""
+        return self._default_headers()
+
     # -- HTTP helpers --------------------------------------------------------
 
     async def _get(
@@ -401,25 +405,6 @@ class ViaplayAPI:
 
         msg = "no stream URL found in API response"
         raise RuntimeError(msg)
-
-    async def fetch_license(
-        self, license_url: str, challenge: bytes
-    ) -> tuple[bytes, str]:
-        """Forward a Widevine DRM license challenge to the upstream server.
-
-        The *license_url* is the fully-qualified URL from the stream API
-        response (including JWT token and ``releasePid`` query parameters).
-
-        Returns a ``(body, content_type)`` tuple with the raw license
-        response bytes and the upstream content-type header.
-        """
-        response = await self._client.post(
-            license_url,
-            content=challenge,
-            headers=self._default_headers(),
-        )
-        content_type = response.headers.get("content-type", "application/octet-stream")
-        return response.content, content_type
 
     @staticmethod
     def _extract_drm_url(resp: ViaplayStreamResponse) -> str | None:

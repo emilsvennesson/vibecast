@@ -236,6 +236,7 @@ class ViaplayProvider(Provider):
             drm = DrmInfo(
                 system=DrmSystem.WIDEVINE,
                 license_url=stream_info.drm_license_url,
+                headers=state.api.request_headers(),
             )
 
         streams: list[PlaybackStream] = []
@@ -301,15 +302,9 @@ class ViaplayProvider(Provider):
         route: LicenseRoute,
         forward: Callable[[LicenseRequest, LicenseRoute], Awaitable[LicenseResponse]],
     ) -> LicenseResponse:
-        _ = forward
-        state = self._sessions.get(session.session_id)
-        if state is None:
+        if session.session_id not in self._sessions:
             return LicenseResponse(status=500, body=b"unknown session")
-
-        body, content_type = await state.api.fetch_license(
-            route.upstream_url, request.body
-        )
-        return LicenseResponse(body=body, content_type=content_type)
+        return await forward(request, route)
 
     @override
     async def on_stop(self, session: ProviderSession) -> None:
