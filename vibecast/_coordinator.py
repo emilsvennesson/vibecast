@@ -600,11 +600,14 @@ class PlaybackCoordinator:
         route: LicenseRoute,
     ) -> LicenseResponse:
         headers = dict(route.headers)
+        normalized_header_names = {key.lower() for key in headers}
         for key, value in request.headers.items():
-            if key.lower() in _HOP_BY_HOP_REQUEST_HEADERS:
+            lowered = key.lower()
+            if lowered in _HOP_BY_HOP_REQUEST_HEADERS:
                 continue
-            if key not in headers:
+            if lowered not in normalized_header_names:
                 headers[key] = value
+                normalized_header_names.add(lowered)
 
         if request.content_type:
             headers["Content-Type"] = request.content_type
@@ -614,6 +617,19 @@ class PlaybackCoordinator:
             content=request.body,
             headers=headers,
         )
+        if response.status_code >= 400:
+            raw_preview = response.content[:200]
+            preview = raw_preview.decode("utf-8", errors="replace").replace("\n", " ")
+            body_prefix = request.body[:16].hex()
+            log.warning(
+                "upstream license rejected: status=%d route=%s body_bytes=%d body_prefix=%s response=%r",
+                response.status_code,
+                route.route_id,
+                len(request.body),
+                body_prefix,
+                preview,
+            )
+
         return LicenseResponse(
             body=response.content,
             content_type=response.headers.get(

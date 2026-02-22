@@ -131,6 +131,11 @@ Once the receiver is running, external players connect to:
   - optional role query: `?role=primary` or `?role=observer`
 - License proxy: `http://<receiver-ip>:<player-port>/license/<session-id>`
 
+Kodi integration:
+
+- A ready-to-install Kodi service add-on is available under
+  `kodi/service.vibecast`.
+
 ## Quick verification
 
 1. Confirm listener:
