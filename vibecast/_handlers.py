@@ -187,6 +187,10 @@ class PlatformHandler:
             )
             return
 
+        # LAUNCH replaces the current app: stop all existing sessions first.
+        for sid in list(self._device.sessions):
+            _ = await self._device.stop_session(sid)
+
         credentials = _extract_launch_credentials(request)
         session = self._device.start_session(
             request.app_id,

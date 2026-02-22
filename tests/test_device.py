@@ -290,27 +290,19 @@ class TestSessionLifecycle:
         assert session.session_id not in device.sessions
         assert session.transport_id not in device.transports
 
-    def test_transport_ids_are_sequential(self) -> None:
+    def test_transport_id_equals_session_id(self) -> None:
         device = _build_device()
         provider = FakeProvider(display_name="App", namespaces=frozenset())
 
-        first = device.start_session(
+        session = device.start_session(
             "app-1",
             provider,
             LaunchCredentials(),
             player=_build_player(),
             player_server=None,
         )
-        second = device.start_session(
-            "app-2",
-            provider,
-            LaunchCredentials(),
-            player=_build_player(),
-            player_server=None,
-        )
 
-        assert first.transport_id == "pid-1"
-        assert second.transport_id == "pid-2"
+        assert session.transport_id == session.session_id
 
     async def test_stop_orphaned_session_when_last_subscription_removed(self) -> None:
         device = _build_device()

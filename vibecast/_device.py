@@ -96,6 +96,7 @@ class AppSession(TransportHandler):
     credentials: LaunchCredentials
     namespaces: tuple[str, ...]
     coordinator: PlaybackCoordinator | None = None
+    icon_url: str | None = None
     status_text: str = ""
 
     async def on_launch(self, connection: Connection, sender_id: str) -> None:
@@ -249,7 +250,6 @@ class Device:
         "_data_dir",
         "_get_http_client",
         "_subscriptions",
-        "_transport_counter",
         "config",
         "sessions",
         "transports",
@@ -270,7 +270,6 @@ class Device:
         self.transports: dict[str, Transport] = {}
         self.sessions: dict[str, AppSession] = {}
         self._subscriptions: dict[tuple[Connection, str], str] = {}
-        self._transport_counter = 1
         self.volume = Volume(
             level=1.0,
             muted=False,
@@ -444,9 +443,8 @@ class Device:
         player_server: PlayerServer | None,
     ) -> AppSession:
         """Create and register an app session transport."""
-        transport_id = f"pid-{self._transport_counter}"
-        self._transport_counter += 1
         session_id = str(uuid4())
+        transport_id = session_id
 
         provider_namespaces = sorted(
             namespace for namespace in provider.namespaces() if namespace != ns.MEDIA
@@ -471,6 +469,8 @@ class Device:
             ),
             credentials=credentials,
             namespaces=tuple(provider_namespaces),
+            icon_url=provider.icon_url(),
+            status_text=provider.display_name(),
         )
 
         provider_session = session.create_provider_session()
@@ -588,6 +588,7 @@ def build_receiver_status(
                 app_id=session.app_id,
                 app_type="WEB",
                 display_name=session.display_name,
+                icon_url=session.icon_url,
                 is_idle_screen=False,
                 launched_from_cloud=False,
                 namespaces=[CastNamespace(name=name) for name in session.namespaces],

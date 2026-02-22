@@ -40,6 +40,10 @@ class SvtPlayProvider(Provider):
         return "SVT Play"
 
     @override
+    def icon_url(self) -> str | None:
+        return "https://lh3.googleusercontent.com/K3wumlt002dZrHoe4uKKdW-zMRLXdiPdgT1SRP90dnmMvLqsR-zaA3v-360EEIWLL5-SzJVt65XfqlgENw"
+
+    @override
     def namespaces(self) -> frozenset[str]:
         return self._NAMESPACES
 
