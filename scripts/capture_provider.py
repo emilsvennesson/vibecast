@@ -353,9 +353,10 @@ class ProxySession:
             self._forward_upstream_to_sender(),
             name=f"conn-{self._id}-u2s",
         )
+        tasks = {s2u, u2s}
         try:
             done, pending = await asyncio.wait(
-                {s2u, u2s},
+                tasks,
                 return_when=asyncio.FIRST_COMPLETED,
             )
             # Cancel the remaining direction.
@@ -368,12 +369,18 @@ class ProxySession:
                 exc = task.exception()
                 if exc is not None:
                     raise exc
+        except asyncio.CancelledError:
+            # Shutdown: cancel both directions and suppress their errors.
+            for task in tasks:
+                _ = task.cancel()
+                with contextlib.suppress(BaseException):
+                    await task
         finally:
             self._s_writer.close()
             self._u_writer.close()
-            with contextlib.suppress(OSError):
+            with contextlib.suppress(OSError, ssl.SSLError):
                 await self._s_writer.wait_closed()
-            with contextlib.suppress(OSError):
+            with contextlib.suppress(OSError, ssl.SSLError):
                 await self._u_writer.wait_closed()
 
     # -- sender -> upstream -------------------------------------------------
