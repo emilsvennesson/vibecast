@@ -71,6 +71,7 @@ class _ViaplayState:
     subtitle_active_language_code: str | None = None
     subtitle_enabled: bool | dict[str, Any] | None = True
     audio_active_track: str | None = None
+    stream_type: StreamType = StreamType.BUFFERED
     playback_state: PlaybackState = field(
         default_factory=lambda: PlaybackState(player_state=PlayerState.IDLE)
     )
@@ -260,10 +261,13 @@ class ViaplayProvider(Provider):
             msg = "NO_STREAM_URL"
             raise RuntimeError(msg)
 
+        state.stream_type = resolved_stream_type
+
         return PlaybackMedia(
             session_id=session.session_id,
             streams=tuple(streams),
             stream_type=resolved_stream_type,
+            content_id=load_request.media.content_id,
             title=title,
             subtitle=subtitle,
             images=images,
@@ -297,8 +301,15 @@ class ViaplayProvider(Provider):
         route: LicenseRoute,
         forward: Callable[[LicenseRequest, LicenseRoute], Awaitable[LicenseResponse]],
     ) -> LicenseResponse:
-        _ = session
-        return await forward(request, route)
+        _ = forward
+        state = self._sessions.get(session.session_id)
+        if state is None:
+            return LicenseResponse(status=500, body=b"unknown session")
+
+        body, content_type = await state.api.fetch_license(
+            route.upstream_url, request.body
+        )
+        return LicenseResponse(body=body, content_type=content_type)
 
     @override
     async def on_stop(self, session: ProviderSession) -> None:
@@ -515,13 +526,19 @@ class ViaplayProvider(Provider):
         state: _ViaplayState,
         playback_state: PlaybackState,
     ) -> None:
-        if playback_state.duration is None or playback_state.duration <= 0:
+        is_live = state.stream_type is StreamType.LIVE
+        duration = playback_state.duration
+
+        # LIVE streams send POSDUR even when duration is 0 (the seekable
+        # window grows over time).  VOD streams only send POSDUR once
+        # the duration is known.
+        if not is_live and (duration is None or duration <= 0):
             return
 
         receiver_state = self._build_viaplay_receiver_state(state, status="CASTING")
         message = PosDurMessage(
             position=max(0, int(playback_state.current_time)),
-            duration=max(0, int(playback_state.duration)),
+            duration=max(0, int(duration)) if duration is not None else 0,
             receiver_state=receiver_state,
         )
         await state.broadcast(_NS_VIAPLAY, message.model_dump(exclude_none=True))

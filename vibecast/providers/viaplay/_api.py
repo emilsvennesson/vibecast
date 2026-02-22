@@ -347,7 +347,12 @@ class ViaplayAPI:
         resolved_url = self._expand(play_url)
         body, status = await self._get(resolved_url, expand=False)
         if status != 200:
-            log.debug("stream fetch returned %d for %s", status, resolved_url)
+            log.warning(
+                "stream fetch returned %d for %s: %s",
+                status,
+                resolved_url,
+                body,
+            )
             msg = f"stream fetch failed with status {status}"
             raise RuntimeError(msg)
 
@@ -397,11 +402,24 @@ class ViaplayAPI:
         msg = "no stream URL found in API response"
         raise RuntimeError(msg)
 
-    async def fetch_license(self, license_url: str, challenge: bytes) -> bytes:
-        """Forward a DRM license challenge (placeholder implementation)."""
-        _ = license_url
-        _ = challenge
-        return b"placeholder-license-response"
+    async def fetch_license(
+        self, license_url: str, challenge: bytes
+    ) -> tuple[bytes, str]:
+        """Forward a Widevine DRM license challenge to the upstream server.
+
+        The *license_url* is the fully-qualified URL from the stream API
+        response (including JWT token and ``releasePid`` query parameters).
+
+        Returns a ``(body, content_type)`` tuple with the raw license
+        response bytes and the upstream content-type header.
+        """
+        response = await self._client.post(
+            license_url,
+            content=challenge,
+            headers=self._default_headers(),
+        )
+        content_type = response.headers.get("content-type", "application/octet-stream")
+        return response.content, content_type
 
     @staticmethod
     def _extract_drm_url(resp: ViaplayStreamResponse) -> str | None:

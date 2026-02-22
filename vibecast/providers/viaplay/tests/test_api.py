@@ -505,7 +505,16 @@ class TestFetchStream:
 
 
 class TestFetchLicense:
-    async def test_returns_placeholder_response(self) -> None:
-        api = _mock_api()
-        response = await api.fetch_license("https://drm.example.com", b"challenge")
-        assert response == b"placeholder-license-response"
+    async def test_posts_challenge_and_returns_body_with_content_type(self) -> None:
+        api = _mock_api(
+            (
+                re.compile(r"https://drm\.example\.com"),
+                b"license-response-bytes",
+                200,
+            ),
+        )
+        body, content_type = await api.fetch_license(
+            "https://drm.example.com", b"challenge"
+        )
+        assert body == b"license-response-bytes"
+        assert isinstance(content_type, str)

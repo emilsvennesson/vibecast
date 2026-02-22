@@ -15,15 +15,132 @@
   const subtitleEl = document.getElementById("subtitle");
   const logEl = document.getElementById("log");
   const videoEl = document.getElementById("video");
+  const btnCopy = document.getElementById("btn-copy");
+  const btnClear = document.getElementById("btn-clear");
 
-  function pushLog(message) {
-    const line = document.createElement("div");
-    line.textContent = new Date().toLocaleTimeString() + "  " + message;
-    logEl.prepend(line);
-    while (logEl.childElementCount > 10) {
+  // ---------------------------------------------------------------------------
+  // Shaka error code lookup
+  // ---------------------------------------------------------------------------
+
+  const SHAKA_ERROR_NAMES = {
+    1001: "BAD_HTTP_STATUS",
+    1002: "HTTP_ERROR",
+    1003: "TIMEOUT",
+    6001: "REQUESTED_KEY_SYSTEM_CONFIG_UNAVAILABLE",
+    6002: "FAILED_TO_CREATE_CDM",
+    6003: "FAILED_TO_ATTACH_TO_VIDEO",
+    6004: "INVALID_SERVER_CERTIFICATE",
+    6005: "FAILED_TO_CREATE_SESSION",
+    6006: "FAILED_TO_GENERATE_LICENSE_REQUEST",
+    6007: "LICENSE_REQUEST_FAILED",
+    6008: "LICENSE_RESPONSE_REJECTED",
+    6010: "ENCRYPTED_CONTENT_WITHOUT_DRM_INFO",
+    6012: "NO_LICENSE_SERVER_GIVEN",
+    6013: "OFFLINE_SESSION_REMOVED",
+    6014: "EXPIRED",
+    6015: "SERVER_CERTIFICATE_REQUEST_FAILED",
+    6016: "INIT_DATA_TRANSFORM_ERROR",
+    6017: "SERVER_CERTIFICATE_REQUIRED",
+  };
+
+  const SHAKA_CATEGORY_NAMES = {
+    1: "NETWORK", 2: "TEXT", 3: "MEDIA", 4: "MANIFEST",
+    5: "STREAMING", 6: "DRM", 7: "PLAYER", 8: "CAST",
+    9: "STORAGE", 10: "ADS",
+  };
+
+  function formatShakaError(detail) {
+    if (!detail || typeof detail !== "object") return String(detail);
+    const code = detail.code;
+    const category = detail.category;
+    const codeName = SHAKA_ERROR_NAMES[code] || "UNKNOWN";
+    const catName = SHAKA_CATEGORY_NAMES[category] || "CAT_" + category;
+    let msg = catName + "." + codeName + " (" + code + ")";
+    if (Array.isArray(detail.data) && detail.data.length > 0) {
+      msg += " data=" + JSON.stringify(detail.data);
+    }
+    return msg;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Logging
+  // ---------------------------------------------------------------------------
+
+  const MAX_LOG_LINES = 500;
+
+  function ts() {
+    return new Date().toLocaleTimeString("en-GB", { hour12: false });
+  }
+
+  /**
+   * Append a log entry.
+   *  kind: "info" | "ws-send" | "ws-recv" | "net" | "err"
+   *  message: short summary text
+   *  detail: optional object to render as formatted JSON block
+   */
+  function pushLog(kind, message, detail) {
+    const entry = document.createElement("div");
+    entry.className = "log-entry " + kind;
+
+    const timestamp = document.createElement("span");
+    timestamp.className = "ts";
+    timestamp.textContent = ts() + "  ";
+    entry.appendChild(timestamp);
+
+    entry.appendChild(document.createTextNode(message));
+
+    if (detail !== undefined && detail !== null) {
+      const json = document.createElement("span");
+      json.className = "log-json";
+      try {
+        json.textContent = JSON.stringify(detail, null, 2);
+      } catch {
+        json.textContent = String(detail);
+      }
+      entry.appendChild(json);
+    }
+
+    logEl.prepend(entry);
+    while (logEl.childElementCount > MAX_LOG_LINES) {
       logEl.removeChild(logEl.lastChild);
     }
   }
+
+  // Filter toggles.
+  document.querySelectorAll(".log-filter").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const kind = btn.dataset.kind;
+      btn.classList.toggle("active");
+      logEl.classList.toggle("hide-" + kind);
+    });
+  });
+
+  // Copy / clear buttons.
+  const copyIconSvg = btnCopy.innerHTML;
+  const checkIconSvg = '<svg viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>';
+
+  btnCopy.addEventListener("click", () => {
+    const lines = [];
+    for (const el of logEl.children) {
+      // Only copy visible entries.
+      if (el.offsetParent !== null || el.style.display !== "none") {
+        lines.push(el.textContent);
+      }
+    }
+    navigator.clipboard.writeText(lines.reverse().join("\n")).then(() => {
+      btnCopy.innerHTML = checkIconSvg;
+      btnCopy.classList.add("copied");
+      setTimeout(() => {
+        btnCopy.innerHTML = copyIconSvg;
+        btnCopy.classList.remove("copied");
+      }, 1500);
+    });
+  });
+
+  btnClear.addEventListener("click", () => {
+    logEl.innerHTML = "";
+    pushLog("info", "Log cleared");
+  });
 
   function setConnected(connected) {
     connectionEl.dataset.connected = String(connected);
@@ -35,11 +152,13 @@
     return wsProtocol + "://" + window.location.host + "/player?role=primary";
   }
 
+  // ---------------------------------------------------------------------------
+  // DRM key system helpers
+  // ---------------------------------------------------------------------------
+
   function toKeySystem(system) {
     const normalized = (system || "").trim().toLowerCase();
-    if (!normalized) {
-      return null;
-    }
+    if (!normalized) return null;
     if (normalized === "widevine" || normalized === "com.widevine.alpha") {
       return "com.widevine.alpha";
     }
@@ -56,28 +175,32 @@
     return system;
   }
 
+  // ---------------------------------------------------------------------------
+  // WebSocket send helpers
+  // ---------------------------------------------------------------------------
+
   function canSend() {
     return app.ws !== null && app.ws.readyState === WebSocket.OPEN;
   }
 
+  function wsSend(payload) {
+    const json = JSON.stringify(payload);
+    app.ws.send(json);
+    pushLog("ws-send", ">> " + payload.type, payload);
+  }
+
   function sendError(code, message) {
-    if (!canSend() || app.activeSessionId === null) {
-      return;
-    }
-    app.ws.send(
-      JSON.stringify({
-        type: "error",
-        sessionId: app.activeSessionId,
-        code,
-        message,
-      })
-    );
+    if (!canSend() || app.activeSessionId === null) return;
+    wsSend({
+      type: "error",
+      sessionId: app.activeSessionId,
+      code,
+      message,
+    });
   }
 
   function sendStateReport(sessionId, playerState, idleReason = null, force = false) {
-    if (!canSend()) {
-      return;
-    }
+    if (!canSend()) return;
 
     const currentTime = Number.isFinite(videoEl.currentTime) ? videoEl.currentTime : 0;
     const duration = Number.isFinite(videoEl.duration) ? videoEl.duration : null;
@@ -85,9 +208,7 @@
     const roundedDuration = duration === null ? "none" : String(Math.round(duration * 10) / 10);
     const key = [sessionId, playerState, idleReason || "none", roundedTime, roundedDuration].join("|");
 
-    if (!force && key === app.lastStateKey) {
-      return;
-    }
+    if (!force && key === app.lastStateKey) return;
 
     app.lastStateKey = key;
     const payload = {
@@ -96,22 +217,16 @@
       playerState,
       currentTime,
     };
-    if (duration !== null) {
-      payload.duration = duration;
-    }
-    if (idleReason !== null) {
-      payload.idleReason = idleReason;
-    }
+    if (duration !== null) payload.duration = duration;
+    if (idleReason !== null) payload.idleReason = idleReason;
 
-    app.ws.send(JSON.stringify(payload));
+    wsSend(payload);
     stateEl.textContent =
       idleReason === null ? playerState : playerState + " (" + idleReason + ")";
   }
 
   function sendCurrentState(force = false) {
-    if (app.activeSessionId === null) {
-      return;
-    }
+    if (app.activeSessionId === null) return;
 
     if (videoEl.ended) {
       sendStateReport(app.activeSessionId, "IDLE", "FINISHED", force);
@@ -130,6 +245,10 @@
     sendStateReport(app.activeSessionId, state, null, force);
   }
 
+  // ---------------------------------------------------------------------------
+  // UI helpers
+  // ---------------------------------------------------------------------------
+
   function resetSessionUi() {
     videoEl.controls = false;
     app.autoplayMuted = false;
@@ -142,11 +261,8 @@
 
   function isAutoplayBlocked(error) {
     if (error && typeof error === "object" && "name" in error) {
-      if (String(error.name) === "NotAllowedError") {
-        return true;
-      }
+      if (String(error.name) === "NotAllowedError") return true;
     }
-
     const message = error instanceof Error ? error.message : String(error);
     const normalized = message.toLowerCase();
     return normalized.includes("not allowed") || normalized.includes("permission");
@@ -154,7 +270,6 @@
 
   async function safePlay(options = {}) {
     const allowMutedFallback = Boolean(options.allowMutedFallback);
-
     try {
       await videoEl.play();
       return true;
@@ -165,50 +280,106 @@
         try {
           await videoEl.play();
           app.autoplayMuted = true;
-          pushLog("Autoplay blocked with sound; resumed muted");
+          pushLog("info", "Autoplay blocked with sound; resumed muted");
           return true;
         } catch {
           videoEl.muted = originalMuted;
         }
       }
-
       const message = error instanceof Error ? error.message : String(error);
-      pushLog("Playback start blocked: " + message);
+      pushLog("err", "Playback start blocked: " + message);
       sendError("PLAYBACK_PLAY_FAILED", message);
       return false;
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // DRM configuration
+  // ---------------------------------------------------------------------------
 
   function configureDrm(player, drm) {
     player.configure({
       drm: { servers: {}, advanced: {}, clearKeys: {} },
       manifest: { dash: { keySystemsByURI: {} } },
     });
+
     if (!drm || !drm.licenseUrl) {
+      pushLog("info", "  drm: none (clear content)");
       return true;
     }
 
     const keySystem = toKeySystem(drm.system);
     if (!keySystem) {
+      pushLog("err", "  drm: unsupported key system: " + String(drm.system));
       return false;
     }
 
-    const headers = drm.headers && typeof drm.headers === "object" ? drm.headers : {};
+    pushLog("info", "  drm: " + keySystem + " -> " + drm.licenseUrl);
+
     const servers = {};
     servers[keySystem] = drm.licenseUrl;
-    const advanced = {};
-    advanced[keySystem] = { headers };
     const keySystemsByURI = {};
     if (keySystem === "org.w3.clearkey") {
       keySystemsByURI["urn:uuid:e2719d58-a985-b3c9-781a-b030af78d30e"] = "org.w3.clearkey";
     }
 
     player.configure({
-      drm: { servers, advanced, clearKeys: {} },
+      drm: { servers, advanced: {}, clearKeys: {} },
       manifest: { dash: { keySystemsByURI } },
     });
     return true;
   }
+
+  // ---------------------------------------------------------------------------
+  // Network request/response filters
+  // ---------------------------------------------------------------------------
+
+  function installNetworkFilters(player) {
+    const net = player.getNetworkingEngine();
+    if (!net) return;
+
+    const RequestType = shaka.net.NetworkingEngine.RequestType;
+    const TYPE_NAMES = {};
+    TYPE_NAMES[RequestType.MANIFEST] = "MANIFEST";
+    TYPE_NAMES[RequestType.SEGMENT] = "SEGMENT";
+    TYPE_NAMES[RequestType.LICENSE] = "LICENSE";
+    TYPE_NAMES[RequestType.APP] = "APP";
+    TYPE_NAMES[RequestType.TIMING] = "TIMING";
+    TYPE_NAMES[RequestType.SERVER_CERTIFICATE] = "SERVER_CERT";
+    TYPE_NAMES[RequestType.KEY] = "KEY";
+    TYPE_NAMES[RequestType.ADS] = "ADS";
+    TYPE_NAMES[RequestType.CONTENT_STEERING] = "STEERING";
+
+    net.registerRequestFilter(function (type, request) {
+      if (type === RequestType.SEGMENT) return;
+      const typeName = TYPE_NAMES[type] || String(type);
+      const uri = Array.isArray(request.uris) ? request.uris[0] : "?";
+      const bodyLen = request.body ? request.body.byteLength : 0;
+      const headers = {};
+      if (request.headers) {
+        for (const [k, v] of Object.entries(request.headers)) {
+          headers[k] = v;
+        }
+      }
+      pushLog("net", ">> " + typeName + " " + uri + " (" + bodyLen + "B)", {
+        method: request.method || "GET",
+        headers: Object.keys(headers).length > 0 ? headers : undefined,
+        bodyLength: bodyLen,
+      });
+    });
+
+    net.registerResponseFilter(function (type, response) {
+      if (type === RequestType.SEGMENT) return;
+      const typeName = TYPE_NAMES[type] || String(type);
+      const dataLen = response.data ? response.data.byteLength : 0;
+      const redirected = response.originalUri !== response.uri;
+      pushLog("net", "<< " + typeName + " " + (response.status || "?") + " " + response.uri + " (" + dataLen + "B)" + (redirected ? " (redirect)" : ""));
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Player lifecycle
+  // ---------------------------------------------------------------------------
 
   async function stopPlayback(sessionId, idleReason) {
     if (app.player !== null) {
@@ -232,9 +403,7 @@
   }
 
   async function ensurePlayer() {
-    if (app.player !== null) {
-      return app.player;
-    }
+    if (app.player !== null) return app.player;
 
     shaka.polyfill.installAll();
     if (!shaka.Player.isBrowserSupported()) {
@@ -243,21 +412,30 @@
 
     const player = new shaka.Player();
     await player.attach(videoEl);
+
     player.addEventListener("error", (event) => {
       const detail = event && event.detail ? event.detail : null;
+      const formatted = formatShakaError(detail);
+      pushLog("err", "Shaka error: " + formatted, detail);
       const code = detail && typeof detail.code === "number" ? detail.code : "unknown";
-      const message = detail && detail.message ? detail.message : "Shaka playback error";
-      pushLog("Shaka error " + String(code) + ": " + message);
+      const message = detail && detail.message ? detail.message : formatted;
       sendError("SHAKA_" + String(code), message);
     });
+
+    installNetworkFilters(player);
     app.player = player;
     return player;
   }
+
+  // ---------------------------------------------------------------------------
+  // Load handler
+  // ---------------------------------------------------------------------------
 
   async function handleLoad(command) {
     const media = command.media;
     const streams = media && Array.isArray(media.streams) ? media.streams : [];
     if (streams.length === 0) {
+      pushLog("err", "Load rejected: no streams in command", command);
       sendError("PLAYBACK_INVALID_LOAD", "Missing streams in load command.");
       return;
     }
@@ -266,6 +444,7 @@
     const firstUrl =
       firstStream && typeof firstStream.url === "string" ? firstStream.url : "";
     if (!firstUrl) {
+      pushLog("err", "Load rejected: first stream has no URL", command);
       sendError("PLAYBACK_INVALID_LOAD", "First stream has no URL.");
       return;
     }
@@ -289,42 +468,50 @@
       sendStateReport(command.sessionId, "BUFFERING", null, true);
       const startTime = Number.isFinite(media.startTime) ? media.startTime : 0;
 
+      pushLog("info", "Loading " + streams.length + " stream(s), startTime=" + startTime);
+
       let loaded = false;
       let lastErrorMessage = "No stream candidates could be loaded.";
-      pushLog("Loading media for session " + command.sessionId);
 
       for (let i = 0; i < streams.length; i += 1) {
         const stream = streams[i];
         const streamUrl = stream && typeof stream.url === "string" ? stream.url : "";
-        if (!streamUrl) {
-          continue;
-        }
+        if (!streamUrl) continue;
 
         const streamType =
           stream && typeof stream.contentType === "string" ? stream.contentType : "";
         const drm = stream && typeof stream === "object" ? stream.drm || null : null;
+
+        pushLog("info", "Stream " + (i + 1) + "/" + streams.length + ": " + (streamType || "(no mime)"), {
+          url: streamUrl,
+          contentType: streamType,
+          drm: drm,
+        });
+
         if (!configureDrm(player, drm)) {
           lastErrorMessage = "Unsupported DRM key system for stream " + streamUrl;
-          pushLog(lastErrorMessage);
+          pushLog("err", lastErrorMessage);
           continue;
         }
 
         try {
-          pushLog("Trying stream " + String(i + 1) + "/" + String(streams.length));
           await player.load(streamUrl, startTime, streamType || undefined);
+          pushLog("info", "Stream " + (i + 1) + " loaded OK");
           loaded = true;
           break;
         } catch (error) {
-          lastErrorMessage = error instanceof Error ? error.message : String(error);
-          pushLog(
-            "Stream " + String(i + 1) + " failed: " + lastErrorMessage
-          );
+          const detail = error && typeof error === "object" && "code" in error ? error : null;
+          if (detail) {
+            lastErrorMessage = formatShakaError(detail);
+            pushLog("err", "Stream " + (i + 1) + " failed: " + lastErrorMessage, detail);
+          } else {
+            lastErrorMessage = error instanceof Error ? error.message : String(error);
+            pushLog("err", "Stream " + (i + 1) + " failed: " + lastErrorMessage);
+          }
         }
       }
 
-      if (!loaded) {
-        throw new Error(lastErrorMessage);
-      }
+      if (!loaded) throw new Error(lastErrorMessage);
 
       if (media.autoplay === false) {
         videoEl.pause();
@@ -333,96 +520,95 @@
       }
 
       const started = await safePlay({ allowMutedFallback: true });
-      const state = started ? "PLAYING" : "PAUSED";
-      sendStateReport(command.sessionId, state, null, true);
+      sendStateReport(command.sessionId, started ? "PLAYING" : "PAUSED", null, true);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      pushLog("Load failed: " + message);
+      pushLog("err", "Load failed: " + message);
       sendError("PLAYBACK_LOAD_FAILED", message);
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Command dispatch
+  // ---------------------------------------------------------------------------
+
   async function handleCommand(command) {
-    if (!command || typeof command.type !== "string") {
-      return;
-    }
+    if (!command || typeof command.type !== "string") return;
 
     switch (command.type) {
       case "load":
+        pushLog("ws-recv", "<< load", command);
         await handleLoad(command);
         break;
       case "play":
-        if (command.sessionId !== app.activeSessionId) {
-          return;
-        }
+        pushLog("ws-recv", "<< play", command);
+        if (command.sessionId !== app.activeSessionId) return;
         if (await safePlay({ allowMutedFallback: true })) {
           sendStateReport(command.sessionId, "PLAYING", null, true);
         }
         break;
       case "pause":
-        if (command.sessionId !== app.activeSessionId) {
-          return;
-        }
+        pushLog("ws-recv", "<< pause", command);
+        if (command.sessionId !== app.activeSessionId) return;
         videoEl.pause();
         sendStateReport(command.sessionId, "PAUSED", null, true);
         break;
       case "seek":
-        if (command.sessionId !== app.activeSessionId) {
-          return;
-        }
+        pushLog("ws-recv", "<< seek position=" + command.position, command);
+        if (command.sessionId !== app.activeSessionId) return;
         if (Number.isFinite(command.position)) {
           videoEl.currentTime = command.position;
         }
         sendCurrentState(true);
         break;
-      case "stop": {
-        if (command.sessionId !== app.activeSessionId) {
-          return;
+      case "stop":
+        pushLog("ws-recv", "<< stop", command);
+        if (command.sessionId !== app.activeSessionId) return;
+        {
+          const sessionId = app.activeSessionId;
+          await stopPlayback(sessionId, "CANCELLED");
+          app.activeSessionId = null;
+          resetSessionUi();
         }
-        const sessionId = app.activeSessionId;
-        await stopPlayback(sessionId, "CANCELLED");
-        app.activeSessionId = null;
-        resetSessionUi();
         break;
-      }
       case "volume":
-        if (command.sessionId !== app.activeSessionId) {
-          return;
-        }
+        pushLog("ws-recv", "<< volume level=" + command.level + " muted=" + command.muted, command);
+        if (command.sessionId !== app.activeSessionId) return;
         if (Number.isFinite(command.level)) {
           videoEl.volume = Math.max(0, Math.min(1, command.level));
         }
         videoEl.muted = Boolean(command.muted);
-        if (!videoEl.muted) {
-          app.autoplayMuted = false;
-        }
+        if (!videoEl.muted) app.autoplayMuted = false;
         sendCurrentState(true);
         break;
       default:
+        pushLog("ws-recv", "<< " + command.type + " (unhandled)", command);
         break;
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // WebSocket connection
+  // ---------------------------------------------------------------------------
+
   function connectWebSocket() {
-    const socket = new WebSocket(wsUrl());
+    const url = wsUrl();
+    const socket = new WebSocket(url);
     app.ws = socket;
     setConnected(false);
 
     socket.addEventListener("open", () => {
-      pushLog("Connected to " + wsUrl());
+      pushLog("info", "WebSocket connected: " + url);
       setConnected(true);
     });
 
     socket.addEventListener("message", (event) => {
-      if (typeof event.data !== "string") {
-        return;
-      }
-
+      if (typeof event.data !== "string") return;
       try {
         const command = JSON.parse(event.data);
         void handleCommand(command);
       } catch {
-        pushLog("Ignoring malformed command payload");
+        pushLog("err", "Malformed WS payload: " + event.data.slice(0, 200));
       }
     });
 
@@ -431,16 +617,11 @@
     });
 
     socket.addEventListener("close", () => {
-      if (app.ws === socket) {
-        app.ws = null;
-      }
+      if (app.ws === socket) app.ws = null;
       setConnected(false);
-      pushLog("Disconnected from player server. Reconnecting...");
+      pushLog("info", "WebSocket disconnected, reconnecting in 1.5s...");
 
-      if (app.reconnectTimer !== null) {
-        return;
-      }
-
+      if (app.reconnectTimer !== null) return;
       app.reconnectTimer = window.setTimeout(() => {
         app.reconnectTimer = null;
         connectWebSocket();
@@ -448,49 +629,69 @@
     });
   }
 
+  // ---------------------------------------------------------------------------
+  // Video element events
+  // ---------------------------------------------------------------------------
+
   function bindVideoEvents() {
-    videoEl.addEventListener("playing", () => {
-      sendCurrentState(true);
-    });
-    videoEl.addEventListener("pause", () => {
-      sendCurrentState(true);
-    });
-    videoEl.addEventListener("waiting", () => {
-      sendCurrentState(true);
-    });
-    videoEl.addEventListener("seeking", () => {
-      sendCurrentState(true);
-    });
-    videoEl.addEventListener("seeked", () => {
-      sendCurrentState(true);
-    });
+    videoEl.addEventListener("playing", () => sendCurrentState(true));
+    videoEl.addEventListener("pause", () => sendCurrentState(true));
+    videoEl.addEventListener("waiting", () => sendCurrentState(true));
+    videoEl.addEventListener("seeking", () => sendCurrentState(true));
+    videoEl.addEventListener("seeked", () => sendCurrentState(true));
     videoEl.addEventListener("ended", () => {
-      if (app.activeSessionId === null) {
-        return;
-      }
+      if (app.activeSessionId === null) return;
       sendStateReport(app.activeSessionId, "IDLE", "FINISHED", true);
     });
   }
+
+  // ---------------------------------------------------------------------------
+  // Initialization
+  // ---------------------------------------------------------------------------
 
   async function init() {
     resetSessionUi();
     bindVideoEvents();
 
+    const isSecure = window.isSecureContext;
+    pushLog("info", "Origin: " + window.location.origin + " | secure=" + isSecure + " | " + navigator.userAgent);
+    if (!isSecure) {
+      pushLog("err", "NOT a secure context -- EME/DRM requires HTTPS or localhost/127.0.0.1");
+    }
+
     try {
       await ensurePlayer();
-      pushLog("Shaka initialized and waiting for commands");
+      pushLog("info", "Shaka " + shaka.Player.version + " initialized");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       titleEl.textContent = "Player initialization failed";
       subtitleEl.textContent = message;
-      pushLog(message);
+      pushLog("err", message);
       return;
     }
 
+    try {
+      const support = await shaka.Player.probeSupport();
+      const drm = support.drm || {};
+      const systems = Object.keys(drm);
+      if (systems.length === 0) {
+        pushLog("err", "DRM support: NONE");
+      } else {
+        const summary = systems
+          .filter(function (ks) { return drm[ks]; })
+          .join(", ");
+        const unsupported = systems
+          .filter(function (ks) { return !drm[ks]; })
+          .join(", ");
+        pushLog("info", "DRM supported: " + (summary || "none"));
+        if (unsupported) pushLog("info", "DRM unavailable: " + unsupported);
+      }
+    } catch (error) {
+      pushLog("err", "DRM probe failed: " + (error instanceof Error ? error.message : String(error)));
+    }
+
     connectWebSocket();
-    window.setInterval(() => {
-      sendCurrentState(false);
-    }, 1000);
+    window.setInterval(() => sendCurrentState(false), 1000);
   }
 
   void init();
