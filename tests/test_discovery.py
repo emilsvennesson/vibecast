@@ -211,6 +211,25 @@ class TestTxtRecords:
 
         assert ad.parsed_addresses == ("127.0.0.1",)
 
+    def test_app_subtype_types_are_advertised(self, bundle: CertificateBundle) -> None:
+        """Valid app IDs generate Cast subtype DNS-SD records."""
+        ad = CastAdvertisement(
+            friendly_name="Living Room",
+            device_model="Chromecast",
+            device_id="3e3f3db0-1316-4f6f-a8db-d8d9aa123456",
+            port=8009,
+            cert_digest=bundle.cert_digest_md5,
+            app_ids={"6313CF39", "cc1ad845", "invalid", "TOO-LONG-APP-ID"},
+        )
+
+        subtype_infos = ad._build_all_service_infos()[1:]
+        subtype_types = {info.type for info in subtype_infos}
+
+        assert subtype_types == {
+            "_6313CF39._sub._googlecast._tcp.local.",
+            "_CC1AD845._sub._googlecast._tcp.local.",
+        }
+
 
 class TestLifecycle:
     """Lifecycle tests for start/stop behavior."""
@@ -279,6 +298,35 @@ class TestLifecycle:
             assert mock_zeroconf.async_register_service.await_count == 1
             assert mock_zeroconf.async_unregister_service.await_count == 1
             assert mock_zeroconf.async_close.await_count == 1
+
+    async def test_start_registers_subtypes_when_app_ids_present(
+        self, bundle: CertificateBundle
+    ) -> None:
+        """Subtype registrations are added for each valid app ID."""
+        ad = CastAdvertisement(
+            friendly_name="Office",
+            device_model="Chromecast",
+            device_id=str(uuid4()),
+            port=8009,
+            cert_digest=bundle.cert_digest_md5,
+            app_ids={"6313CF39", "0F5096E8"},
+        )
+
+        with patch("vibecast._discovery.AsyncZeroconf") as mock_ctor:
+            mock_zeroconf = AsyncMock()
+            mock_zeroconf.async_register_service.return_value = asyncio.create_task(
+                asyncio.sleep(0)
+            )
+            mock_zeroconf.async_unregister_service.return_value = asyncio.create_task(
+                asyncio.sleep(0)
+            )
+            mock_ctor.return_value = mock_zeroconf
+
+            await ad.start()
+            await ad.stop()
+
+            assert mock_zeroconf.async_register_service.await_count == 3
+            assert mock_zeroconf.async_unregister_service.await_count == 3
 
     async def test_start_failure_closes_zeroconf(
         self, bundle: CertificateBundle

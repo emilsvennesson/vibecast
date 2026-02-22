@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import socket
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Protocol, cast
 from uuid import UUID
 
@@ -15,11 +16,12 @@ from zeroconf.asyncio import AsyncZeroconf
 from vibecast._log import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable
+    from collections.abc import Awaitable, Iterable
 
 _GOOGLECAST_SERVICE_TYPE: Final[str] = "_googlecast._tcp.local."
 _INSTANCE_PREFIX: Final[str] = "vibecast-"
 _MAX_LABEL_LENGTH: Final[int] = 63
+
 
 log = get_logger("discovery")
 
@@ -44,6 +46,12 @@ class _AsyncZeroconfLike(Protocol):
     async def async_unregister_service(self, info: ServiceInfo) -> Awaitable[None]: ...
 
     async def async_close(self) -> None: ...
+
+
+@dataclass(slots=True)
+class _RegisteredService:
+    zeroconf: _AsyncZeroconfLike
+    info: ServiceInfo
 
 
 class CastServiceTxt(BaseModel):
@@ -90,12 +98,37 @@ def _build_server_name(device_id: str, clean_id: str) -> str:
         return f"{safe_id or 'vibecast'}.local."
 
 
+def _normalize_app_ids(app_ids: Iterable[str]) -> tuple[str, ...]:
+    raw_app_ids = tuple(app_ids)
+    normalized: set[str] = set()
+    for raw in raw_app_ids:
+        app_id = raw.strip().upper()
+        if len(app_id) != 8:
+            log.debug("skipping app_id %r: expected 8 characters", raw)
+            continue
+        if not all(ch in "0123456789ABCDEF" for ch in app_id):
+            log.debug("skipping app_id %r: expected hexadecimal value", raw)
+            continue
+        _ = normalized.add(app_id)
+    result = tuple(sorted(normalized))
+    log.debug(
+        "normalized app ids (input=%s output=%s)",
+        raw_app_ids,
+        result,
+    )
+    return result
+
+
+def _build_subtype_type(app_id: str) -> str:
+    return f"_{app_id}._sub.{_GOOGLECAST_SERVICE_TYPE}"
+
+
 def _discover_ipv4_addresses() -> tuple[str, ...]:
     """Best-effort local IPv4 addresses to advertise in A records."""
     addresses: set[str] = set()
     infos: list[tuple[int, int, int, str, tuple[str, int]]] = []
 
-    with contextlib.suppress(OSError):
+    try:
         infos = cast(
             "list[tuple[int, int, int, str, tuple[str, int]]]",
             socket.getaddrinfo(
@@ -105,25 +138,33 @@ def _discover_ipv4_addresses() -> tuple[str, ...]:
                 type=socket.SOCK_DGRAM,
             ),
         )
+        log.debug("hostname lookup discovered %d IPv4 candidates", len(infos))
+    except OSError:
+        log.debug("hostname IPv4 discovery failed", exc_info=True)
 
     for _family, _type, _proto, _canonname, sockaddr in infos:
         raw_ip = sockaddr[0]
         if not raw_ip.startswith("127."):
             _ = addresses.add(raw_ip)
+            log.debug("discovered IPv4 via hostname lookup: %s", raw_ip)
 
-    with (
-        contextlib.suppress(OSError),
-        socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock,
-    ):
-        sock.connect(("224.0.0.251", 5353))
-        raw_ip_obj = cast("tuple[str, int]", sock.getsockname())[0]
-        if not raw_ip_obj.startswith("127."):
-            _ = addresses.add(raw_ip_obj)
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("224.0.0.251", 5353))
+            raw_ip_obj = cast("tuple[str, int]", sock.getsockname())[0]
+            if not raw_ip_obj.startswith("127."):
+                _ = addresses.add(raw_ip_obj)
+                log.debug("discovered IPv4 via multicast probe: %s", raw_ip_obj)
+    except OSError:
+        log.debug("multicast probe IPv4 discovery failed", exc_info=True)
 
     if not addresses:
         _ = addresses.add("127.0.0.1")
+        log.debug("no non-loopback IPv4 discovered, using loopback fallback")
 
-    return tuple(sorted(addresses))
+    result = tuple(sorted(addresses))
+    log.debug("final advertised IPv4 addresses: %s", result)
+    return result
 
 
 class CastAdvertisement:
@@ -131,17 +172,18 @@ class CastAdvertisement:
 
     __slots__ = (
         "_addresses",
+        "_app_ids",
         "_cert_digest",
         "_clean_id",
         "_device_id",
         "_device_model",
         "_friendly_name",
-        "_info",
         "_port",
+        "_registrations",
         "_server",
         "_service_name",
+        "_subtype_types",
         "_txt",
-        "_zeroconf",
     )
 
     def __init__(
@@ -151,6 +193,7 @@ class CastAdvertisement:
         device_id: str,
         port: int,
         cert_digest: str,
+        app_ids: Iterable[str] = (),
     ) -> None:
         """Initialize a ``CastAdvertisement`` instance.
 
@@ -172,6 +215,10 @@ class CastAdvertisement:
         self._device_id = device_id
         self._clean_id = _clean_device_id(device_id)
         self._port = port
+        self._app_ids = _normalize_app_ids(app_ids)
+        self._subtype_types = tuple(
+            _build_subtype_type(app_id) for app_id in self._app_ids
+        )
         self._cert_digest = cert_digest.upper()
         self._server = _build_server_name(device_id, self._clean_id)
         self._addresses = _discover_ipv4_addresses()
@@ -183,8 +230,17 @@ class CastAdvertisement:
             cd=self._cert_digest,
             bs=_compute_bs(self._device_id),
         )
-        self._info: ServiceInfo | None = None
-        self._zeroconf: _AsyncZeroconfLike | None = None
+        self._registrations: list[_RegisteredService] = []
+        log.debug(
+            "cast advertisement configured (service=%s server=%s port=%d addresses=%s app_ids=%s subtype_types=%s txt=%s)",
+            self._service_name,
+            self._server,
+            self._port,
+            self._addresses,
+            self._app_ids,
+            self._subtype_types,
+            self.txt_records,
+        )
 
     @property
     def service_name(self) -> str:
@@ -226,41 +282,118 @@ class CastAdvertisement:
             parsed_addresses=list(self._addresses),
         )
 
+    def _build_subtype_service_info(self, subtype_type: str) -> ServiceInfo:
+        return ServiceInfo(
+            type_=subtype_type,
+            name=self.service_name,
+            port=self._port,
+            properties=self.txt_records,
+            server=self._server,
+            parsed_addresses=list(self._addresses),
+        )
+
+    def _build_all_service_infos(self) -> list[ServiceInfo]:
+        infos = [self._build_service_info()]
+        infos.extend(
+            self._build_subtype_service_info(subtype_type)
+            for subtype_type in self._subtype_types
+        )
+        return infos
+
     async def start(self) -> None:
         """Start advertising this receiver on the local network."""
-        if self._zeroconf is not None:
+        if self._registrations:
+            log.debug("mDNS cast advertisement already started: %s", self._service_name)
             return
 
-        zeroconf = cast("_AsyncZeroconfLike", AsyncZeroconf())
-        info = self._build_service_info()
+        infos = self._build_all_service_infos()
+        registrations: list[_RegisteredService] = []
+        # python-zeroconf stores registrations in ServiceRegistry._services keyed
+        # by info.key (name.lower()), not by (name, type). Base and subtype
+        # ServiceInfo entries intentionally share the same instance name, so they
+        # collide in a single registry. We keep one AsyncZeroconf instance per
+        # registration as a pragmatic workaround until first-class subtype
+        # registration is supported upstream.
         try:
-            register_task = await zeroconf.async_register_service(info)
-            await register_task
+            for info in infos:
+                log.debug(
+                    "registering mDNS service (name=%s type=%s)",
+                    info.name,
+                    info.type,
+                )
+                zeroconf = cast("_AsyncZeroconfLike", AsyncZeroconf())
+                try:
+                    register_task = await zeroconf.async_register_service(info)
+                    await register_task
+                except Exception:
+                    log.debug(
+                        "failed to register mDNS service (name=%s type=%s)",
+                        info.name,
+                        info.type,
+                        exc_info=True,
+                    )
+                    await zeroconf.async_close()
+                    raise
+                registrations.append(_RegisteredService(zeroconf=zeroconf, info=info))
+                log.debug(
+                    "registered mDNS service (name=%s type=%s)",
+                    info.name,
+                    info.type,
+                )
         except Exception:
-            await zeroconf.async_close()
+            log.debug("rolling back %d mDNS registrations", len(registrations))
+            for registration in reversed(registrations):
+                log.debug(
+                    "unregistering mDNS service during rollback (name=%s type=%s)",
+                    registration.info.name,
+                    registration.info.type,
+                )
+                with contextlib.suppress(Exception):
+                    unregister_task = (
+                        await registration.zeroconf.async_unregister_service(
+                            registration.info
+                        )
+                    )
+                    await unregister_task
+                with contextlib.suppress(Exception):
+                    await registration.zeroconf.async_close()
             raise
 
-        self._info = info
-        self._zeroconf = zeroconf
-        log.info("registered mDNS cast service %s", self._service_name)
+        self._registrations = registrations
+        log.info(
+            "registered mDNS cast service %s (subtypes=%d)",
+            self._service_name,
+            len(self._subtype_types),
+        )
 
     async def stop(self) -> None:
         """Stop advertising and release mDNS resources."""
-        zeroconf = self._zeroconf
-        if zeroconf is None:
+        if not self._registrations:
+            log.debug("mDNS cast advertisement already stopped: %s", self._service_name)
             return
 
-        info = self._info
-        self._info = None
-        self._zeroconf = None
+        registrations = self._registrations
+        self._registrations = []
 
-        try:
-            if info is not None:
-                unregister_task = await zeroconf.async_unregister_service(info)
+        for registration in reversed(registrations):
+            log.debug(
+                "unregistering mDNS service (name=%s type=%s)",
+                registration.info.name,
+                registration.info.type,
+            )
+            try:
+                unregister_task = await registration.zeroconf.async_unregister_service(
+                    registration.info
+                )
                 await unregister_task
-        finally:
-            await zeroconf.async_close()
-            log.info("stopped mDNS cast service %s", self._service_name)
+            finally:
+                await registration.zeroconf.async_close()
+
+        log.info(
+            "stopped mDNS cast service %s (subtypes=%d)",
+            self._service_name,
+            len(self._subtype_types),
+        )
 
 
 __all__ = ["CastAdvertisement", "CastServiceTxt"]

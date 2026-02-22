@@ -49,12 +49,14 @@ class DummyAdvertisement:
         device_id: str,
         port: int,
         cert_digest: str,
+        app_ids: object = (),
     ) -> None:
         self.friendly_name = friendly_name
         self.device_model = device_model
         self.device_id = device_id
         self.port = port
         self.cert_digest = cert_digest
+        self.app_ids = app_ids
         self.started = False
         self.service_name = (
             f"vibecast-{device_id.replace('-', '')}._googlecast._tcp.local."
@@ -62,6 +64,31 @@ class DummyAdvertisement:
         self.parsed_addresses = ("127.0.0.1",)
 
     async def start(self) -> None:
+        self.started = True
+
+    async def stop(self) -> None:
+        self.started = False
+
+
+class DummyEurekaServer:
+    def __init__(
+        self,
+        bundle: CertificateBundle,
+        identity: object,
+        *,
+        host: str,
+        https_port: int,
+        http_port: int,
+    ) -> None:
+        _ = bundle
+        _ = identity
+        self.host = host
+        self.https_port = https_port
+        self.http_port = http_port
+        self.started = False
+
+    async def start(self, certificates: CertificateBundle) -> None:
+        _ = certificates
         self.started = True
 
     async def stop(self) -> None:
@@ -131,6 +158,8 @@ class DummyProvider(Provider):
 
 def _patch_runtime(monkeypatch: Any, *, crl: bytes = b"test-crl") -> None:
     monkeypatch.setattr("vibecast.receiver.CastAdvertisement", DummyAdvertisement)
+    monkeypatch.setattr("vibecast.receiver.EurekaServer", DummyEurekaServer)
+    monkeypatch.setattr("vibecast.receiver._CAST_PORT", 0)
 
     async def fake_fetch_crl(*, client: Any | None = None) -> bytes:
         _ = client
@@ -145,9 +174,7 @@ class TestReceiverConfig:
         receiver = CastReceiver(config=config, certificates=bundle, providers=[])
 
         assert config.device_model == "Chromecast"
-        assert config.host == "0.0.0.0"
-        assert config.port == 8009
-        assert config.player_host == "0.0.0.0"
+        assert config.bind_host == "0.0.0.0"
         assert config.player_port == 8010
         assert receiver.config.device_id is not None
 
@@ -185,8 +212,7 @@ class TestIntegration:
         receiver = CastReceiver(
             config=ReceiverConfig(
                 friendly_name="Living Room",
-                host="127.0.0.1",
-                port=0,
+                bind_host="127.0.0.1",
                 player_port=0,
             ),
             certificates=bundle,
@@ -250,8 +276,7 @@ class TestIntegration:
         receiver = CastReceiver(
             config=ReceiverConfig(
                 friendly_name="Living Room",
-                host="127.0.0.1",
-                port=0,
+                bind_host="127.0.0.1",
                 player_port=0,
             ),
             certificates=bundle,
@@ -281,8 +306,7 @@ class TestIntegration:
         receiver = CastReceiver(
             config=ReceiverConfig(
                 friendly_name="Living Room",
-                host="127.0.0.1",
-                port=0,
+                bind_host="127.0.0.1",
                 player_port=0,
             ),
             certificates=bundle,
@@ -385,8 +409,7 @@ class TestStartupLogging:
         receiver = CastReceiver(
             config=ReceiverConfig(
                 friendly_name="Living Room",
-                host="127.0.0.1",
-                port=0,
+                bind_host="127.0.0.1",
                 player_port=0,
             ),
             certificates=bundle,
