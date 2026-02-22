@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+from typing import Any, cast
 
 from aiohttp import ClientSession, WSMsgType
 
@@ -16,6 +16,7 @@ from castvibe.player import (
     PlaybackError,
     PlaybackMedia,
     PlaybackState,
+    PlaybackStream,
     PlayerContext,
 )
 
@@ -44,8 +45,12 @@ def _make_context(
 def _media(session_id: str = "session-1") -> PlaybackMedia:
     return PlaybackMedia(
         session_id=session_id,
-        url="https://example.com/manifest.mpd",
-        content_type="application/dash+xml",
+        streams=(
+            PlaybackStream(
+                url="https://example.com/manifest.mpd",
+                content_type="application/dash+xml",
+            ),
+        ),
         stream_type=StreamType.BUFFERED,
         start_time=0.0,
     )
@@ -124,6 +129,9 @@ class TestPlayerServer:
             observer_message = await _read_json_message(ws_observer)
             assert primary_message["type"] == "load"
             assert observer_message["type"] == "load"
+            media_payload = cast("dict[str, object]", primary_message["media"])
+            streams_payload = cast("list[dict[str, object]]", media_payload["streams"])
+            assert streams_payload[0]["url"] == "https://example.com/manifest.mpd"
 
             await ws_observer.send_json(
                 {
@@ -203,7 +211,7 @@ class TestPlayerServer:
 
         async with ClientSession() as client:
             response = await client.post(
-                proxy_url,
+                f"{proxy_url}?route=r7",
                 data=b"challenge",
                 headers={"Content-Type": "application/octet-stream"},
             )
@@ -214,6 +222,7 @@ class TestPlayerServer:
             assert body == b"challenge-ok"
             assert len(handler.requests) == 1
             assert handler.requests[0].session_id == "session-1"
+            assert handler.requests[0].route_id == "r7"
             assert handler.requests[0].body == b"challenge"
 
             missing = await client.post(

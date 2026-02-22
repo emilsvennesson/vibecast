@@ -16,7 +16,7 @@ from castvibe._proto.cast_channel_pb2 import (
     CastMessage,
     DeviceAuthMessage,
 )
-from castvibe.player import PlaybackMedia
+from castvibe.player import PlaybackMedia, PlaybackStream
 from castvibe.provider import LaunchCredentials, Provider, ProviderSession
 from castvibe.receiver import CastReceiver, ReceiverConfig
 from tests.conftest import make_cast_message
@@ -114,8 +114,12 @@ class DummyProvider(Provider):
         _ = load_request
         return PlaybackMedia(
             session_id=session.session_id,
-            url="https://example.com/video.mpd",
-            content_type="application/dash+xml",
+            streams=(
+                PlaybackStream(
+                    url="https://example.com/video.mpd",
+                    content_type="application/dash+xml",
+                ),
+            ),
             stream_type=StreamType.BUFFERED,
         )
 
@@ -368,3 +372,33 @@ class TestIntegration:
 
         await receiver.stop()
         assert provider.stop_calls == 1
+
+
+class TestStartupLogging:
+    async def test_start_logs_enabled_providers(
+        self,
+        monkeypatch: Any,
+        bundle: CertificateBundle,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _patch_runtime(monkeypatch)
+        receiver = CastReceiver(
+            config=ReceiverConfig(
+                friendly_name="Living Room",
+                host="127.0.0.1",
+                port=0,
+                player_port=0,
+            ),
+            certificates=bundle,
+            providers=[DummyProvider()],
+        )
+        caplog.set_level("INFO", logger="castvibe.receiver")
+
+        await receiver.start()
+        await receiver.stop()
+
+        assert any(
+            record.name == "castvibe.receiver"
+            and record.getMessage() == "enabled providers: Dummy (appIds=DUMMYAPP)"
+            for record in caplog.records
+        )

@@ -15,7 +15,13 @@ from castvibe._models import (
     PlayerState,
     StreamType,
 )
-from castvibe.player import LicenseRequest, PlaybackState
+from castvibe.player import (
+    DrmSystem,
+    LicenseRequest,
+    LicenseResponse,
+    LicenseRoute,
+    PlaybackState,
+)
 from castvibe.provider import LaunchCredentials, ProviderSession, ReceiverContext
 from castvibe.providers.viaplay._api import (
     DeviceAuthInfo,
@@ -143,15 +149,16 @@ class TestResolveMedia:
             )
 
         assert media.session_id == "sess-1"
-        assert media.url == "https://cdn.example.com/manifest.mpd"
+        assert len(media.streams) == 1
+        assert media.streams[0].url == "https://cdn.example.com/manifest.mpd"
         assert media.stream_type is StreamType.LIVE
         assert media.duration == 3600.0
         assert media.title == "Live Match"
         assert media.subtitle == "Episode 1"
         assert media.start_time == 12.5
-        assert media.drm is not None
-        assert media.drm.system == "widevine"
-        assert media.drm.license_url == "https://drm.example.com/license"
+        assert media.streams[0].drm is not None
+        assert media.streams[0].drm.system is DrmSystem.WIDEVINE
+        assert media.streams[0].drm.license_url == "https://drm.example.com/license"
 
     async def test_requires_authentication(self) -> None:
         provider = ViaplayProvider()
@@ -212,39 +219,39 @@ class TestPlaybackAndLicense:
         assert second_payload["position"] == 260
         assert second_payload["duration"] == 2535
 
-    async def test_resolve_license_uses_api(self) -> None:
+    async def test_resolve_license_uses_forwarder(self) -> None:
         provider = ViaplayProvider()
         session, _, _ = _make_session()
         await provider.on_launch(session, LaunchCredentials())
 
-        state = provider._sessions[session.session_id]  # noqa: SLF001
-        state.current_license_url = "https://drm.example.com/license"
-
-        with patch.object(
-            state.api,
-            "fetch_license",
-            new_callable=AsyncMock,
-            return_value=b"license-bytes",
-        ):
-            response = await provider.resolve_license(
-                session,
-                LicenseRequest(session_id=session.session_id, body=b"challenge"),
+        forward = AsyncMock(
+            return_value=LicenseResponse(
+                body=b"license-bytes",
+                content_type="application/octet-stream",
+                status=200,
             )
+        )
+        route = LicenseRoute(
+            route_id="r0",
+            system=DrmSystem.WIDEVINE,
+            upstream_url="https://drm.example.com/license",
+        )
+
+        response = await provider.resolve_license(
+            session,
+            LicenseRequest(
+                session_id=session.session_id,
+                route_id="r0",
+                body=b"challenge",
+            ),
+            route,
+            forward,
+        )
 
         assert response.status == 200
         assert response.content_type == "application/octet-stream"
         assert response.body == b"license-bytes"
-
-    async def test_resolve_license_falls_back_to_placeholder(self) -> None:
-        provider = ViaplayProvider()
-        session, _, _ = _make_session()
-        await provider.on_launch(session, LaunchCredentials())
-
-        response = await provider.resolve_license(
-            session,
-            LicenseRequest(session_id=session.session_id, body=b"challenge"),
-        )
-        assert response.body == b"placeholder-license-response"
+        forward.assert_awaited_once()
 
 
 class TestAuthFlowEdges:

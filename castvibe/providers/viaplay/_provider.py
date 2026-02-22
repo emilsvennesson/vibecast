@@ -11,10 +11,13 @@ from typing import TYPE_CHECKING, Any, override
 from castvibe._models import LoadRequest, PlayerState, StreamType
 from castvibe.player import (
     DrmInfo,
+    DrmSystem,
     LicenseRequest,
     LicenseResponse,
+    LicenseRoute,
     PlaybackMedia,
     PlaybackState,
+    PlaybackStream,
 )
 from castvibe.provider import LaunchCredentials, Provider, ProviderSession
 from castvibe.providers.viaplay._api import (
@@ -68,7 +71,6 @@ class _ViaplayState:
     subtitle_active_language_code: str | None = None
     subtitle_enabled: bool | dict[str, Any] | None = True
     audio_active_track: str | None = None
-    current_license_url: str | None = None
     playback_state: PlaybackState = field(
         default_factory=lambda: PlaybackState(player_state=PlayerState.IDLE)
     )
@@ -229,14 +231,38 @@ class ViaplayProvider(Provider):
         images = tuple(metadata.images) if metadata else ()
 
         drm: DrmInfo | None = None
-        state.current_license_url = stream_info.drm_license_url
         if stream_info.drm_license_url:
-            drm = DrmInfo(system="widevine", license_url=stream_info.drm_license_url)
+            drm = DrmInfo(
+                system=DrmSystem.WIDEVINE,
+                license_url=stream_info.drm_license_url,
+            )
+
+        streams: list[PlaybackStream] = []
+        seen_urls: set[str] = set()
+
+        def _add_stream(url: str) -> None:
+            if not url or url in seen_urls:
+                return
+            seen_urls.add(url)
+            streams.append(
+                PlaybackStream(
+                    url=url,
+                    content_type=stream_info.content_type,
+                    drm=drm,
+                )
+            )
+
+        _add_stream(stream_info.url)
+        for fallback_url in stream_info.fallback_urls:
+            _add_stream(fallback_url)
+
+        if not streams:
+            msg = "NO_STREAM_URL"
+            raise RuntimeError(msg)
 
         return PlaybackMedia(
             session_id=session.session_id,
-            url=stream_info.url,
-            content_type=stream_info.content_type,
+            streams=tuple(streams),
             stream_type=resolved_stream_type,
             title=title,
             subtitle=subtitle,
@@ -244,7 +270,6 @@ class ViaplayProvider(Provider):
             duration=resolved_duration,
             autoplay=load_request.autoplay,
             start_time=load_request.current_time,
-            drm=drm,
             custom_data=custom_data,
         )
 
@@ -269,13 +294,11 @@ class ViaplayProvider(Provider):
         self,
         session: ProviderSession,
         request: LicenseRequest,
+        route: LicenseRoute,
+        forward: Callable[[LicenseRequest, LicenseRoute], Awaitable[LicenseResponse]],
     ) -> LicenseResponse:
-        state = self._sessions.get(session.session_id)
-        if state is None or not state.current_license_url:
-            return LicenseResponse(body=b"placeholder-license-response")
-
-        body = await state.api.fetch_license(state.current_license_url, request.body)
-        return LicenseResponse(body=body)
+        _ = session
+        return await forward(request, route)
 
     @override
     async def on_stop(self, session: ProviderSession) -> None:

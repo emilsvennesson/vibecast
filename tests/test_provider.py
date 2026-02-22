@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, override
 
 from castvibe._models import LoadRequest, StreamType
-from castvibe.player import PlaybackMedia
+from castvibe.player import PlaybackMedia, PlaybackStream
 from castvibe.provider import (
     LaunchCredentials,
     Provider,
@@ -62,8 +62,12 @@ class DummyProvider(Provider):
         _ = load_request
         return PlaybackMedia(
             session_id="session",
-            url="https://example.com/video.mpd",
-            content_type="application/dash+xml",
+            streams=(
+                PlaybackStream(
+                    url="https://example.com/video.mpd",
+                    content_type="application/dash+xml",
+                ),
+            ),
             stream_type=StreamType.BUFFERED,
         )
 

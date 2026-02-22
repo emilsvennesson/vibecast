@@ -118,6 +118,9 @@ class CastReceiver:
         if self._started:
             return
 
+        enabled_providers = self.providers.all_providers()
+        log.info("enabled providers: %s", _format_provider_summary(enabled_providers))
+
         if self._http.client.is_closed:
             self._http = ReceiverHTTPClient(data_dir=self.config.data_dir)
 
@@ -223,6 +226,17 @@ class CastReceiver:
         # Sessions are only torn down by an explicit STOP request from a
         # sender or when the receiver shuts down.
         _ = self.device.remove_all_subscriptions(connection)
+
+
+def _format_provider_summary(providers: list[Provider]) -> str:
+    if not providers:
+        return "none"
+
+    entries: list[str] = []
+    for provider in sorted(providers, key=lambda item: item.display_name().lower()):
+        app_ids = ",".join(sorted(provider.app_ids()))
+        entries.append(f"{provider.display_name()} (appIds={app_ids})")
+    return "; ".join(entries)
 
 
 __all__ = ["CastReceiver", "ReceiverConfig"]

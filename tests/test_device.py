@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, cast, override
 from castvibe import _namespace as ns
 from castvibe._device import Device, DeviceIdentity, build_receiver_status
 from castvibe._models import LoadRequest, StreamType
-from castvibe.player import DefaultPlayer, PlaybackMedia
+from castvibe.player import DefaultPlayer, PlaybackMedia, PlaybackStream
 from castvibe.provider import LaunchCredentials, Provider
 from tests.conftest import make_cast_message
 
@@ -110,8 +110,12 @@ class FakeProvider(Provider):
         _ = load_request
         return PlaybackMedia(
             session_id="sess",
-            url="https://example.com/video.mpd",
-            content_type="application/dash+xml",
+            streams=(
+                PlaybackStream(
+                    url="https://example.com/video.mpd",
+                    content_type="application/dash+xml",
+                ),
+            ),
             stream_type=StreamType.BUFFERED,
         )
 

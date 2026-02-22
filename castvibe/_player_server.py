@@ -22,6 +22,8 @@ from castvibe.player import (
     PlaybackMedia,
     PlaybackMediaPayload,
     PlaybackState,
+    PlaybackStream,
+    PlaybackStreamPayload,
     PlayCommand,
     Player,
     PlayerContext,
@@ -387,12 +389,15 @@ class PlayerServer(Player):
         if handler is None:
             return web.Response(status=404)
 
+        route_id = request.query.get("route")
         body = await request.read()
         content_type = request.content_type or "application/octet-stream"
         license_request = LicenseRequest(
             session_id=session_id,
             body=body,
             content_type=content_type,
+            route_id=route_id,
+            headers=_filter_request_headers(request),
         )
 
         try:
@@ -403,13 +408,27 @@ class PlayerServer(Player):
 
         return web.Response(
             body=response.body,
-            content_type=response.content_type,
             status=response.status,
+            headers={"Content-Type": response.content_type},
         )
 
 
 def _media_to_payload(media: PlaybackMedia) -> PlaybackMediaPayload:
-    drm = media.drm
+    return PlaybackMediaPayload(
+        streams=[_stream_to_payload(stream) for stream in media.streams],
+        stream_type=media.stream_type,
+        title=media.title,
+        subtitle=media.subtitle,
+        images=list(media.images),
+        duration=media.duration,
+        autoplay=media.autoplay,
+        start_time=media.start_time,
+        custom_data=dict(media.custom_data),
+    )
+
+
+def _stream_to_payload(stream: PlaybackStream) -> PlaybackStreamPayload:
+    drm = stream.drm
     payload_drm = (
         None
         if drm is None
@@ -419,19 +438,21 @@ def _media_to_payload(media: PlaybackMedia) -> PlaybackMediaPayload:
             headers=dict(drm.headers),
         )
     )
-    return PlaybackMediaPayload(
-        url=media.url,
-        content_type=media.content_type,
-        stream_type=media.stream_type,
-        title=media.title,
-        subtitle=media.subtitle,
-        images=list(media.images),
-        duration=media.duration,
-        autoplay=media.autoplay,
-        start_time=media.start_time,
+    return PlaybackStreamPayload(
+        url=stream.url,
+        content_type=stream.content_type,
         drm=payload_drm,
-        custom_data=dict(media.custom_data),
     )
+
+
+def _filter_request_headers(request: web.Request) -> dict[str, str]:
+    blocked = {"connection", "content-length", "host", "transfer-encoding"}
+    headers: dict[str, str] = {}
+    for key, value in request.headers.items():
+        if key.lower() in blocked:
+            continue
+        headers[key] = value
+    return headers
 
 
 def _resolve_serving_port(runner: web.AppRunner) -> int | None:

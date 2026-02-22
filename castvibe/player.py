@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import TYPE_CHECKING, Annotated, Any, Literal, override
 
 from pydantic import Discriminator, TypeAdapter
@@ -18,9 +19,25 @@ if TYPE_CHECKING:
 class DrmInfo:
     """DRM configuration for protected media."""
 
-    system: str
+    system: DrmSystem
     license_url: str
     headers: dict[str, str] = field(default_factory=dict)
+
+
+class DrmSystem(StrEnum):
+    """Supported DRM key-system identifiers."""
+
+    WIDEVINE = "com.widevine.alpha"
+    CLEARKEY = "org.w3.clearkey"
+
+
+@dataclass(slots=True, frozen=True)
+class PlaybackStream:
+    """Single playable stream candidate with optional DRM configuration."""
+
+    url: str
+    content_type: str
+    drm: DrmInfo | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -28,8 +45,7 @@ class PlaybackMedia:
     """Canonical media description passed from coordinator to player."""
 
     session_id: str
-    url: str
-    content_type: str
+    streams: tuple[PlaybackStream, ...]
     stream_type: StreamType
     title: str | None = None
     subtitle: str | None = None
@@ -37,7 +53,6 @@ class PlaybackMedia:
     duration: float | None = None
     autoplay: bool = True
     start_time: float = 0.0
-    drm: DrmInfo | None = None
     custom_data: dict[str, Any] = field(default_factory=dict)
 
 
@@ -66,6 +81,18 @@ class LicenseRequest:
     session_id: str
     body: bytes
     content_type: str = "application/octet-stream"
+    route_id: str | None = None
+    headers: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(slots=True, frozen=True)
+class LicenseRoute:
+    """Resolved coordinator route metadata for one DRM license target."""
+
+    route_id: str
+    system: DrmSystem
+    upstream_url: str
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True, frozen=True)
@@ -80,16 +107,23 @@ class LicenseResponse:
 class DrmPayload(CastModel):
     """WebSocket wire model for DRM config."""
 
-    system: str
+    system: DrmSystem
     license_url: str
     headers: dict[str, str] = {}
+
+
+class PlaybackStreamPayload(CastModel):
+    """WebSocket wire model for one stream candidate."""
+
+    url: str
+    content_type: str
+    drm: DrmPayload | None = None
 
 
 class PlaybackMediaPayload(CastModel):
     """WebSocket wire model for media load payload."""
 
-    url: str
-    content_type: str
+    streams: list[PlaybackStreamPayload] = []
     stream_type: StreamType
     title: str | None = None
     subtitle: str | None = None
@@ -97,7 +131,6 @@ class PlaybackMediaPayload(CastModel):
     duration: float | None = None
     autoplay: bool = True
     start_time: float = 0.0
-    drm: DrmPayload | None = None
     custom_data: dict[str, Any] = {}
 
 
@@ -270,14 +303,18 @@ __all__ = [
     "DefaultPlayer",
     "DrmInfo",
     "DrmPayload",
+    "DrmSystem",
     "ErrorReport",
     "LicenseRequest",
+    "LicenseRoute",
     "LicenseResponse",
     "LoadCommand",
     "PauseCommand",
     "PlaybackError",
     "PlaybackMedia",
     "PlaybackMediaPayload",
+    "PlaybackStream",
+    "PlaybackStreamPayload",
     "PlaybackState",
     "PlayCommand",
     "Player",

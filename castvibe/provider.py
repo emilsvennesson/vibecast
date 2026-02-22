@@ -20,9 +20,15 @@ if TYPE_CHECKING:
     from castvibe.player import (
         LicenseRequest,
         LicenseResponse,
+        LicenseRoute,
         PlaybackMedia,
         PlaybackState,
     )
+
+    type LicenseForwarder = Callable[
+        [LicenseRequest, LicenseRoute],
+        Awaitable[LicenseResponse],
+    ]
 
 log = get_logger("provider")
 
@@ -169,12 +175,13 @@ class Provider(ABC):
         self,
         session: ProviderSession,
         request: LicenseRequest,
+        route: LicenseRoute,
+        forward: LicenseForwarder,
     ) -> LicenseResponse:
         """Resolve a DRM license request proxied by the player server."""
         _ = session
         _ = request
-        msg = "provider does not support DRM license proxy"
-        raise NotImplementedError(msg)
+        return await forward(request, route)
 
 
 def discover_providers() -> list[Provider]:

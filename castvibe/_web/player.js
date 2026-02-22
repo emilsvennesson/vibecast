@@ -5,6 +5,7 @@
     activeSessionId: null,
     player: null,
     lastStateKey: "",
+    autoplayMuted: false,
   };
 
   const connectionEl = document.getElementById("connection");
@@ -35,14 +36,24 @@
   }
 
   function toKeySystem(system) {
-    const normalized = (system || "").toLowerCase();
-    if (normalized === "widevine") {
+    const normalized = (system || "").trim().toLowerCase();
+    if (!normalized) {
+      return null;
+    }
+    if (normalized === "widevine" || normalized === "com.widevine.alpha") {
       return "com.widevine.alpha";
     }
-    if (normalized === "playready") {
+    if (
+      normalized === "clearkey" ||
+      normalized === "org.w3.clearkey" ||
+      normalized === "com.w3.clearkey"
+    ) {
+      return "org.w3.clearkey";
+    }
+    if (normalized === "playready" || normalized === "com.microsoft.playready") {
       return "com.microsoft.playready";
     }
-    return system || "com.widevine.alpha";
+    return system;
   }
 
   function canSend() {
@@ -121,6 +132,7 @@
 
   function resetSessionUi() {
     videoEl.controls = false;
+    app.autoplayMuted = false;
     sessionEl.textContent = "-";
     titleEl.textContent = "Waiting for LOAD";
     subtitleEl.textContent =
@@ -128,11 +140,38 @@
     stateEl.textContent = "IDLE";
   }
 
-  async function safePlay() {
+  function isAutoplayBlocked(error) {
+    if (error && typeof error === "object" && "name" in error) {
+      if (String(error.name) === "NotAllowedError") {
+        return true;
+      }
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    const normalized = message.toLowerCase();
+    return normalized.includes("not allowed") || normalized.includes("permission");
+  }
+
+  async function safePlay(options = {}) {
+    const allowMutedFallback = Boolean(options.allowMutedFallback);
+
     try {
       await videoEl.play();
       return true;
     } catch (error) {
+      if (allowMutedFallback && isAutoplayBlocked(error) && !videoEl.muted) {
+        const originalMuted = videoEl.muted;
+        videoEl.muted = true;
+        try {
+          await videoEl.play();
+          app.autoplayMuted = true;
+          pushLog("Autoplay blocked with sound; resumed muted");
+          return true;
+        } catch {
+          videoEl.muted = originalMuted;
+        }
+      }
+
       const message = error instanceof Error ? error.message : String(error);
       pushLog("Playback start blocked: " + message);
       sendError("PLAYBACK_PLAY_FAILED", message);
@@ -141,18 +180,34 @@
   }
 
   function configureDrm(player, drm) {
-    player.configure({ drm: { servers: {}, advanced: {} } });
+    player.configure({
+      drm: { servers: {}, advanced: {}, clearKeys: {} },
+      manifest: { dash: { keySystemsByURI: {} } },
+    });
     if (!drm || !drm.licenseUrl) {
-      return;
+      return true;
     }
 
     const keySystem = toKeySystem(drm.system);
+    if (!keySystem) {
+      return false;
+    }
+
     const headers = drm.headers && typeof drm.headers === "object" ? drm.headers : {};
     const servers = {};
     servers[keySystem] = drm.licenseUrl;
     const advanced = {};
     advanced[keySystem] = { headers };
-    player.configure({ drm: { servers, advanced } });
+    const keySystemsByURI = {};
+    if (keySystem === "org.w3.clearkey") {
+      keySystemsByURI["urn:uuid:e2719d58-a985-b3c9-781a-b030af78d30e"] = "org.w3.clearkey";
+    }
+
+    player.configure({
+      drm: { servers, advanced, clearKeys: {} },
+      manifest: { dash: { keySystemsByURI } },
+    });
+    return true;
   }
 
   async function stopPlayback(sessionId, idleReason) {
@@ -166,6 +221,7 @@
 
     videoEl.pause();
     videoEl.controls = false;
+    app.autoplayMuted = false;
     videoEl.removeAttribute("src");
     videoEl.load();
     app.lastStateKey = "";
@@ -200,8 +256,17 @@
 
   async function handleLoad(command) {
     const media = command.media;
-    if (!media || typeof media.url !== "string" || media.url.length === 0) {
-      sendError("PLAYBACK_INVALID_LOAD", "Missing media URL in load command.");
+    const streams = media && Array.isArray(media.streams) ? media.streams : [];
+    if (streams.length === 0) {
+      sendError("PLAYBACK_INVALID_LOAD", "Missing streams in load command.");
+      return;
+    }
+
+    const firstStream = streams[0];
+    const firstUrl =
+      firstStream && typeof firstStream.url === "string" ? firstStream.url : "";
+    if (!firstUrl) {
+      sendError("PLAYBACK_INVALID_LOAD", "First stream has no URL.");
       return;
     }
 
@@ -212,18 +277,54 @@
 
     app.activeSessionId = command.sessionId;
     app.lastStateKey = "";
+    app.autoplayMuted = false;
     videoEl.controls = true;
+    videoEl.muted = false;
     sessionEl.textContent = command.sessionId;
-    titleEl.textContent = media.title || media.url;
-    subtitleEl.textContent = media.subtitle || media.contentType || media.url;
+    titleEl.textContent = media.title || firstUrl;
+    subtitleEl.textContent = media.subtitle || firstStream.contentType || firstUrl;
 
     try {
       const player = await ensurePlayer();
-      configureDrm(player, media.drm || null);
-      pushLog("Loading media for session " + command.sessionId);
       sendStateReport(command.sessionId, "BUFFERING", null, true);
       const startTime = Number.isFinite(media.startTime) ? media.startTime : 0;
-      await player.load(media.url, startTime);
+
+      let loaded = false;
+      let lastErrorMessage = "No stream candidates could be loaded.";
+      pushLog("Loading media for session " + command.sessionId);
+
+      for (let i = 0; i < streams.length; i += 1) {
+        const stream = streams[i];
+        const streamUrl = stream && typeof stream.url === "string" ? stream.url : "";
+        if (!streamUrl) {
+          continue;
+        }
+
+        const streamType =
+          stream && typeof stream.contentType === "string" ? stream.contentType : "";
+        const drm = stream && typeof stream === "object" ? stream.drm || null : null;
+        if (!configureDrm(player, drm)) {
+          lastErrorMessage = "Unsupported DRM key system for stream " + streamUrl;
+          pushLog(lastErrorMessage);
+          continue;
+        }
+
+        try {
+          pushLog("Trying stream " + String(i + 1) + "/" + String(streams.length));
+          await player.load(streamUrl, startTime, streamType || undefined);
+          loaded = true;
+          break;
+        } catch (error) {
+          lastErrorMessage = error instanceof Error ? error.message : String(error);
+          pushLog(
+            "Stream " + String(i + 1) + " failed: " + lastErrorMessage
+          );
+        }
+      }
+
+      if (!loaded) {
+        throw new Error(lastErrorMessage);
+      }
 
       if (media.autoplay === false) {
         videoEl.pause();
@@ -231,7 +332,7 @@
         return;
       }
 
-      const started = await safePlay();
+      const started = await safePlay({ allowMutedFallback: true });
       const state = started ? "PLAYING" : "PAUSED";
       sendStateReport(command.sessionId, state, null, true);
     } catch (error) {
@@ -254,7 +355,7 @@
         if (command.sessionId !== app.activeSessionId) {
           return;
         }
-        if (await safePlay()) {
+        if (await safePlay({ allowMutedFallback: true })) {
           sendStateReport(command.sessionId, "PLAYING", null, true);
         }
         break;
@@ -292,6 +393,9 @@
           videoEl.volume = Math.max(0, Math.min(1, command.level));
         }
         videoEl.muted = Boolean(command.muted);
+        if (!videoEl.muted) {
+          app.autoplayMuted = false;
+        }
         sendCurrentState(true);
         break;
       default:
