@@ -209,3 +209,6 @@ __marimo__/
 # Cast protocol capture logs
 capture_*.jsonl
 manifest.json
+
+# Local credential extraction utilities (temporary)
+scripts/
