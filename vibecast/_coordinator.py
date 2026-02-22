@@ -8,9 +8,12 @@ from typing import TYPE_CHECKING, Any
 import vibecast._namespace as ns
 from vibecast._log import get_logger
 from vibecast._models import (
+    ExtendedStatus,
     IdleReason,
     LoadFailedResponse,
     LoadRequest,
+    MediaCategory,
+    MediaCommand,
     MediaGetStatusRequest,
     MediaInfo,
     MediaMetadata,
@@ -24,7 +27,9 @@ from vibecast._models import (
     PlayRequest,
     QueueGetItemIdsRequest,
     QueueItemIdsResponse,
+    RepeatMode,
     SeekRequest,
+    StreamType,
     Volume,
 )
 from vibecast.player import (
@@ -48,27 +53,19 @@ if TYPE_CHECKING:
 
 log = get_logger("coordinator")
 
-# Cast SDK ``Command`` enum bitmask for ``MediaStatus.supportedMediaCommands``.
-# LOAD, PLAY, and STOP are always implicitly supported.
-#
-#   PAUSE            1
-#   SEEK             2
-#   STREAM_VOLUME    4
-#   STREAM_MUTE      8
-#   SKIP_FORWARD    16
-#   SKIP_BACKWARD   32
-#   QUEUE_NEXT      64
-#   QUEUE_PREV     128
-#   QUEUE_SHUFFLE  256
-#   SKIP_AD        512
-#   EDIT_TRACKS   4096
-#   PLAYBACK_RATE 8192
-#   LIKE         16384
-#   DISLIKE      32768
-#   FOLLOW       65536
-#   UNFOLLOW    131072
-#   STREAM_TRANSFER 262144
-_SUPPORTED_MEDIA_COMMANDS = 1 | 2 | 4 | 8  # PAUSE | SEEK | STREAM_VOLUME | STREAM_MUTE
+# Supported commands when IDLE (no PAUSE — nothing to pause).
+_IDLE_COMMANDS = MediaCommand.SEEK | MediaCommand.STREAM_VOLUME
+
+# Supported commands during active playback.
+_ACTIVE_COMMANDS = (
+    MediaCommand.PAUSE
+    | MediaCommand.SEEK
+    | MediaCommand.STREAM_VOLUME
+    | MediaCommand.STREAM_MUTE
+)
+
+_LOADING_PLAYER_STATE = "LOADING"
+
 _HOP_BY_HOP_REQUEST_HEADERS = {
     "connection",
     "content-length",
@@ -196,7 +193,7 @@ class PlaybackCoordinator:
                 await self._notify_provider()
             case MediaStopRequest():
                 self._set_idle_state(idle_reason=IdleReason.CANCELLED)
-                await self._broadcast_empty_media_status(message.request_id)
+                await self._broadcast_media_status(message.request_id)
                 try:
                     await self._player.on_stop(self._player_context)
                 except Exception:
@@ -346,6 +343,8 @@ class PlaybackCoordinator:
         self._clear_media()
         self._unregister_license_handler()
 
+    # -- load ----------------------------------------------------------------
+
     async def _handle_load(
         self,
         connection: Connection,
@@ -354,6 +353,16 @@ class PlaybackCoordinator:
     ) -> None:
         self._media_session_id += 1
 
+        # Phase 1: broadcast IDLE + LOADING with the original LOAD request
+        # media info so senders get immediate feedback.
+        loading_media = _build_loading_media_info(request)
+        self._current_media = loading_media
+        self._player_state = PlayerState.IDLE
+        self._idle_reason = None
+        self._current_time = 0.0
+        await self._broadcast_loading_status(request.request_id, loading_media)
+
+        # Phase 2: resolve media through the provider.
         try:
             media = await self._provider.resolve_media(self._provider_session, request)
         except Exception:
@@ -371,6 +380,7 @@ class PlaybackCoordinator:
                 ns.MEDIA,
                 failed.model_dump(exclude_none=True),
             )
+            self._current_media = None
             return
 
         if media.session_id != self.session_id:
@@ -388,16 +398,20 @@ class PlaybackCoordinator:
                 ns.MEDIA,
                 failed.model_dump(exclude_none=True),
             )
+            self._current_media = None
             return
 
         media = self._with_license_proxy(media)
 
+        # Phase 3: broadcast IDLE + LOADING with fully resolved media info.
         self._playback_media = media
         self._current_media = _build_media_info(media)
         self._current_time = media.start_time
+        await self._broadcast_loading_status(request.request_id, self._current_media)
+
+        # Phase 4: hand off to player and transition to BUFFERING.
         self._player_state = PlayerState.BUFFERING
         self._idle_reason = None
-
         await self._broadcast_media_status(request.request_id)
 
         try:
@@ -420,11 +434,38 @@ class PlaybackCoordinator:
                 ns.MEDIA,
                 failed.model_dump(exclude_none=True),
             )
-            await self._broadcast_empty_media_status(request.request_id)
+            await self._broadcast_media_status(request.request_id)
             await self._notify_provider()
             return
 
         await self._notify_provider()
+
+    async def _broadcast_loading_status(
+        self,
+        request_id: int,
+        media: MediaInfo,
+    ) -> None:
+        """Broadcast an IDLE + LOADING extended status during media resolution."""
+        status = MediaStatus(
+            media_session_id=self._media_session_id,
+            playback_rate=1.0,
+            player_state=PlayerState.IDLE,
+            current_time=0.0,
+            supported_media_commands=_IDLE_COMMANDS,
+            volume=self._volume.model_copy(deep=True),
+            media=media,
+            current_item_id=1,
+            repeat_mode=RepeatMode.REPEAT_OFF,
+            extended_status=ExtendedStatus(
+                player_state=_LOADING_PLAYER_STATE,
+                media=media,
+                media_session_id=self._media_session_id,
+            ),
+        )
+        response = MediaStatusResponse(request_id=request_id, status=[status])
+        await self._broadcast_fn(ns.MEDIA, response.model_dump(exclude_none=True))
+
+    # -- status helpers ------------------------------------------------------
 
     async def _send_media_status_to_sender(
         self,
@@ -444,10 +485,6 @@ class PlaybackCoordinator:
         response = self._build_media_status_response(request_id)
         await self._broadcast_fn(ns.MEDIA, response.model_dump(exclude_none=True))
 
-    async def _broadcast_empty_media_status(self, request_id: int) -> None:
-        response = MediaStatusResponse(request_id=request_id, status=[])
-        await self._broadcast_fn(ns.MEDIA, response.model_dump(exclude_none=True))
-
     def _build_media_status_response(self, request_id: int) -> MediaStatusResponse:
         status = self._build_media_status()
         return MediaStatusResponse(
@@ -456,18 +493,33 @@ class PlaybackCoordinator:
         )
 
     def _build_media_status(self) -> MediaStatus | None:
-        if self._current_media is None:
+        if self._current_media is None and self._idle_reason is None:
             return None
+
+        is_idle = self._player_state is PlayerState.IDLE
+        is_active = self._player_state in {
+            PlayerState.PLAYING,
+            PlayerState.PAUSED,
+            PlayerState.BUFFERING,
+        }
+
+        commands = _ACTIVE_COMMANDS if is_active else _IDLE_COMMANDS
+        playback_rate = 1.0 if self._player_state is PlayerState.PLAYING else 0.0
 
         return MediaStatus(
             media_session_id=self._media_session_id,
-            media=self._current_media,
+            media=self._current_media if not is_idle else None,
             player_state=self._player_state,
             current_time=self._current_time,
-            supported_media_commands=_SUPPORTED_MEDIA_COMMANDS,
+            supported_media_commands=commands,
             volume=self._volume.model_copy(deep=True),
             idle_reason=self._idle_reason,
+            playback_rate=playback_rate,
+            current_item_id=1,
+            repeat_mode=RepeatMode.REPEAT_OFF if is_active else None,
         )
+
+    # -- provider notification -----------------------------------------------
 
     async def _notify_provider(self) -> None:
         try:
@@ -489,6 +541,8 @@ class PlaybackCoordinator:
                 exc_info=True,
             )
 
+    # -- state management ----------------------------------------------------
+
     def _set_idle_state(self, *, idle_reason: IdleReason | None) -> None:
         self._player_state = PlayerState.IDLE
         self._current_time = 0.0
@@ -497,6 +551,8 @@ class PlaybackCoordinator:
     def _clear_media(self) -> None:
         self._current_media = None
         self._playback_media = None
+
+    # -- license proxy -------------------------------------------------------
 
     def _with_license_proxy(self, media: PlaybackMedia) -> PlaybackMedia:
         self._unregister_license_handler()
@@ -567,7 +623,29 @@ class PlaybackCoordinator:
         )
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_loading_media_info(request: LoadRequest) -> MediaInfo:
+    """Build a minimal ``MediaInfo`` from the original LOAD request.
+
+    Used for the initial LOADING extended-status broadcast before the
+    provider has resolved the actual stream.
+    """
+    return MediaInfo(
+        content_id=request.media.content_id,
+        content_type=request.media.content_type or "video/*",
+        stream_type=StreamType.NONE,
+        metadata=request.media.metadata,
+        duration=0.0,
+        media_category=MediaCategory.VIDEO,
+    )
+
+
 def _build_media_info(media: PlaybackMedia) -> MediaInfo:
+    """Build a fully resolved ``MediaInfo`` from provider-resolved media."""
     if not media.streams:
         msg = "playback media contains no streams"
         raise RuntimeError(msg)
@@ -581,14 +659,20 @@ def _build_media_info(media: PlaybackMedia) -> MediaInfo:
             images=list(media.images),
         )
 
+    content_id = media.content_id or primary_stream.url
+    is_live = media.stream_type is StreamType.LIVE
     custom_data = media.custom_data or None
+
     return MediaInfo(
-        content_id=primary_stream.url,
+        content_id=content_id,
+        content_url=primary_stream.url,
         content_type=primary_stream.content_type,
         stream_type=media.stream_type,
         metadata=metadata,
         duration=media.duration,
         custom_data=custom_data,
+        media_category=MediaCategory.VIDEO,
+        is_live_media=is_live if is_live else None,
     )
 
 

@@ -9,14 +9,22 @@ from vibecast._models._base import CastModel
 from vibecast._models._common import (
     ApplicationStatus,
     CastNamespace,
+    ExtendedStatus,
+    HdrType,
     IdleReason,
+    LiveSeekableRange,
+    MediaCategory,
+    MediaCommand,
     MediaImage,
     MediaInfo,
     MediaMetadata,
     MediaStatus,
+    MetadataType,
     PlayerState,
     ReceiverStatus,
+    RepeatMode,
     StreamType,
+    VideoInfo,
     Volume,
 )
 from vibecast._models._connection import (
@@ -87,17 +95,25 @@ __all__ = [
     # Base
     "CastModel",
     # Enums
+    "HdrType",
     "IdleReason",
+    "MediaCategory",
+    "MediaCommand",
+    "MetadataType",
     "PlayerState",
+    "RepeatMode",
     "StreamType",
     # Common sub-models
     "ApplicationStatus",
     "CastNamespace",
+    "ExtendedStatus",
+    "LiveSeekableRange",
     "MediaImage",
     "MediaInfo",
     "MediaMetadata",
     "MediaStatus",
     "ReceiverStatus",
+    "VideoInfo",
     "Volume",
     # Heartbeat
     "HeartbeatMessage",

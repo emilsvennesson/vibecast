@@ -2,6 +2,7 @@
 
 from vibecast._models import (
     LoadRequest,
+    MediaCommand,
     MediaGetStatusRequest,
     MediaInfo,
     MediaMetadata,
@@ -98,7 +99,7 @@ class TestMediaStatusResponse:
                     ),
                     player_state=PlayerState.PLAYING,
                     current_time=0,
-                    supported_media_commands=15,
+                    supported_media_commands=MediaCommand(15),
                 ),
             ],
         )

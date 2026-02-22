@@ -162,6 +162,10 @@ class ViaplayAPI:
             "CAST-DEVICE-CAPABILITIES": _CAST_DEVICE_CAPABILITIES,
         }
 
+    def request_headers(self) -> dict[str, str]:
+        """Return default Viaplay headers mimicking a real Chromecast."""
+        return self._default_headers()
+
     # -- HTTP helpers --------------------------------------------------------
 
     async def _get(
@@ -347,7 +351,12 @@ class ViaplayAPI:
         resolved_url = self._expand(play_url)
         body, status = await self._get(resolved_url, expand=False)
         if status != 200:
-            log.debug("stream fetch returned %d for %s", status, resolved_url)
+            log.warning(
+                "stream fetch returned %d for %s: %s",
+                status,
+                resolved_url,
+                body,
+            )
             msg = f"stream fetch failed with status {status}"
             raise RuntimeError(msg)
 
@@ -396,12 +405,6 @@ class ViaplayAPI:
 
         msg = "no stream URL found in API response"
         raise RuntimeError(msg)
-
-    async def fetch_license(self, license_url: str, challenge: bytes) -> bytes:
-        """Forward a DRM license challenge (placeholder implementation)."""
-        _ = license_url
-        _ = challenge
-        return b"placeholder-license-response"
 
     @staticmethod
     def _extract_drm_url(resp: ViaplayStreamResponse) -> str | None:

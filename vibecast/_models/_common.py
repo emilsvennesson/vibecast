@@ -1,6 +1,8 @@
 """Shared types, enums, and reusable sub-models for Cast protocol messages."""
 
-from enum import StrEnum
+from __future__ import annotations
+
+from enum import IntEnum, IntFlag, StrEnum
 from typing import Any
 
 from vibecast._models._base import CastModel
@@ -34,6 +36,69 @@ class IdleReason(StrEnum):
     INTERRUPTED = "INTERRUPTED"
     FINISHED = "FINISHED"
     ERROR = "ERROR"
+
+
+class RepeatMode(StrEnum):
+    """Queue repeat mode in MEDIA_STATUS."""
+
+    REPEAT_OFF = "REPEAT_OFF"
+    REPEAT_ALL = "REPEAT_ALL"
+    REPEAT_SINGLE = "REPEAT_SINGLE"
+    REPEAT_ALL_AND_SHUFFLE = "REPEAT_ALL_AND_SHUFFLE"
+
+
+class MetadataType(IntEnum):
+    """Well-known metadata types for media items."""
+
+    GENERIC = 0
+    MOVIE = 1
+    TV_SHOW = 2
+    MUSIC_TRACK = 3
+    PHOTO = 4
+
+
+class HdrType(StrEnum):
+    """HDR type reported in ``VideoInfo``."""
+
+    SDR = "sdr"
+    HDR = "hdr"
+    DV = "dv"
+
+
+class MediaCategory(StrEnum):
+    """Media category reported in ``MediaInfo``."""
+
+    VIDEO = "VIDEO"
+    AUDIO = "AUDIO"
+    IMAGE = "IMAGE"
+
+
+class MediaCommand(IntFlag):
+    """Bitmask values for ``MediaStatus.supportedMediaCommands``.
+
+    ``LOAD``, ``PLAY``, ``STOP``, and ``GET_STATUS`` are always implicitly
+    supported and do not appear in the bitmask.
+    """
+
+    PAUSE = 1
+    SEEK = 2
+    STREAM_VOLUME = 4
+    STREAM_MUTE = 8
+    SKIP_FORWARD = 16
+    SKIP_BACKWARD = 32
+    QUEUE_NEXT = 64
+    QUEUE_PREV = 128
+    QUEUE_SHUFFLE = 256
+    SKIP_AD = 512
+    QUEUE_REPEAT_ALL = 1024
+    QUEUE_REPEAT_ONE = 2048
+    EDIT_TRACKS = 4096
+    PLAYBACK_RATE = 8192
+    LIKE = 16384
+    DISLIKE = 32768
+    FOLLOW = 65536
+    UNFOLLOW = 131072
+    STREAM_TRANSFER = 262144
 
 
 # ---------------------------------------------------------------------------
@@ -96,16 +161,32 @@ class MediaImage(CastModel):
 
 
 class MediaMetadata(CastModel):
-    """Metadata for a media item."""
+    """Metadata for a media item.
 
-    metadata_type: int = 0
+    ``metadata_type`` selects the metadata schema:
+
+    - :attr:`MetadataType.GENERIC` (0) — title, subtitle
+    - :attr:`MetadataType.MOVIE` (1) — title, subtitle, studio
+    - :attr:`MetadataType.TV_SHOW` (2) — series_title, title, season, episode
+    - :attr:`MetadataType.MUSIC_TRACK` (3) — title, album, artist
+    - :attr:`MetadataType.PHOTO` (4) — title, location
+    """
+
+    metadata_type: MetadataType = MetadataType.GENERIC
     title: str | None = None
     subtitle: str | None = None
+    series_title: str | None = None
+    season: int | None = None
+    episode: int | None = None
     images: list[MediaImage] = []
 
 
 class MediaInfo(CastModel):
-    """Description of a media item in LOAD / MEDIA_STATUS messages."""
+    """Description of a media item in LOAD / MEDIA_STATUS messages.
+
+    ``content_id`` is the logical content identifier (e.g. a content page URL).
+    ``content_url`` is the resolved playback manifest URL (DASH/HLS).
+    """
 
     content_id: str
     content_type: str = ""
@@ -113,6 +194,40 @@ class MediaInfo(CastModel):
     metadata: MediaMetadata | None = None
     duration: float | None = None
     custom_data: dict[str, Any] | None = None
+    content_url: str | None = None
+    media_category: MediaCategory | None = None
+    start_absolute_time: float | None = None
+    is_live_media: bool | None = None
+
+
+class VideoInfo(CastModel):
+    """Video resolution and HDR type reported by the player."""
+
+    width: int
+    height: int
+    hdr_type: HdrType = HdrType.SDR
+
+
+class LiveSeekableRange(CastModel):
+    """Seekable range for a live stream."""
+
+    start: float = 0.0
+    end: float = 0.0
+    is_moving_window: bool = False
+    is_live_done: bool = False
+
+
+class ExtendedStatus(CastModel):
+    """Extended status used during loading to show progress.
+
+    While the main ``MediaStatus.player_state`` is ``IDLE``, the
+    ``extended_status.player_state`` can be ``LOADING`` to signal that
+    the receiver is resolving and preparing the media.
+    """
+
+    player_state: str
+    media: MediaInfo | None = None
+    media_session_id: int | None = None
 
 
 class MediaStatus(CastModel):
@@ -122,7 +237,14 @@ class MediaStatus(CastModel):
     media: MediaInfo | None = None
     player_state: PlayerState = PlayerState.IDLE
     current_time: float = 0.0
-    supported_media_commands: int = 0
+    supported_media_commands: MediaCommand = MediaCommand(0)
     volume: Volume | None = None
     idle_reason: IdleReason | None = None
     custom_data: dict[str, Any] | None = None
+    playback_rate: float | None = None
+    current_item_id: int | None = None
+    repeat_mode: RepeatMode | None = None
+    extended_status: ExtendedStatus | None = None
+    live_seekable_range: LiveSeekableRange | None = None
+    video_info: VideoInfo | None = None
+    active_track_ids: list[int] | None = None

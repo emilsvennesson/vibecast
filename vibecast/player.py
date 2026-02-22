@@ -42,11 +42,17 @@ class PlaybackStream:
 
 @dataclass(slots=True, frozen=True)
 class PlaybackMedia:
-    """Canonical media description passed from coordinator to player."""
+    """Canonical media description passed from coordinator to player.
+
+    ``content_id`` carries the original content identifier from the LOAD
+    request (e.g. a content page URL), distinct from the resolved stream
+    URLs in ``streams``.
+    """
 
     session_id: str
     streams: tuple[PlaybackStream, ...]
     stream_type: StreamType
+    content_id: str | None = None
     title: str | None = None
     subtitle: str | None = None
     images: tuple[MediaImage, ...] = ()

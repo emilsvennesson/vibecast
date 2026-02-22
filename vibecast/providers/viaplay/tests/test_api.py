@@ -502,10 +502,3 @@ class TestFetchStream:
         api = _mock_api((re.compile(r".*"), {}, 404))
         with pytest.raises(RuntimeError, match="status 404"):
             _ = await api.fetch_stream("https://x")
-
-
-class TestFetchLicense:
-    async def test_returns_placeholder_response(self) -> None:
-        api = _mock_api()
-        response = await api.fetch_license("https://drm.example.com", b"challenge")
-        assert response == b"placeholder-license-response"

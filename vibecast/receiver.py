@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 from uuid import uuid4
 
 from vibecast._auth import fetch_crl
 from vibecast._device import Device, DeviceIdentity
 from vibecast._discovery import CastAdvertisement
+from vibecast._eureka import EurekaIdentity, EurekaServer
 from vibecast._handlers import PlatformHandler
 from vibecast._http import ReceiverHTTPClient
 from vibecast._log import get_logger
@@ -25,6 +26,11 @@ if TYPE_CHECKING:
 
 log = get_logger("receiver")
 
+_CAST_PORT: Final[int] = 8009
+_EUREKA_HTTPS_PORT: Final[int] = 8443
+_EUREKA_HTTP_PORT: Final[int] = 8008
+_DISCOVERY_BASE_APP_IDS: Final[frozenset[str]] = frozenset({"CC1AD845", "0F5096E8"})
+
 
 @dataclass(slots=True)
 class ReceiverConfig:
@@ -33,9 +39,7 @@ class ReceiverConfig:
     friendly_name: str
     device_model: str = "Chromecast"
     device_id: str | None = None
-    host: str = "0.0.0.0"
-    port: int = 8009
-    player_host: str = "0.0.0.0"
+    bind_host: str = "0.0.0.0"
     player_port: int = 8010
     data_dir: Path = field(default_factory=lambda: Path.home() / ".vibecast")
 
@@ -46,6 +50,7 @@ class CastReceiver:
     __slots__ = (
         "_advertisement",
         "_certificates",
+        "_eureka_server",
         "_http",
         "_player_server",
         "_server",
@@ -83,8 +88,20 @@ class CastReceiver:
         )
 
         self._player_server = PlayerServer(
-            host=config.player_host,
+            host=config.bind_host,
             port=config.player_port,
+        )
+
+        self._eureka_server = EurekaServer(
+            certificates,
+            EurekaIdentity(
+                friendly_name=config.friendly_name,
+                device_model=config.device_model,
+                ssdp_udn=device_id,
+            ),
+            host=config.bind_host,
+            https_port=_EUREKA_HTTPS_PORT,
+            http_port=_EUREKA_HTTP_PORT,
         )
 
         self.device.register_transport(
@@ -99,8 +116,8 @@ class CastReceiver:
 
         self._server = CastServer(
             certificates,
-            host=config.host,
-            port=config.port,
+            host=config.bind_host,
+            port=_CAST_PORT,
             on_message=self._on_message,
             on_disconnect=self._on_disconnect,
         )
@@ -142,8 +159,17 @@ class CastReceiver:
         except Exception:
             await self._player_server.stop()
             raise
+
+        try:
+            await self._eureka_server.start(certificates=self._certificates)
+        except Exception:
+            await self._server.stop()
+            await self._player_server.stop()
+            raise
+
         port = self._server.serving_port
         if port is None:
+            await self._eureka_server.stop()
             await self._player_server.stop()
             await self._server.stop()
             msg = "server did not expose serving port"
@@ -151,6 +177,7 @@ class CastReceiver:
 
         device_id = self.config.device_id
         if device_id is None:
+            await self._eureka_server.stop()
             await self._player_server.stop()
             await self._server.stop()
             msg = "receiver device_id is not initialized"
@@ -162,10 +189,12 @@ class CastReceiver:
             device_id=device_id,
             port=port,
             cert_digest=self._certificates.cert_digest_md5,
+            app_ids=_collect_discovery_app_ids(enabled_providers),
         )
         try:
             await advertisement.start()
         except Exception:
+            await self._eureka_server.stop()
             await self._player_server.stop()
             await self._server.stop()
             raise
@@ -176,7 +205,7 @@ class CastReceiver:
         log.info(
             "cast receiver started (name=%s, host=%s, port=%d, service=%s, addresses=%s)",
             self.config.friendly_name,
-            self.config.host,
+            self.config.bind_host,
             port,
             advertisement.service_name,
             ",".join(advertisement.parsed_addresses),
@@ -188,6 +217,7 @@ class CastReceiver:
         Safe to call multiple times; subsequent calls are no-ops.
         """
         if not self._started:
+            await self._eureka_server.stop()
             await self._player_server.stop()
             await self._http.close()
             return
@@ -203,6 +233,7 @@ class CastReceiver:
                 await advertisement.stop()
         finally:
             await self._server.stop()
+            await self._eureka_server.stop()
             await self._player_server.stop()
             await self._http.close()
             self._started = False
@@ -237,6 +268,13 @@ def _format_provider_summary(providers: list[Provider]) -> str:
         app_ids = ",".join(sorted(provider.app_ids()))
         entries.append(f"{provider.display_name()} (appIds={app_ids})")
     return "; ".join(entries)
+
+
+def _collect_discovery_app_ids(providers: list[Provider]) -> frozenset[str]:
+    app_ids: set[str] = set(_DISCOVERY_BASE_APP_IDS)
+    for provider in providers:
+        app_ids.update(provider.app_ids())
+    return frozenset(app_ids)
 
 
 __all__ = ["CastReceiver", "ReceiverConfig"]

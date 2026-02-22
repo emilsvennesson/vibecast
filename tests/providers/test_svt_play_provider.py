@@ -8,7 +8,13 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
-from vibecast._models import LoadRequest, MediaInfo, MediaMetadata, StreamType
+from vibecast._models import (
+    LoadRequest,
+    MediaInfo,
+    MediaMetadata,
+    MetadataType,
+    StreamType,
+)
 from vibecast.player import DrmSystem
 from vibecast.provider import LaunchCredentials, ProviderSession, ReceiverContext
 from vibecast.providers.svt_play._provider import SvtPlayProvider
@@ -151,7 +157,9 @@ class TestResolveMedia:
                         content_id="egWnL16",
                         content_type="video/mp4",
                         stream_type=StreamType.BUFFERED,
-                        metadata=MediaMetadata(metadata_type=0, subtitle="Laddar..."),
+                        metadata=MediaMetadata(
+                            metadata_type=MetadataType.GENERIC, subtitle="Laddar..."
+                        ),
                         custom_data=media_custom_data,
                     ),
                     autoplay=True,
@@ -239,7 +247,7 @@ class TestResolveMedia:
                         content_type="video/mp4",
                         stream_type=StreamType.BUFFERED,
                         metadata=MediaMetadata(
-                            metadata_type=1,
+                            metadata_type=MetadataType.MOVIE,
                             title="Fallback title",
                             subtitle="Fallback subtitle",
                         ),

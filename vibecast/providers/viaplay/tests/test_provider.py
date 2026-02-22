@@ -159,6 +159,7 @@ class TestResolveMedia:
         assert media.streams[0].drm is not None
         assert media.streams[0].drm.system is DrmSystem.WIDEVINE
         assert media.streams[0].drm.license_url == "https://drm.example.com/license"
+        assert "User-Agent" in media.streams[0].drm.headers
 
     async def test_requires_authentication(self) -> None:
         provider = ViaplayProvider()
@@ -219,7 +220,7 @@ class TestPlaybackAndLicense:
         assert second_payload["position"] == 260
         assert second_payload["duration"] == 2535
 
-    async def test_resolve_license_uses_forwarder(self) -> None:
+    async def test_resolve_license_uses_generic_forwarder(self) -> None:
         provider = ViaplayProvider()
         session, _, _ = _make_session()
         await provider.on_launch(session, LaunchCredentials())
@@ -228,8 +229,13 @@ class TestPlaybackAndLicense:
             return_value=LicenseResponse(
                 body=b"license-bytes",
                 content_type="application/octet-stream",
-                status=200,
+                status=403,
             )
+        )
+        request = LicenseRequest(
+            session_id=session.session_id,
+            route_id="r0",
+            body=b"challenge",
         )
         route = LicenseRoute(
             route_id="r0",
@@ -239,19 +245,15 @@ class TestPlaybackAndLicense:
 
         response = await provider.resolve_license(
             session,
-            LicenseRequest(
-                session_id=session.session_id,
-                route_id="r0",
-                body=b"challenge",
-            ),
+            request,
             route,
             forward,
         )
 
-        assert response.status == 200
-        assert response.content_type == "application/octet-stream"
         assert response.body == b"license-bytes"
-        forward.assert_awaited_once()
+        assert response.content_type == "application/octet-stream"
+        assert response.status == 403
+        forward.assert_awaited_once_with(request, route)
 
 
 class TestAuthFlowEdges:

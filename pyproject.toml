@@ -103,8 +103,9 @@ reportAny = "hint"
 reportExplicitAny = "hint"
 reportMissingTypeStubs = "hint"
 reportUnannotatedClassAttribute = "none"
+ignore = ["scripts"]
 # Generated protobuf files have type issues we can't fix.
-exclude = [".venv", "vibecast/_proto/cast_channel_pb2.py", "vibecast/_proto/cast_channel_pb2.pyi", "scripts/_mitm_addon.py"]
+exclude = [".venv", "scripts", "vibecast/_proto/cast_channel_pb2.py", "vibecast/_proto/cast_channel_pb2.pyi"]
 venvPath = "."
 venv = ".venv"
 

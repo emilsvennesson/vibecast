@@ -49,20 +49,9 @@ def _parse_args() -> argparse.Namespace:
         help="Persistent receiver data (cookies, device IDs, provider state)",
     )
     _ = parser.add_argument(
-        "--host",
+        "--bind-host",
         default="0.0.0.0",
-        help="Host/interface to bind the TLS Cast server to",
-    )
-    _ = parser.add_argument(
-        "--port",
-        type=int,
-        default=8009,
-        help="Port to bind the TLS Cast server to",
-    )
-    _ = parser.add_argument(
-        "--player-host",
-        default="0.0.0.0",
-        help="Host/interface to bind the player HTTP/WebSocket server to",
+        help="Host/interface to bind Cast, eureka, and player servers to",
     )
     _ = parser.add_argument(
         "--player-port",
@@ -107,9 +96,7 @@ async def _run(args: argparse.Namespace) -> None:
         friendly_name=args.name,
         device_model=args.model,
         device_id=device_id,
-        host=args.host,
-        port=args.port,
-        player_host=args.player_host,
+        bind_host=args.bind_host,
         player_port=args.player_port,
         data_dir=data_dir,
     )

@@ -97,6 +97,8 @@ class TestPlayerServer:
         assert response.content_type == "application/javascript"
         assert "new shaka.Player" in body
         assert "/player?role=primary" in body
+        assert 'window.getComputedStyle(el).display !== "none"' in body
+        assert 'el.offsetParent !== null || el.style.display !== "none"' not in body
 
         await server.stop()
 

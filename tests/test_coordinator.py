@@ -275,11 +275,28 @@ class TestCoordinator:
             == "http://127.0.0.1:8010/license/session-1?route=r0"
         )
 
-        namespace, payload = broadcast[0]
-        assert namespace == ns.MEDIA
-        assert payload["type"] == "MEDIA_STATUS"
-        assert payload["status"][0]["playerState"] == "BUFFERING"
-        assert payload["status"][0]["currentTime"] == 5.0
+        # Load produces 3 broadcasts: LOADING (minimal), LOADING (resolved),
+        # then BUFFERING once the player is handed the media.
+        assert len(broadcast) >= 3
+
+        # First broadcast: IDLE + LOADING extended status (pre-resolution).
+        ns0, p0 = broadcast[0]
+        assert ns0 == ns.MEDIA
+        assert p0["status"][0]["playerState"] == "IDLE"
+        assert p0["status"][0]["extendedStatus"]["playerState"] == "LOADING"
+
+        # Second broadcast: IDLE + LOADING with resolved media info.
+        ns1, p1 = broadcast[1]
+        assert ns1 == ns.MEDIA
+        assert p1["status"][0]["playerState"] == "IDLE"
+        assert p1["status"][0]["extendedStatus"]["playerState"] == "LOADING"
+        assert "contentUrl" in p1["status"][0]["media"]
+
+        # Third broadcast: BUFFERING with start_time applied.
+        ns2, p2 = broadcast[2]
+        assert ns2 == ns.MEDIA
+        assert p2["status"][0]["playerState"] == "BUFFERING"
+        assert p2["status"][0]["currentTime"] == 5.0
 
         assert provider.playback_updates[-1].player_state is PlayerState.BUFFERING
 
@@ -373,7 +390,13 @@ class TestCoordinator:
         assert player.volume_calls == [(0.4, True)]
         assert player.stop_calls == 1
         assert player_server.unregister_calls[-1] == "session-1"
-        assert broadcast[-1][1]["status"] == []
+        # Media stop now sends a proper IDLE status with idleReason, not an
+        # empty array.  The media field is omitted on IDLE.
+        stop_status = broadcast[-1][1]["status"]
+        assert len(stop_status) == 1
+        assert stop_status[0]["playerState"] == "IDLE"
+        assert stop_status[0]["idleReason"] == "CANCELLED"
+        assert "media" not in stop_status[0]
 
         await coordinator.handle_media_message(
             connection,
