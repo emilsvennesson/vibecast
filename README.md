@@ -149,6 +149,7 @@ Provider discovery uses Python entry points under `castvibe.providers`.
 
 Built-in provider in this repo:
 
+- `SvtPlayProvider` (`appId` `95370A1C`)
 - `ViaplayProvider` (`appId` `6313CF39`, `2DB7CC49`)
 
 Sanity-check discovery:

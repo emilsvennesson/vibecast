@@ -15,6 +15,7 @@ dependencies = [
 ]
 
 [project.entry-points."castvibe.providers"]
+svt_play = "castvibe.providers.svt_play._provider:SvtPlayProvider"
 viaplay = "castvibe.providers.viaplay._provider:ViaplayProvider"
 
 [dependency-groups]

@@ -5,6 +5,7 @@
     activeSessionId: null,
     player: null,
     lastStateKey: "",
+    autoplayMuted: false,
   };
 
   const connectionEl = document.getElementById("connection");
@@ -121,6 +122,7 @@
 
   function resetSessionUi() {
     videoEl.controls = false;
+    app.autoplayMuted = false;
     sessionEl.textContent = "-";
     titleEl.textContent = "Waiting for LOAD";
     subtitleEl.textContent =
@@ -128,11 +130,38 @@
     stateEl.textContent = "IDLE";
   }
 
-  async function safePlay() {
+  function isAutoplayBlocked(error) {
+    if (error && typeof error === "object" && "name" in error) {
+      if (String(error.name) === "NotAllowedError") {
+        return true;
+      }
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    const normalized = message.toLowerCase();
+    return normalized.includes("not allowed") || normalized.includes("permission");
+  }
+
+  async function safePlay(options = {}) {
+    const allowMutedFallback = Boolean(options.allowMutedFallback);
+
     try {
       await videoEl.play();
       return true;
     } catch (error) {
+      if (allowMutedFallback && isAutoplayBlocked(error) && !videoEl.muted) {
+        const originalMuted = videoEl.muted;
+        videoEl.muted = true;
+        try {
+          await videoEl.play();
+          app.autoplayMuted = true;
+          pushLog("Autoplay blocked with sound; resumed muted");
+          return true;
+        } catch {
+          videoEl.muted = originalMuted;
+        }
+      }
+
       const message = error instanceof Error ? error.message : String(error);
       pushLog("Playback start blocked: " + message);
       sendError("PLAYBACK_PLAY_FAILED", message);
@@ -166,6 +195,7 @@
 
     videoEl.pause();
     videoEl.controls = false;
+    app.autoplayMuted = false;
     videoEl.removeAttribute("src");
     videoEl.load();
     app.lastStateKey = "";
@@ -212,7 +242,9 @@
 
     app.activeSessionId = command.sessionId;
     app.lastStateKey = "";
+    app.autoplayMuted = false;
     videoEl.controls = true;
+    videoEl.muted = false;
     sessionEl.textContent = command.sessionId;
     titleEl.textContent = media.title || media.url;
     subtitleEl.textContent = media.subtitle || media.contentType || media.url;
@@ -231,7 +263,7 @@
         return;
       }
 
-      const started = await safePlay();
+      const started = await safePlay({ allowMutedFallback: true });
       const state = started ? "PLAYING" : "PAUSED";
       sendStateReport(command.sessionId, state, null, true);
     } catch (error) {
@@ -254,7 +286,7 @@
         if (command.sessionId !== app.activeSessionId) {
           return;
         }
-        if (await safePlay()) {
+        if (await safePlay({ allowMutedFallback: true })) {
           sendStateReport(command.sessionId, "PLAYING", null, true);
         }
         break;
@@ -292,6 +324,9 @@
           videoEl.volume = Math.max(0, Math.min(1, command.level));
         }
         videoEl.muted = Boolean(command.muted);
+        if (!videoEl.muted) {
+          app.autoplayMuted = false;
+        }
         sendCurrentState(true);
         break;
       default:

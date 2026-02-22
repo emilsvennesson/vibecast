@@ -368,3 +368,33 @@ class TestIntegration:
 
         await receiver.stop()
         assert provider.stop_calls == 1
+
+
+class TestStartupLogging:
+    async def test_start_logs_enabled_providers(
+        self,
+        monkeypatch: Any,
+        bundle: CertificateBundle,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _patch_runtime(monkeypatch)
+        receiver = CastReceiver(
+            config=ReceiverConfig(
+                friendly_name="Living Room",
+                host="127.0.0.1",
+                port=0,
+                player_port=0,
+            ),
+            certificates=bundle,
+            providers=[DummyProvider()],
+        )
+        caplog.set_level("INFO", logger="castvibe.receiver")
+
+        await receiver.start()
+        await receiver.stop()
+
+        assert any(
+            record.name == "castvibe.receiver"
+            and record.getMessage() == "enabled providers: Dummy (appIds=DUMMYAPP)"
+            for record in caplog.records
+        )
