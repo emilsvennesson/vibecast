@@ -391,7 +391,7 @@ class PlayerServer(Player):
 
         route_id = request.query.get("route")
         body = await request.read()
-        content_type = request.content_type or "application/octet-stream"
+        content_type = request.headers.get("Content-Type", "")
         license_request = LicenseRequest(
             session_id=session_id,
             body=body,

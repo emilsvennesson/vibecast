@@ -153,51 +153,6 @@ wheels = [
 ]
 
 [[package]]
-name = "vibecast"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "aiohttp" },
-    { name = "cryptography" },
-    { name = "httpx" },
-    { name = "protobuf" },
-    { name = "pydantic" },
-    { name = "uritemplate" },
-    { name = "zeroconf" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "basedpyright" },
-    { name = "deptry" },
-    { name = "grpcio-tools" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "aiohttp", specifier = ">=3.11" },
-    { name = "cryptography", specifier = ">=44.0" },
-    { name = "httpx", specifier = ">=0.28" },
-    { name = "protobuf", specifier = ">=5.0" },
-    { name = "pydantic", specifier = ">=2.11" },
-    { name = "uritemplate", specifier = ">=4.1" },
-    { name = "zeroconf", specifier = ">=0.140" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "basedpyright", specifier = ">=1.38.1" },
-    { name = "deptry", specifier = ">=0.24.0" },
-    { name = "grpcio-tools", specifier = ">=1.70" },
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "pytest-asyncio", specifier = ">=0.25" },
-    { name = "ruff", specifier = ">=0.15.1" },
-]
-
-[[package]]
 name = "certifi"
 version = "2026.1.4"
 source = { registry = "https://pypi.org/simple" }
@@ -594,6 +549,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/72/34/14ca021ce8e5dfedc35312d08ba8bf51fdd999c576889fc2c24cb97f4f10/iniconfig-2.3.0.tar.gz", hash = "sha256:c76315c77db068650d49c5b56314774a7804df16fee4402c1f19d6d15d8c4730", size = 20503, upload-time = "2025-10-18T21:55:43.219Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/cb/b1/3846dd7f199d53cb17f49cba7e651e9ce294d8497c8c150530ed11865bb8/iniconfig-2.3.0-py3-none-any.whl", hash = "sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12", size = 7484, upload-time = "2025-10-18T21:55:41.639Z" },
+]
+
+[[package]]
+name = "kodistubs"
+version = "21.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/24/bc/5cf6fcb211cfcfe572b48897140806c88d2c2ab7597d51dcac2313950304/Kodistubs-21.0.0.tar.gz", hash = "sha256:2c342eebf6c85c690788e6a4156a76d8eaa21b4e19e73df601ced0ca28d23576", size = 69842, upload-time = "2024-04-07T13:44:08.103Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c0/68/7ebaa78fa4ffe81e373419de1aa0aaa5a5f92b378ec616d7696646eecc87/Kodistubs-21.0.0-py3-none-any.whl", hash = "sha256:b82cf094648ad5c75cf532bc377e1255c71730011d23d664b7df8ac96aedd3e0", size = 71378, upload-time = "2024-04-07T13:44:06.109Z" },
 ]
 
 [[package]]
@@ -1035,6 +999,53 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/98/60/f174043244c5306c9988380d2cb10009f91563fc4b31293d27e17201af56/uritemplate-4.2.0.tar.gz", hash = "sha256:480c2ed180878955863323eea31b0ede668795de182617fef9c6ca09e6ec9d0e", size = 33267, upload-time = "2025-06-02T15:12:06.318Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a9/99/3ae339466c9183ea5b8ae87b34c0b897eda475d2aec2307cae60e5cd4f29/uritemplate-4.2.0-py3-none-any.whl", hash = "sha256:962201ba1c4edcab02e60f9a0d3821e82dfc5d2d6662a21abd533879bdb8a686", size = 11488, upload-time = "2025-06-02T15:12:03.405Z" },
+]
+
+[[package]]
+name = "vibecast"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "cryptography" },
+    { name = "httpx" },
+    { name = "protobuf" },
+    { name = "pydantic" },
+    { name = "uritemplate" },
+    { name = "zeroconf" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "basedpyright" },
+    { name = "deptry" },
+    { name = "grpcio-tools" },
+    { name = "kodistubs" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiohttp", specifier = ">=3.11" },
+    { name = "cryptography", specifier = ">=44.0" },
+    { name = "httpx", specifier = ">=0.28" },
+    { name = "protobuf", specifier = ">=5.0" },
+    { name = "pydantic", specifier = ">=2.11" },
+    { name = "uritemplate", specifier = ">=4.1" },
+    { name = "zeroconf", specifier = ">=0.140" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "basedpyright", specifier = ">=1.38.1" },
+    { name = "deptry", specifier = ">=0.24.0" },
+    { name = "grpcio-tools", specifier = ">=1.70" },
+    { name = "kodistubs", specifier = ">=21.0.0" },
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "pytest-asyncio", specifier = ">=0.25" },
+    { name = "ruff", specifier = ">=0.15.1" },
 ]
 
 [[package]]

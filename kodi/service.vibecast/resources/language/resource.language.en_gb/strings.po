@@ -1,0 +1,68 @@
+# Kodi Media Center language file
+# Addon Name: vibecast
+# Addon id: service.vibecast
+# Addon Provider: vibecast
+msgid ""
+msgstr ""
+"Project-Id-Version: vibecast\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: en_GB\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+msgctxt "Addon Summary"
+msgid "vibecast service for Kodi."
+msgstr ""
+
+msgctxt "Addon Description"
+msgid "Runs a background service that connects Kodi to vibecast playback."
+msgstr ""
+
+msgctxt "#30000"
+msgid "Connection"
+msgstr ""
+
+msgctxt "#30001"
+msgid "Network"
+msgstr ""
+
+msgctxt "#30002"
+msgid "Debug"
+msgstr ""
+
+msgctxt "#30003"
+msgid "vibecast host"
+msgstr ""
+
+msgctxt "#30004"
+msgid "vibecast port"
+msgstr ""
+
+msgctxt "#30005"
+msgid "Use secure WebSocket (wss)"
+msgstr ""
+
+msgctxt "#30006"
+msgid "Rewrite localhost media/license URLs to vibecast host"
+msgstr ""
+
+msgctxt "#30007"
+msgid "Reconnect delay (seconds)"
+msgstr ""
+
+msgctxt "#30008"
+msgid "WebSocket ping interval (seconds)"
+msgstr ""
+
+msgctxt "#30009"
+msgid "WebSocket ping timeout (seconds)"
+msgstr ""
+
+msgctxt "#30010"
+msgid "Enable debug logging"
+msgstr ""
+
+msgctxt "#30011"
+msgid "Show connection notifications"
+msgstr ""
