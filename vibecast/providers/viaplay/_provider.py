@@ -98,6 +98,10 @@ class ViaplayProvider(Provider):
         return "Viaplay"
 
     @override
+    def icon_url(self) -> str | None:
+        return "https://lh3.googleusercontent.com/qXqoFPVkEZBwm7f1Yo8_7Xjv8wVeqbBeI-HfbD_KHjt0aOJf5dP_kbyQKMB1stIc0HIywc__C_Qq2CKjsg"
+
+    @override
     def namespaces(self) -> frozenset[str]:
         return self._NAMESPACES
 

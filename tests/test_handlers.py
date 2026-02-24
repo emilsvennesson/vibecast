@@ -261,6 +261,52 @@ class TestPlatformNamespaces:
         response = ReceiverStatusResponse.model_validate(data)
         assert len(response.status.applications) == 1
 
+    async def test_launch_replaces_existing_session(self) -> None:
+        provider = FakeProvider()
+
+        def lookup(app_id: str) -> Provider | None:
+            return provider if app_id in ("6313CF39", "95370A1C") else None
+
+        device = _build_device(lookup)
+        connection = RecordingConnection()
+        await _connect_sender(device, connection)
+
+        # Launch Viaplay.
+        await _route(
+            device,
+            connection,
+            namespace=ns.RECEIVER,
+            payload={
+                "type": "LAUNCH",
+                "requestId": 10,
+                "appId": "6313CF39",
+            },
+        )
+        assert len(device.sessions) == 1
+        old_session_id = next(iter(device.sessions))
+
+        connection.sent.clear()
+
+        # Launch SVT Play -- should replace the Viaplay session.
+        await _route(
+            device,
+            connection,
+            namespace=ns.RECEIVER,
+            payload={
+                "type": "LAUNCH",
+                "requestId": 11,
+                "appId": "95370A1C",
+            },
+        )
+
+        assert len(device.sessions) == 1
+        new_session_id = next(iter(device.sessions))
+        assert new_session_id != old_session_id
+
+        response = ReceiverStatusResponse.model_validate(connection.sent[0][3])
+        assert len(response.status.applications) == 1
+        assert response.status.applications[0].app_id == "95370A1C"
+
     async def test_launch_unavailable_app_returns_launch_error(self) -> None:
         device = _build_device(lambda _app_id: None)
         connection = RecordingConnection()

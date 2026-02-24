@@ -764,13 +764,12 @@ class VibecastService:
         title = _coerce_str(media.get("title"))
         subtitle = _coerce_str(media.get("subtitle"))
 
-        info: dict[str, str] = {}
-        if title is not None:
-            info["title"] = title
-        if subtitle is not None:
-            info["plot"] = subtitle
-        if info:
-            list_item.setInfo("video", info)
+        if title is not None or subtitle is not None:
+            tag = list_item.getVideoInfoTag()
+            if title is not None:
+                tag.setTitle(title)
+            if subtitle is not None:
+                tag.setPlot(subtitle)
 
         images = media.get("images")
         if not isinstance(images, list):

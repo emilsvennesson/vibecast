@@ -109,6 +109,14 @@ class Provider(ABC):
     def namespaces(self) -> frozenset[str]:
         """Return custom namespaces handled by this provider."""
 
+    def icon_url(self) -> str | None:
+        """Return an icon URL for this app shown in receiver status.
+
+        Defaults to ``None``.  Providers may override this to supply the
+        Google-hosted icon URL that real Cast apps advertise.
+        """
+        return None
+
     def provider_key(self) -> str:
         """Stable filesystem-safe key for receiver-managed provider data.
 
