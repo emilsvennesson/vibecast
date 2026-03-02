@@ -7,7 +7,7 @@ Cast CRL (Certificate Revocation List) from Google's servers.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import httpx
 
@@ -31,7 +31,7 @@ CRL_URL = "https://clients3.google.com/cast/chromecast/device/crl"
 def build_auth_response(
     bundle: CertificateBundle,
     *,
-    hash_algorithm: int,
+    hash_algorithm: HashAlgorithm,
     crl: bytes | None = None,
 ) -> bytes:
     """Build a serialized ``DeviceAuthMessage`` containing an ``AuthResponse``.
@@ -57,13 +57,11 @@ def build_auth_response(
         msg = f"Unsupported Cast auth hash algorithm: {hash_algorithm}"
         raise ValueError(msg)
 
-    hash_algorithm_enum = cast("HashAlgorithm", hash_algorithm)
-
     auth_response = AuthResponse(
         signature=signature,
         client_auth_certificate=bundle.device_cert_der,
         intermediate_certificate=bundle.intermediate_certs_der,
-        hash_algorithm=hash_algorithm_enum,
+        hash_algorithm=hash_algorithm,
         signature_algorithm=SignatureAlgorithm.RSASSA_PKCS1v15,
     )
 
@@ -76,11 +74,10 @@ def build_auth_response(
 
 
 def build_auth_error(
-    error_type: int = AuthError.SIGNATURE_ALGORITHM_UNAVAILABLE,
+    error_type: AuthError.ErrorType = AuthError.SIGNATURE_ALGORITHM_UNAVAILABLE,
 ) -> bytes:
     """Build a serialized ``DeviceAuthMessage`` containing ``AuthError``."""
-    error_type_enum = cast("AuthError.ErrorType", error_type)
-    message = DeviceAuthMessage(error=AuthError(error_type=error_type_enum))
+    message = DeviceAuthMessage(error=AuthError(error_type=error_type))
     return message.SerializeToString()
 
 

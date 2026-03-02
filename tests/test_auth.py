@@ -246,7 +246,7 @@ class TestBuildAuthResponse:
 
     def test_unsupported_hash_algorithm_raises(self, bundle: CertificateBundle) -> None:
         with pytest.raises(ValueError, match="Unsupported Cast auth hash algorithm"):
-            _ = build_auth_response(bundle, hash_algorithm=99)
+            _ = build_auth_response(bundle, hash_algorithm=99)  # pyright: ignore[reportArgumentType]
 
 
 class TestFetchCrl:

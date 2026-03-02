@@ -440,19 +440,24 @@ class ProxySession:
         """Respond to a device-auth challenge using the manifest certs."""
         challenge = DeviceAuthMessage()
         requested_hash = HashAlgorithm.SHA1
+        requested_sig = SignatureAlgorithm.RSASSA_PKCS1v15
         if challenge.ParseFromString(msg.payload_binary) and challenge.HasField(
             "challenge"
         ):
             requested_hash = challenge.challenge.hash_algorithm
+            requested_sig = challenge.challenge.signature_algorithm
 
-        try:
-            payload = build_auth_response(
-                self._bundle,
-                hash_algorithm=requested_hash,
-                crl=self._crl,
-            )
-        except ValueError:
+        if requested_sig != SignatureAlgorithm.RSASSA_PKCS1v15:
             payload = build_auth_error()
+        else:
+            try:
+                payload = build_auth_response(
+                    self._bundle,
+                    hash_algorithm=requested_hash,
+                    crl=self._crl,
+                )
+            except ValueError:
+                payload = build_auth_error()
 
         resp_msg = CastMessage()
         resp_msg.protocol_version = CastMessage.CASTV2_1_0

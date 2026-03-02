@@ -178,10 +178,12 @@ class Connection:
             return
 
         requested_hash_algorithm = HashAlgorithm.SHA1
+        requested_sig_algorithm = SignatureAlgorithm.RSASSA_PKCS1v15
         if challenge.HasField("challenge"):
             challenge_msg = challenge.challenge
             sender_nonce = challenge_msg.sender_nonce
             requested_hash_algorithm = challenge_msg.hash_algorithm
+            requested_sig_algorithm = challenge_msg.signature_algorithm
             log.debug(
                 "%s: device auth challenge received (hash=%s sig=%s nonce_len=%d)",
                 self.peer,
@@ -198,15 +200,19 @@ class Connection:
             )
 
         is_error = False
-        try:
-            payload = build_auth_response(
-                self._bundle,
-                hash_algorithm=requested_hash_algorithm,
-                crl=self._crl,
-            )
-        except ValueError:
+        if requested_sig_algorithm != SignatureAlgorithm.RSASSA_PKCS1v15:
             is_error = True
             payload = build_auth_error()
+        else:
+            try:
+                payload = build_auth_response(
+                    self._bundle,
+                    hash_algorithm=requested_hash_algorithm,
+                    crl=self._crl,
+                )
+            except ValueError:
+                is_error = True
+                payload = build_auth_error()
 
         await self.send_binary(
             source_id=msg.destination_id,
