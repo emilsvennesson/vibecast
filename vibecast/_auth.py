@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 import httpx
 
 from vibecast._proto.cast_channel_pb2 import (
+    AuthError,
     AuthResponse,
     DeviceAuthMessage,
     HashAlgorithm,
@@ -30,27 +31,34 @@ CRL_URL = "https://clients3.google.com/cast/chromecast/device/crl"
 def build_auth_response(
     bundle: CertificateBundle,
     *,
+    hash_algorithm: HashAlgorithm,
     crl: bytes | None = None,
 ) -> bytes:
     """Build a serialized ``DeviceAuthMessage`` containing an ``AuthResponse``.
 
-    The hash algorithm is selected automatically: SHA-1 when the bundle was
-    loaded from a ``sig_sha1`` manifest field, SHA-256 when loaded from the
-    legacy ``sig`` field.  No sender nonce is incorporated (static signature
-    mode).
+    The signature is selected from *bundle* based on *hash_algorithm*
+    requested by the sender challenge.  No sender nonce is incorporated
+    (static signature mode).
 
     If *crl* is provided it takes precedence; otherwise the CRL embedded in
     *bundle* (if any) is used.
 
     Returns raw protobuf bytes ready to be sent as a ``BINARY`` payload on the
     ``urn:x-cast:com.google.cast.tp.deviceauth`` namespace.
+
+    Raises:
+        ValueError: If *hash_algorithm* is unsupported.
     """
-    hash_algorithm = HashAlgorithm.SHA1
-    if not bundle.signature_is_sha1:
-        hash_algorithm = HashAlgorithm.SHA256
+    if hash_algorithm == HashAlgorithm.SHA1:
+        signature = bundle.signature_sha1
+    elif hash_algorithm == HashAlgorithm.SHA256:
+        signature = bundle.signature_sha256
+    else:
+        msg = f"Unsupported Cast auth hash algorithm: {hash_algorithm}"
+        raise ValueError(msg)
 
     auth_response = AuthResponse(
-        signature=bundle.signature_sha1,
+        signature=signature,
         client_auth_certificate=bundle.device_cert_der,
         intermediate_certificate=bundle.intermediate_certs_der,
         hash_algorithm=hash_algorithm,
@@ -62,6 +70,14 @@ def build_auth_response(
         auth_response.crl = effective_crl
 
     message = DeviceAuthMessage(response=auth_response)
+    return message.SerializeToString()
+
+
+def build_auth_error(
+    error_type: AuthError.ErrorType = AuthError.SIGNATURE_ALGORITHM_UNAVAILABLE,
+) -> bytes:
+    """Build a serialized ``DeviceAuthMessage`` containing ``AuthError``."""
+    message = DeviceAuthMessage(error=AuthError(error_type=error_type))
     return message.SerializeToString()
 
 

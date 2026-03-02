@@ -299,6 +299,42 @@ class TestLifecycle:
             assert mock_zeroconf.async_unregister_service.await_count == 1
             assert mock_zeroconf.async_close.await_count == 1
 
+    async def test_update_cert_digest_restarts_registration(
+        self, bundle: CertificateBundle
+    ) -> None:
+        """Updating cert digest refreshes registrations with updated TXT data."""
+        ad = CastAdvertisement(
+            friendly_name="Office",
+            device_model="Chromecast",
+            device_id=str(uuid4()),
+            port=8009,
+            cert_digest=bundle.cert_digest_md5,
+        )
+
+        with patch("vibecast._discovery.AsyncZeroconf") as mock_ctor:
+            first_zeroconf = AsyncMock()
+            second_zeroconf = AsyncMock()
+            for mock_zeroconf in (first_zeroconf, second_zeroconf):
+                mock_zeroconf.async_register_service.return_value = asyncio.create_task(
+                    asyncio.sleep(0)
+                )
+                mock_zeroconf.async_unregister_service.return_value = (
+                    asyncio.create_task(asyncio.sleep(0))
+                )
+
+            mock_ctor.side_effect = [first_zeroconf, second_zeroconf]
+
+            await ad.start()
+            await ad.update_cert_digest("deadbeef")
+            await ad.stop()
+
+            assert ad.txt_records["cd"] == "DEADBEEF"
+            assert mock_ctor.call_count == 2
+            assert first_zeroconf.async_register_service.await_count == 1
+            assert first_zeroconf.async_unregister_service.await_count == 1
+            assert second_zeroconf.async_register_service.await_count == 1
+            assert second_zeroconf.async_unregister_service.await_count == 1
+
     async def test_start_registers_subtypes_when_app_ids_present(
         self, bundle: CertificateBundle
     ) -> None:

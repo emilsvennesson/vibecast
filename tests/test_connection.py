@@ -11,7 +11,12 @@ from unittest.mock import AsyncMock
 from tests.conftest import frame_message, make_cast_message
 from vibecast import _namespace as ns
 from vibecast._connection import Connection
-from vibecast._proto.cast_channel_pb2 import CastMessage, DeviceAuthMessage
+from vibecast._proto.cast_channel_pb2 import (
+    AuthChallenge,
+    CastMessage,
+    DeviceAuthMessage,
+    HashAlgorithm,
+)
 
 if TYPE_CHECKING:
     from vibecast._certificate import CertificateBundle
@@ -242,8 +247,6 @@ class TestDeviceAuth:
 
     async def test_auth_response_returned(self, bundle: CertificateBundle) -> None:
         """A device-auth challenge gets a valid DeviceAuthMessage response."""
-        from vibecast._proto.cast_channel_pb2 import AuthChallenge
-
         challenge_msg = DeviceAuthMessage(challenge=AuthChallenge())
         challenge = make_cast_message(
             source="sender-0",
@@ -264,10 +267,31 @@ class TestDeviceAuth:
         assert auth_msg.response.signature == bundle.signature_sha1
         assert auth_msg.response.client_auth_certificate == bundle.device_cert_der
 
+    async def test_auth_response_uses_requested_sha256(
+        self, bundle: CertificateBundle
+    ) -> None:
+        challenge_msg = DeviceAuthMessage(
+            challenge=AuthChallenge(hash_algorithm=HashAlgorithm.SHA256)
+        )
+        challenge = make_cast_message(
+            source="sender-0",
+            destination="receiver-0",
+            namespace=ns.DEVICE_AUTH,
+            payload_binary=challenge_msg.SerializeToString(),
+        )
+        conn, transport = _make_connection(bundle, frame_message(challenge))
+        await conn.handle()
+
+        msg = _read_response(transport.buffer)
+        auth_msg = DeviceAuthMessage()
+        _ = auth_msg.ParseFromString(msg.payload_binary)
+
+        assert auth_msg.HasField("response")
+        assert auth_msg.response.hash_algorithm == HashAlgorithm.SHA256
+        assert auth_msg.response.signature == bundle.signature_sha256
+
     async def test_auth_source_dest_swapped(self, bundle: CertificateBundle) -> None:
         """Auth response swaps source and destination IDs."""
-        from vibecast._proto.cast_channel_pb2 import AuthChallenge
-
         challenge_msg = DeviceAuthMessage(challenge=AuthChallenge())
         challenge = make_cast_message(
             source="sender-0",
@@ -284,8 +308,6 @@ class TestDeviceAuth:
 
     async def test_auth_not_forwarded(self, bundle: CertificateBundle) -> None:
         """Device-auth messages are never forwarded to on_message."""
-        from vibecast._proto.cast_channel_pb2 import AuthChallenge
-
         on_msg = AsyncMock()
         challenge_msg = DeviceAuthMessage(challenge=AuthChallenge())
         challenge = make_cast_message(

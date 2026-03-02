@@ -82,6 +82,12 @@ def bundle() -> CertificateBundle:
         padding.PKCS1v15(),
         hashes.SHA1(),  # noqa: S303
     )
+    sig_sha256 = device_key.sign(
+        peer_der,
+        padding.PKCS1v15(),
+        hashes.SHA256(),
+    )
+    now = datetime.datetime.now(datetime.UTC)
 
     return CertificateBundle(
         peer_cert_pem=peer_pem,
@@ -89,7 +95,10 @@ def bundle() -> CertificateBundle:
         device_cert_der=device_der,
         intermediate_certs_der=[ica_der],
         signature_sha1=sig_sha1,
+        signature_sha256=sig_sha256,
         peer_cert_der=peer_der,
+        not_valid_before=now - datetime.timedelta(minutes=1),
+        not_valid_after=now + datetime.timedelta(days=1),
     )
 
 

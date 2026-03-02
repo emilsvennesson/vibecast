@@ -272,6 +272,24 @@ class CastAdvertisement:
         """TXT records advertised for this cast service."""
         return cast("dict[str, str]", self._txt.model_dump())
 
+    async def update_cert_digest(self, cert_digest: str) -> None:
+        """Update advertised ``cd`` digest and refresh mDNS registrations."""
+        normalized = cert_digest.upper()
+        if normalized == self._cert_digest:
+            return
+
+        was_running = bool(self._registrations)
+        if was_running:
+            await self.stop()
+
+        self._cert_digest = normalized
+        self._txt = self._txt.model_copy(update={"cd": self._cert_digest})
+
+        if was_running:
+            await self.start()
+
+        log.info("updated mDNS certificate digest: %s", self._cert_digest)
+
     def _build_service_info(self) -> ServiceInfo:
         return ServiceInfo(
             type_=self.service_type,
