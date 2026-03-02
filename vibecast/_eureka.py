@@ -160,6 +160,7 @@ class EurekaServer:
         "_ip_address",
         "_local_authorization_token_hash",
         "_public_key_b64",
+        "_ssl_context",
         "_started_at",
     )
 
@@ -184,6 +185,7 @@ class EurekaServer:
 
         self._ip_address = _discover_primary_ipv4(host)
         self._public_key_b64 = _device_public_key_b64(bundle)
+        self._ssl_context = _build_ssl_context(bundle)
         self._local_authorization_token_hash = _token_hash(identity.ssdp_udn)
         log.debug(
             "eureka identity configured (name=%s model=%s ssdp_udn=%s bind_host=%s ip=%s public_key_b64_len=%d)",
@@ -215,7 +217,9 @@ class EurekaServer:
             self._http_port,
         )
         self._started_at = time.monotonic()
-        ssl_context = _build_ssl_context(certificates)
+        self._public_key_b64 = _device_public_key_b64(certificates)
+        self._ssl_context = _build_ssl_context(certificates)
+        ssl_context = self._ssl_context
         log.debug("eureka TLS context initialized")
 
         https_runner = web.AppRunner(_build_app(self._handle_eureka_info))
@@ -265,6 +269,16 @@ class EurekaServer:
             self._host,
             self._https_serving_port,
             self._http_serving_port,
+        )
+
+    def update_certificate(self, bundle: CertificateBundle) -> None:
+        """Hot-reload certificate material for future HTTPS handshakes."""
+        _load_cert_chain(self._ssl_context, bundle)
+        self._public_key_b64 = _device_public_key_b64(bundle)
+        log.info(
+            "eureka TLS certificate rotated (valid=%s -> %s)",
+            bundle.not_valid_before.isoformat(),
+            bundle.not_valid_after.isoformat(),
         )
 
     async def stop(self) -> None:
@@ -350,6 +364,13 @@ def _build_ssl_context(bundle: CertificateBundle) -> ssl.SSLContext:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
 
+    _load_cert_chain(ctx, bundle)
+    return ctx
+
+
+def _load_cert_chain(ctx: ssl.SSLContext, bundle: CertificateBundle) -> None:
+    """Load certificate chain from *bundle* into an existing SSL context."""
+
     cert_path: Path | None = None
     key_path: Path | None = None
     try:
@@ -367,8 +388,6 @@ def _build_ssl_context(bundle: CertificateBundle) -> ssl.SSLContext:
             cert_path.unlink(missing_ok=True)
         if key_path is not None:
             key_path.unlink(missing_ok=True)
-
-    return ctx
 
 
 def _resolve_serving_port(runner: web.AppRunner) -> int | None:

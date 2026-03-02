@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 from uuid import uuid4
 
-from vibecast._certificate import CertificateBundle
+from vibecast._certificate import CertificateStore
 from vibecast.receiver import CastReceiver, ReceiverConfig
 
 _DEFAULT_DATA_DIR = Path.home() / ".vibecast"
@@ -88,7 +88,7 @@ def _load_or_create_device_id(path: Path) -> str:
 
 
 async def _run(args: argparse.Namespace) -> None:
-    bundle = CertificateBundle.from_manifest(args.manifest)
+    certificates = CertificateStore.from_manifest(args.manifest)
     data_dir = args.data_dir
     device_id_path = data_dir / _DEVICE_ID_FILE_NAME
     device_id = args.device_id or _load_or_create_device_id(device_id_path)
@@ -100,7 +100,7 @@ async def _run(args: argparse.Namespace) -> None:
         player_port=args.player_port,
         data_dir=data_dir,
     )
-    receiver = CastReceiver(config=config, certificates=bundle)
+    receiver = CastReceiver(config=config, certificates=certificates)
     await receiver.run_forever()
 
 

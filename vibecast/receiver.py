@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 from uuid import uuid4
 
 from vibecast._auth import fetch_crl
+from vibecast._certificate import CertificateBundle, CertificateStore
 from vibecast._device import Device, DeviceIdentity
 from vibecast._discovery import CastAdvertisement
 from vibecast._eureka import EurekaIdentity, EurekaServer
@@ -20,7 +22,6 @@ from vibecast._server import CastServer
 from vibecast.provider import Provider, ProviderRegistry, discover_providers
 
 if TYPE_CHECKING:
-    from vibecast._certificate import CertificateBundle
     from vibecast._connection import Connection
     from vibecast._proto.cast_channel_pb2 import CastMessage
 
@@ -30,6 +31,7 @@ _CAST_PORT: Final[int] = 8009
 _EUREKA_HTTPS_PORT: Final[int] = 8443
 _EUREKA_HTTP_PORT: Final[int] = 8008
 _DISCOVERY_BASE_APP_IDS: Final[frozenset[str]] = frozenset({"CC1AD845", "0F5096E8"})
+_CERT_ROTATION_POLL_INTERVAL_SECONDS: Final[float] = 60.0
 
 
 @dataclass(slots=True)
@@ -49,6 +51,8 @@ class CastReceiver:
 
     __slots__ = (
         "_advertisement",
+        "_certificate_store",
+        "_cert_rotation_task",
         "_certificates",
         "_eureka_server",
         "_http",
@@ -64,14 +68,22 @@ class CastReceiver:
     def __init__(
         self,
         config: ReceiverConfig,
-        certificates: CertificateBundle,
+        certificates: CertificateStore | CertificateBundle,
         providers: list[Provider] | None = None,
     ) -> None:
         device_id = config.device_id or str(uuid4())
         config.device_id = device_id
 
+        certificate_store = (
+            certificates
+            if isinstance(certificates, CertificateStore)
+            else CertificateStore.from_bundle(certificates)
+        )
+        active_bundle = certificate_store.active_bundle
+
         self.config = config
-        self._certificates = certificates
+        self._certificate_store = certificate_store
+        self._certificates = active_bundle
         self._http = ReceiverHTTPClient(data_dir=config.data_dir)
         self.providers = ProviderRegistry(
             discover_providers() if providers is None else providers
@@ -93,7 +105,7 @@ class CastReceiver:
         )
 
         self._eureka_server = EurekaServer(
-            certificates,
+            active_bundle,
             EurekaIdentity(
                 friendly_name=config.friendly_name,
                 device_model=config.device_model,
@@ -115,13 +127,14 @@ class CastReceiver:
         )
 
         self._server = CastServer(
-            certificates,
+            active_bundle,
             host=config.bind_host,
             port=_CAST_PORT,
             on_message=self._on_message,
             on_disconnect=self._on_disconnect,
         )
         self._advertisement: CastAdvertisement | None = None
+        self._cert_rotation_task: asyncio.Task[None] | None = None
         self._started = False
         self._stop_event = asyncio.Event()
 
@@ -140,6 +153,12 @@ class CastReceiver:
 
         if self._http.client.is_closed:
             self._http = ReceiverHTTPClient(data_dir=self.config.data_dir)
+
+        rotated = self._certificate_store.rotate_if_needed()
+        if rotated is not None:
+            self._server.update_certificate(rotated)
+            self._eureka_server.update_certificate(rotated)
+            self._certificates = rotated
 
         crl = self._certificates.crl
         if crl is None:
@@ -200,6 +219,7 @@ class CastReceiver:
             raise
 
         self._advertisement = advertisement
+        self._cert_rotation_task = asyncio.create_task(self._run_certificate_rotation())
         self._started = True
         self._stop_event.clear()
         log.info(
@@ -217,11 +237,13 @@ class CastReceiver:
         Safe to call multiple times; subsequent calls are no-ops.
         """
         if not self._started:
+            await self._stop_certificate_rotation()
             await self._eureka_server.stop()
             await self._player_server.stop()
             await self._http.close()
             return
         self._stop_event.set()
+        await self._stop_certificate_rotation()
 
         for session_id in self.device.session_ids():
             _ = await self.device.stop_session(session_id)
@@ -257,6 +279,51 @@ class CastReceiver:
         # Sessions are only torn down by an explicit STOP request from a
         # sender or when the receiver shuts down.
         _ = self.device.remove_all_subscriptions(connection)
+
+    async def _run_certificate_rotation(self) -> None:
+        while True:
+            await asyncio.sleep(_CERT_ROTATION_POLL_INTERVAL_SECONDS)
+            try:
+                rotated = self._certificate_store.rotate_if_needed()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("certificate rotation failed")
+                continue
+
+            if rotated is None:
+                continue
+
+            try:
+                await self._apply_certificate_rotation(rotated)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("failed to apply rotated certificate")
+
+    async def _apply_certificate_rotation(self, bundle: CertificateBundle) -> None:
+        self._server.update_certificate(bundle)
+        self._eureka_server.update_certificate(bundle)
+
+        if self._advertisement is not None:
+            await self._advertisement.update_cert_digest(bundle.cert_digest_md5)
+
+        self._certificates = bundle
+        log.info(
+            "active certificate rotated (valid=%s -> %s)",
+            bundle.not_valid_before.isoformat(),
+            bundle.not_valid_after.isoformat(),
+        )
+
+    async def _stop_certificate_rotation(self) -> None:
+        task = self._cert_rotation_task
+        self._cert_rotation_task = None
+        if task is None:
+            return
+
+        _ = task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 def _format_provider_summary(providers: list[Provider]) -> str:

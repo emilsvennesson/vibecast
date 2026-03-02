@@ -119,6 +119,16 @@ class CastServer:
     def crl(self, value: bytes | None) -> None:
         self._crl = value
 
+    def update_certificate(self, bundle: CertificateBundle) -> None:
+        """Hot-reload certificate material for future TLS handshakes."""
+        _load_cert_chain(self._ssl_ctx, bundle)
+        self._bundle = bundle
+        log.info(
+            "cast TLS certificate rotated (valid=%s -> %s)",
+            bundle.not_valid_before.isoformat(),
+            bundle.not_valid_after.isoformat(),
+        )
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -211,6 +221,13 @@ def _build_ssl_context(bundle: CertificateBundle) -> ssl.SSLContext:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
 
+    _load_cert_chain(ctx, bundle)
+    return ctx
+
+
+def _load_cert_chain(ctx: ssl.SSLContext, bundle: CertificateBundle) -> None:
+    """Load certificate chain from *bundle* into an existing SSL context."""
+
     # ssl.SSLContext.load_cert_chain() requires file paths — there is no
     # in-memory API in the stdlib.  Write PEM bytes to temporary files.
     cert_path: Path | None = None
@@ -230,5 +247,3 @@ def _build_ssl_context(bundle: CertificateBundle) -> ssl.SSLContext:
             cert_path.unlink(missing_ok=True)
         if key_path is not None:
             key_path.unlink(missing_ok=True)
-
-    return ctx

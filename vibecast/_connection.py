@@ -14,7 +14,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 import vibecast._namespace as ns
-from vibecast._auth import build_auth_response
+from vibecast._auth import build_auth_error, build_auth_response
 from vibecast._framing import FramingError, read_message, write_message
 from vibecast._log import get_logger
 from vibecast._proto.cast_channel_pb2 import (
@@ -177,9 +177,11 @@ class Connection:
             log.warning("%s: failed to parse device auth challenge", self.peer)
             return
 
+        requested_hash_algorithm = HashAlgorithm.SHA1
         if challenge.HasField("challenge"):
             challenge_msg = challenge.challenge
             sender_nonce = challenge_msg.sender_nonce
+            requested_hash_algorithm = challenge_msg.hash_algorithm
             log.debug(
                 "%s: device auth challenge received (hash=%s sig=%s nonce_len=%d)",
                 self.peer,
@@ -195,16 +197,33 @@ class Connection:
                 "%s: device auth challenge received (no challenge field)", self.peer
             )
 
-        payload = build_auth_response(self._bundle, crl=self._crl)
+        is_error = False
+        try:
+            payload = build_auth_response(
+                self._bundle,
+                hash_algorithm=requested_hash_algorithm,
+                crl=self._crl,
+            )
+        except ValueError:
+            is_error = True
+            payload = build_auth_error()
+
         await self.send_binary(
             source_id=msg.destination_id,
             dest_id=msg.source_id,
             namespace=ns.DEVICE_AUTH,
             data=payload,
         )
+
         response = DeviceAuthMessage()
         _ = response.ParseFromString(payload)
-        if response.HasField("response"):
+        if is_error and response.HasField("error"):
+            log.debug(
+                "%s: device auth error sent (error=%s)",
+                self.peer,
+                response.error.error_type,
+            )
+        elif response.HasField("response"):
             response_msg = response.response
             log.debug(
                 "%s: device auth response sent (hash=%s sig=%s ica=%d crl_len=%d nonce_len=%d)",

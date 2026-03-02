@@ -284,6 +284,53 @@ class TestCallbacks:
         await writer.wait_closed()
         await server.stop()
 
+    async def test_update_certificate_used_for_new_connections(
+        self,
+        bundle: CertificateBundle,
+        ssl_client_context: ssl.SSLContext,
+    ) -> None:
+        server = CastServer(bundle, host="127.0.0.1", port=0)
+        await server.start()
+        port = _get_port(server)
+
+        rotated_bundle = type(bundle)(
+            peer_cert_pem=bundle.peer_cert_pem,
+            peer_key_pem=bundle.peer_key_pem,
+            device_cert_der=bundle.device_cert_der,
+            intermediate_certs_der=bundle.intermediate_certs_der,
+            signature_sha1=b"rotated-sha1",
+            signature_sha256=b"rotated-sha256",
+            peer_cert_der=bundle.peer_cert_der,
+            not_valid_before=bundle.not_valid_before,
+            not_valid_after=bundle.not_valid_after,
+            crl=bundle.crl,
+        )
+        server.update_certificate(rotated_bundle)
+
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1",
+            port,
+            ssl=ssl_client_context,
+        )
+        challenge = DeviceAuthMessage(challenge=AuthChallenge())
+        msg = make_cast_message(
+            source="sender-0",
+            destination="receiver-0",
+            namespace=ns.DEVICE_AUTH,
+            payload_binary=challenge.SerializeToString(),
+        )
+        writer.write(_frame(msg))
+        await writer.drain()
+
+        resp = await _read_framed(reader)
+        auth_msg = DeviceAuthMessage()
+        _ = auth_msg.ParseFromString(resp.payload_binary)
+        assert auth_msg.response.signature == b"rotated-sha1"
+
+        writer.close()
+        await writer.wait_closed()
+        await server.stop()
+
     async def test_on_message_receives_forwarded(
         self,
         bundle: CertificateBundle,
