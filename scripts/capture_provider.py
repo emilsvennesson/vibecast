@@ -448,6 +448,18 @@ class ProxySession:
             requested_sig = challenge.challenge.signature_algorithm
 
         if requested_sig != SignatureAlgorithm.RSASSA_PKCS1v15:
+            sig_name = _enum_name(SignatureAlgorithm, requested_sig)
+            print(
+                "  [conn "
+                f"{self._id}] unsupported device auth signature algorithm: {sig_name}; "
+                "sending auth error"
+            )
+            self._log.meta(
+                "device_auth_error",
+                connection_id=self._id,
+                reason="unsupported_signature_algorithm",
+                signature_algorithm=sig_name,
+            )
             payload = build_auth_error()
         else:
             try:
@@ -457,6 +469,18 @@ class ProxySession:
                     crl=self._crl,
                 )
             except ValueError:
+                hash_name = _enum_name(HashAlgorithm, requested_hash)
+                print(
+                    "  [conn "
+                    f"{self._id}] unsupported device auth hash algorithm: {hash_name}; "
+                    "sending auth error"
+                )
+                self._log.meta(
+                    "device_auth_error",
+                    connection_id=self._id,
+                    reason="unsupported_hash_algorithm",
+                    hash_algorithm=hash_name,
+                )
                 payload = build_auth_error()
 
         resp_msg = CastMessage()

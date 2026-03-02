@@ -202,6 +202,11 @@ class Connection:
         is_error = False
         if requested_sig_algorithm != SignatureAlgorithm.RSASSA_PKCS1v15:
             is_error = True
+            log.warning(
+                "%s: unsupported device auth signature algorithm requested (sig=%s)",
+                self.peer,
+                _enum_name(SignatureAlgorithm, requested_sig_algorithm),
+            )
             payload = build_auth_error()
         else:
             try:
@@ -212,6 +217,11 @@ class Connection:
                 )
             except ValueError:
                 is_error = True
+                log.warning(
+                    "%s: unsupported device auth hash algorithm requested (hash=%s)",
+                    self.peer,
+                    _enum_name(HashAlgorithm, requested_hash_algorithm),
+                )
                 payload = build_auth_error()
 
         await self.send_binary(
