@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import struct
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, override
 
 import pytest
 
 from tests.conftest import make_cast_message
 from vibecast import _namespace as ns
+from vibecast._config import DeviceConfig, NetworkConfig, VibecastConfig
 from vibecast._models import LoadRequest, StreamType
 from vibecast._proto.cast_channel_pb2 import (
     AuthChallenge,
@@ -19,7 +21,7 @@ from vibecast._proto.cast_channel_pb2 import (
 )
 from vibecast.player import PlaybackMedia, PlaybackStream
 from vibecast.provider import LaunchCredentials, Provider, ProviderSession
-from vibecast.receiver import CastReceiver, ReceiverConfig
+from vibecast.receiver import CastReceiver
 
 if TYPE_CHECKING:
     from ssl import SSLContext
@@ -99,6 +101,7 @@ class DummyProvider(Provider):
     def __init__(self) -> None:
         self.launch_calls: list[LaunchCredentials] = []
         self.custom_messages: list[tuple[str, dict[str, Any]]] = []
+        self.configure_calls: list[dict[str, Any]] = []
         self.stop_calls = 0
 
     @override
@@ -112,6 +115,14 @@ class DummyProvider(Provider):
     @override
     def namespaces(self) -> frozenset[str]:
         return frozenset({"urn:x-cast:com.example.dummy"})
+
+    @override
+    def provider_key(self) -> str:
+        return "dummy"
+
+    @override
+    def configure(self, config: dict[str, Any]) -> None:
+        self.configure_calls.append(config)
 
     @override
     async def on_launch(
@@ -168,15 +179,31 @@ def _patch_runtime(monkeypatch: Any, *, crl: bytes = b"test-crl") -> None:
     monkeypatch.setattr("vibecast.receiver.fetch_crl", fake_fetch_crl)
 
 
+def _receiver_config(
+    *,
+    friendly_name: str = "Living Room",
+    bind_host: str = "0.0.0.0",
+    player_port: int = 8010,
+) -> VibecastConfig:
+    return VibecastConfig(
+        device=replace(DeviceConfig(), friendly_name=friendly_name),
+        network=replace(
+            NetworkConfig(),
+            bind_host=bind_host,
+            player_port=player_port,
+        ),
+    )
+
+
 class TestReceiverConfig:
     def test_defaults(self, bundle: CertificateBundle) -> None:
-        config = ReceiverConfig(friendly_name="Living Room")
+        config = _receiver_config()
         receiver = CastReceiver(config=config, certificates=bundle, providers=[])
 
-        assert config.device_model == "Chromecast"
-        assert config.bind_host == "0.0.0.0"
-        assert config.player_port == 8010
-        assert receiver.config.device_id is not None
+        assert config.device.model == "Chromecast"
+        assert config.network.bind_host == "0.0.0.0"
+        assert config.network.player_port == 8010
+        assert receiver.device.config.device_id is not None
 
 
 class TestConstruction:
@@ -193,12 +220,27 @@ class TestConstruction:
         provider = DummyProvider()
 
         receiver = CastReceiver(
-            config=ReceiverConfig(friendly_name="Living Room"),
+            config=_receiver_config(),
             certificates=bundle,
             providers=[provider],
         )
 
         assert receiver.providers.get("DUMMYAPP") is provider
+        assert provider.configure_calls == [{}]
+
+    def test_provider_receives_config_section(self, bundle: CertificateBundle) -> None:
+        provider = DummyProvider()
+        receiver = CastReceiver(
+            config=replace(
+                _receiver_config(),
+                providers={"dummy": {"country": "se"}},
+            ),
+            certificates=bundle,
+            providers=[provider],
+        )
+
+        assert receiver.providers.get("DUMMYAPP") is provider
+        assert provider.configure_calls == [{"country": "se"}]
 
 
 class TestIntegration:
@@ -210,11 +252,7 @@ class TestIntegration:
     ) -> None:
         _patch_runtime(monkeypatch, crl=b"\xaa\xbb")
         receiver = CastReceiver(
-            config=ReceiverConfig(
-                friendly_name="Living Room",
-                bind_host="127.0.0.1",
-                player_port=0,
-            ),
+            config=_receiver_config(bind_host="127.0.0.1", player_port=0),
             certificates=bundle,
             providers=[],
         )
@@ -274,11 +312,7 @@ class TestIntegration:
     ) -> None:
         _patch_runtime(monkeypatch)
         receiver = CastReceiver(
-            config=ReceiverConfig(
-                friendly_name="Living Room",
-                bind_host="127.0.0.1",
-                player_port=0,
-            ),
+            config=_receiver_config(bind_host="127.0.0.1", player_port=0),
             certificates=bundle,
             providers=[],
         )
@@ -304,11 +338,7 @@ class TestIntegration:
         _patch_runtime(monkeypatch)
         provider = DummyProvider()
         receiver = CastReceiver(
-            config=ReceiverConfig(
-                friendly_name="Living Room",
-                bind_host="127.0.0.1",
-                player_port=0,
-            ),
+            config=_receiver_config(bind_host="127.0.0.1", player_port=0),
             certificates=bundle,
             providers=[provider],
         )
@@ -407,11 +437,7 @@ class TestStartupLogging:
     ) -> None:
         _patch_runtime(monkeypatch)
         receiver = CastReceiver(
-            config=ReceiverConfig(
-                friendly_name="Living Room",
-                bind_host="127.0.0.1",
-                player_port=0,
-            ),
+            config=_receiver_config(bind_host="127.0.0.1", player_port=0),
             certificates=bundle,
             providers=[DummyProvider()],
         )

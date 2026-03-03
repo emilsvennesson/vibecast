@@ -44,6 +44,10 @@ class SvtPlayProvider(Provider):
         return "https://lh3.googleusercontent.com/K3wumlt002dZrHoe4uKKdW-zMRLXdiPdgT1SRP90dnmMvLqsR-zaA3v-360EEIWLL5-SzJVt65XfqlgENw"
 
     @override
+    def provider_key(self) -> str:
+        return "svtplay"
+
+    @override
     def namespaces(self) -> frozenset[str]:
         return self._NAMESPACES
 
@@ -55,7 +59,11 @@ class SvtPlayProvider(Provider):
     ) -> None:
         _ = credentials
         self._sessions[session.session_id] = _SessionState(
-            api=SvtPlayAPI(client=session.http_client)
+            api=SvtPlayAPI(
+                client=session.http_client,
+                user_agent=session.receiver.user_agent,
+                cast_capabilities=session.receiver.cast_device_capabilities,
+            )
         )
 
     @override

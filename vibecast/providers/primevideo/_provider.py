@@ -41,6 +41,13 @@ log = get_logger("primevideo")
 _NS_PRIME = "urn:x-cast:com.amazon.primevideo.cast"
 _DEFAULT_MARKETPLACE_ID = "A3K6Y4MI8GDYMT"
 _DEFAULT_LOCALE = "en_US"
+_DEFAULT_AUTH_BASE_URL = "https://api.amazon.co.uk"
+_DEFAULT_HDCP_LEVEL = "1.4"
+_DEFAULT_MAX_VIDEO_RESOLUTION = "1080p"
+_DEFAULT_SUPPORTED_CODECS = ("H265", "H264")
+_DEFAULT_DYNAMIC_RANGE_FORMATS = ("None",)
+_DEFAULT_SUPPORTED_FRAME_RATES = ("Standard", "High")
+_DEFAULT_SUPPORTED_SUBTITLE_FORMATS = ("TTMLv2", "DFXP")
 
 
 @dataclass(slots=True)
@@ -71,6 +78,15 @@ class PrimeVideoProvider(Provider):
 
     def __init__(self) -> None:
         self._sessions: dict[str, _PrimeSessionState] = {}
+        self._default_marketplace_id = _DEFAULT_MARKETPLACE_ID
+        self._default_locale = _DEFAULT_LOCALE
+        self._auth_base_url = _DEFAULT_AUTH_BASE_URL
+        self._hdcp_level = _DEFAULT_HDCP_LEVEL
+        self._max_video_resolution = _DEFAULT_MAX_VIDEO_RESOLUTION
+        self._supported_codecs = _DEFAULT_SUPPORTED_CODECS
+        self._dynamic_range_formats = _DEFAULT_DYNAMIC_RANGE_FORMATS
+        self._supported_frame_rates = _DEFAULT_SUPPORTED_FRAME_RATES
+        self._supported_subtitle_formats = _DEFAULT_SUPPORTED_SUBTITLE_FORMATS
 
     @override
     def app_ids(self) -> frozenset[str]:
@@ -89,12 +105,98 @@ class PrimeVideoProvider(Provider):
         return self._NAMESPACES
 
     @override
+    def provider_key(self) -> str:
+        return "primevideo"
+
+    @override
+    def configure(self, config: dict[str, Any]) -> None:
+        self._default_marketplace_id = _config_string(
+            config,
+            key="marketplace_id",
+            default=self._default_marketplace_id,
+            path="providers.primevideo",
+        )
+        self._default_locale = _config_string(
+            config,
+            key="locale",
+            default=self._default_locale,
+            path="providers.primevideo",
+        )
+        self._auth_base_url = _config_string(
+            config,
+            key="auth_base_url",
+            default=self._auth_base_url,
+            path="providers.primevideo",
+        )
+        self._hdcp_level = _config_string(
+            config,
+            key="hdcp_level",
+            default=self._hdcp_level,
+            path="providers.primevideo",
+        )
+        self._max_video_resolution = _config_string(
+            config,
+            key="max_video_resolution",
+            default=self._max_video_resolution,
+            path="providers.primevideo",
+        )
+        self._supported_codecs = tuple(
+            _config_string_list(
+                config,
+                key="supported_codecs",
+                default=self._supported_codecs,
+                path="providers.primevideo",
+            )
+        )
+        self._dynamic_range_formats = tuple(
+            _config_string_list(
+                config,
+                key="dynamic_range_formats",
+                default=self._dynamic_range_formats,
+                path="providers.primevideo",
+            )
+        )
+        self._supported_frame_rates = tuple(
+            _config_string_list(
+                config,
+                key="supported_frame_rates",
+                default=self._supported_frame_rates,
+                path="providers.primevideo",
+            )
+        )
+        self._supported_subtitle_formats = tuple(
+            _config_string_list(
+                config,
+                key="supported_subtitle_formats",
+                default=self._supported_subtitle_formats,
+                path="providers.primevideo",
+            )
+        )
+
+    @override
     async def on_launch(
         self,
         session: ProviderSession,
         credentials: LaunchCredentials,
     ) -> None:
-        state = _PrimeSessionState(api=PrimeVideoAPI(client=session.http_client))
+        state = _PrimeSessionState(
+            api=PrimeVideoAPI(
+                client=session.http_client,
+                user_agent=session.receiver.user_agent,
+                cast_capabilities=session.receiver.cast_device_capabilities,
+                auth_base_url=self._auth_base_url,
+                display_width=session.receiver.display_width,
+                display_height=session.receiver.display_height,
+                hdcp_level=self._hdcp_level,
+                max_video_resolution=self._max_video_resolution,
+                supported_codecs=self._supported_codecs,
+                dynamic_range_formats=self._dynamic_range_formats,
+                supported_frame_rates=self._supported_frame_rates,
+                supported_subtitle_formats=self._supported_subtitle_formats,
+            ),
+            marketplace_id=self._default_marketplace_id,
+            locale=self._default_locale,
+        )
         state.device_id = session.receiver.device_id
         if credentials.credentials:
             state.actor_access_token = credentials.credentials
@@ -426,6 +528,44 @@ class PrimeVideoProvider(Provider):
             if isinstance(raw, str) and raw:
                 return raw
         return state.marketplace_id
+
+
+def _config_string(
+    config: dict[str, Any],
+    *,
+    key: str,
+    default: str,
+    path: str,
+) -> str:
+    value = config.get(key, default)
+    if isinstance(value, str):
+        return value
+    msg = f"{path}.{key} must be a string"
+    raise TypeError(msg)
+
+
+def _config_string_list(
+    config: dict[str, Any],
+    *,
+    key: str,
+    default: tuple[str, ...],
+    path: str,
+) -> list[str]:
+    value = config.get(key)
+    if value is None:
+        return list(default)
+    if not isinstance(value, list | tuple):
+        msg = f"{path}.{key} must be an array of strings"
+        raise TypeError(msg)
+
+    parsed: list[str] = []
+    items = cast("list[object] | tuple[object, ...]", value)
+    for index, item in enumerate(items):
+        if not isinstance(item, str):
+            msg = f"{path}.{key}[{index}] must be a string"
+            raise TypeError(msg)
+        parsed.append(item)
+    return parsed
 
 
 def _extract_locale(settings: dict[str, Any] | None) -> str | None:

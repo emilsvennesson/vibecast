@@ -26,28 +26,14 @@ if TYPE_CHECKING:
 
 log = get_logger("primevideo.api")
 
-_USER_AGENT = (
-    "Mozilla/5.0 (Linux; Android 11.0; Build/RQ1A.210105.003) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.0 "
-    "Safari/537.36 CrKey/1.56.500000 DeviceType/AndroidTV"
-)
 _ORIGIN = "https://cloudfront.xp-assets.aiv-cdn.net"
 _REFERER = "https://cloudfront.xp-assets.aiv-cdn.net/"
-_CAST_DEVICE_CAPABILITIES = (
-    '{"display_supported":true,'
-    '"hi_res_audio_supported":false,'
-    '"remote_control_input_supported":true,'
-    '"touch_input_supported":false}'
-)
-
-_AUTH_BASE_URL = "https://api.amazon.co.uk"
 _PLAYBACK_BASE_URL = "https://aby4wfamebrp.api.amazonvideo.com"
 _PLAYBACK_ZAZ_BASE_URL = "https://aby4wfamebrp.zaz.api.amazonvideo.com"
 
 _API_DEVICE_TYPE_ID = "A2Y2Z7THWOTN8I"
 _API_FIRMWARE_VERSION = "1"
 _API_VERSION = "1"
-_DEFAULT_LOCALE = "en_US"
 
 
 @dataclass(slots=True, frozen=True)
@@ -70,10 +56,49 @@ class PrimeEnvelopeData:
 class PrimeVideoAPI:
     """Prime API helper for auth, stream resolution, and DRM licensing."""
 
-    __slots__ = ("_client",)
+    __slots__ = (
+        "_auth_base_url",
+        "_cast_capabilities",
+        "_client",
+        "_display_height",
+        "_display_width",
+        "_dynamic_range_formats",
+        "_hdcp_level",
+        "_max_video_resolution",
+        "_supported_codecs",
+        "_supported_frame_rates",
+        "_supported_subtitle_formats",
+        "_user_agent",
+    )
 
-    def __init__(self, *, client: AsyncClient) -> None:
+    def __init__(
+        self,
+        *,
+        client: AsyncClient,
+        user_agent: str,
+        cast_capabilities: str,
+        auth_base_url: str,
+        display_width: int,
+        display_height: int,
+        hdcp_level: str,
+        max_video_resolution: str,
+        supported_codecs: tuple[str, ...],
+        dynamic_range_formats: tuple[str, ...],
+        supported_frame_rates: tuple[str, ...],
+        supported_subtitle_formats: tuple[str, ...],
+    ) -> None:
         self._client = client
+        self._user_agent = user_agent
+        self._cast_capabilities = cast_capabilities
+        self._auth_base_url = auth_base_url
+        self._display_width = display_width
+        self._display_height = display_height
+        self._hdcp_level = hdcp_level
+        self._max_video_resolution = max_video_resolution
+        self._supported_codecs = supported_codecs
+        self._dynamic_range_formats = dynamic_range_formats
+        self._supported_frame_rates = supported_frame_rates
+        self._supported_subtitle_formats = supported_subtitle_formats
 
     @property
     def api_device_type_id(self) -> str:
@@ -86,7 +111,7 @@ class PrimeVideoAPI:
         device_id: str,
         marketplace_id: str,
         title_id: str,
-        locale: str = _DEFAULT_LOCALE,
+        locale: str,
     ) -> str:
         """Build Prime Widevine license endpoint URL for one title."""
         query = {
@@ -112,7 +137,7 @@ class PrimeVideoAPI:
         device_id: str,
     ) -> PrimeAuthTokens:
         """Run Prime's register + actor-token flow using link code."""
-        register_url = f"{_AUTH_BASE_URL}/auth/register"
+        register_url = f"{self._auth_base_url}/auth/register"
         register_payload = {
             "registration_data": {
                 "device_serial": device_id,
@@ -159,7 +184,7 @@ class PrimeVideoAPI:
         account_refresh_token: str,
     ) -> PrimeAuthTokens:
         """Exchange account refresh token for actor access token."""
-        token_url = f"{_AUTH_BASE_URL}/auth/token"
+        token_url = f"{self._auth_base_url}/auth/token"
         token_payload = {
             "actor_id": actor_id,
             "app_name": "Prime Video",
@@ -251,7 +276,7 @@ class PrimeVideoAPI:
         marketplace_id: str,
         title_id: str,
         playback_envelope: str,
-        locale: str = _DEFAULT_LOCALE,
+        locale: str,
     ) -> VodPlaybackResourcesResponse:
         """Resolve Prime title ID to playback URL sets + sessionization data."""
         query = {
@@ -269,7 +294,18 @@ class PrimeVideoAPI:
             "/playback/prs/GetVodPlaybackResources",
             query,
         )
-        payload = _build_vod_playback_request(title_id, playback_envelope)
+        payload = _build_vod_playback_request(
+            title_id=title_id,
+            playback_envelope=playback_envelope,
+            display_width=self._display_width,
+            display_height=self._display_height,
+            hdcp_level=self._hdcp_level,
+            max_video_resolution=self._max_video_resolution,
+            supported_codecs=self._supported_codecs,
+            dynamic_range_formats=self._dynamic_range_formats,
+            supported_frame_rates=self._supported_frame_rates,
+            supported_subtitle_formats=self._supported_subtitle_formats,
+        )
         response = await self._post_json(
             url,
             payload,
@@ -288,7 +324,7 @@ class PrimeVideoAPI:
         playback_envelope: str,
         session_handoff_token: str | None,
         challenge: bytes,
-        locale: str = _DEFAULT_LOCALE,
+        locale: str,
     ) -> bytes:
         """Resolve one Widevine challenge to a license blob."""
         url = self.widevine_license_url(
@@ -375,12 +411,12 @@ class PrimeVideoAPI:
         content_type: str,
     ) -> dict[str, str]:
         headers = {
-            "User-Agent": _USER_AGENT,
+            "User-Agent": self._user_agent,
             "Accept": "*/*",
             "Accept-Language": "en-US",
             "Origin": _ORIGIN,
             "Referer": _REFERER,
-            "CAST-DEVICE-CAPABILITIES": _CAST_DEVICE_CAPABILITIES,
+            "CAST-DEVICE-CAPABILITIES": self._cast_capabilities,
             "Content-Type": content_type,
         }
         if token:
@@ -404,8 +440,17 @@ class PrimeVideoAPI:
 
 
 def _build_vod_playback_request(
+    *,
     title_id: str,
     playback_envelope: str,
+    display_width: int,
+    display_height: int,
+    hdcp_level: str,
+    max_video_resolution: str,
+    supported_codecs: tuple[str, ...],
+    dynamic_range_formats: tuple[str, ...],
+    supported_frame_rates: tuple[str, ...],
+    supported_subtitle_formats: tuple[str, ...],
 ) -> dict[str, Any]:
     return {
         "globalParameters": {
@@ -421,33 +466,38 @@ def _build_vod_playback_request(
                 },
                 "firmware": {"name": "UNKNOWN", "version": "1.56.500000"},
                 "hfrControlMode": "Legacy",
-                "displayResolution": {"height": 1080, "width": 1920},
+                "displayResolution": {
+                    "height": display_height,
+                    "width": display_width,
+                },
             },
         },
         "auditPingsRequest": {},
         "widevineServiceCertificateRequest": {},
         "playbackDataRequest": {},
-        "timedTextUrlsRequest": {"supportedTimedTextFormats": ["TTMLv2", "DFXP"]},
+        "timedTextUrlsRequest": {
+            "supportedTimedTextFormats": list(supported_subtitle_formats)
+        },
         "trickplayUrlsRequest": {},
         "transitionTimecodesRequest": {},
         "vodPlaybackUrlsRequest": {
             "device": {
-                "hdcpLevel": "1.4",
-                "maxVideoResolution": "1080p",
+                "hdcpLevel": hdcp_level,
+                "maxVideoResolution": max_video_resolution,
                 "supportedStreamingTechnologies": ["DASH"],
                 "streamingTechnologies": {
                     "DASH": {
                         "bitrateAdaptations": ["CBR", "CVBR"],
-                        "codecs": ["H265", "H264"],
+                        "codecs": list(supported_codecs),
                         "drmKeyScheme": "DualKey",
                         "drmType": "Widevine",
-                        "dynamicRangeFormats": ["None"],
+                        "dynamicRangeFormats": list(dynamic_range_formats),
                         "edgeDeliveryAuthorizationSchemes": [
                             "PVExchangeV1",
                             "Transparent",
                         ],
                         "fragmentRepresentations": ["ByteOffsetRange", "SeparateFile"],
-                        "frameRates": ["Standard", "High"],
+                        "frameRates": list(supported_frame_rates),
                         "stitchType": "MultiPeriod",
                         "segmentInfoType": "Base",
                         "timedTextRepresentations": [
@@ -458,8 +508,8 @@ def _build_vod_playback_request(
                         "variableAspectRatio": "unsupported",
                     }
                 },
-                "displayWidth": 1920,
-                "displayHeight": 1080,
+                "displayWidth": display_width,
+                "displayHeight": display_height,
             },
             "ads": {
                 "sitePageUrl": (

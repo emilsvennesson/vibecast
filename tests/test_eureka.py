@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from vibecast._config import EurekaDeviceCapabilitiesConfig
 from vibecast._eureka import EurekaIdentity, EurekaServer
 
 if TYPE_CHECKING:
@@ -81,5 +82,50 @@ class TestEurekaServer:
             )
             assert payload["device_info"]["capabilities"]["display_supported"] is True
             assert payload["multizone"]["max_static_groups"] == 100
+        finally:
+            await server.stop()
+
+    async def test_identity_fields_override_defaults(
+        self,
+        bundle: CertificateBundle,
+    ) -> None:
+        server = EurekaServer(
+            bundle,
+            EurekaIdentity(
+                friendly_name="Bedroom",
+                device_model="Chromecast Ultra",
+                ssdp_udn="f0f2dd5f-c123-4b85-8529-e821291ec31a",
+                manufacturer="Acme Devices",
+                locale="sv-SE",
+                country_code="SE",
+                build_version="999999",
+                build_revision="9.9.999999",
+                capabilities=EurekaDeviceCapabilitiesConfig(display_supported=False),
+            ),
+            host="127.0.0.1",
+            https_port=0,
+            http_port=0,
+        )
+
+        await server.start(certificates=bundle)
+        try:
+            assert server.http_serving_port is not None
+
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(
+                    f"http://127.0.0.1:{server.http_serving_port}/setup/eureka_info",
+                    params={
+                        "params": "build_version,cast_build_revision,locale,location,device_info"
+                    },
+                )
+            _ = response.raise_for_status()
+            payload = response.json()
+
+            assert payload["build_version"] == "999999"
+            assert payload["cast_build_revision"] == "9.9.999999"
+            assert payload["locale"] == "sv-SE"
+            assert payload["location"]["country_code"] == "SE"
+            assert payload["device_info"]["manufacturer"] == "Acme Devices"
+            assert payload["device_info"]["capabilities"]["display_supported"] is False
         finally:
             await server.stop()

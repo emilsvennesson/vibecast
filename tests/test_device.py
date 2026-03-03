@@ -262,6 +262,10 @@ class TestSessionLifecycle:
         assert session.receiver.device_id == "device-1234"
         assert session.receiver.data_dir == Path("/tmp/vibecast-tests/providers/fake")
         assert session.receiver.data_dir.exists()
+        assert "CrKey/1.56.500000" in session.receiver.user_agent
+        assert "display_supported" in session.receiver.cast_device_capabilities
+        assert session.receiver.display_width == 1920
+        assert session.receiver.display_height == 1080
 
     async def test_start_and_stop_session(self) -> None:
         device = _build_device()

@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 from uuid import uuid4
 
 from vibecast._auth import fetch_crl
 from vibecast._certificate import CertificateBundle, CertificateStore
+from vibecast._config import VibecastConfig, cast_device_capabilities_header
 from vibecast._device import Device, DeviceIdentity
 from vibecast._discovery import CastAdvertisement
 from vibecast._eureka import EurekaIdentity, EurekaServer
@@ -31,19 +31,7 @@ _CAST_PORT: Final[int] = 8009
 _EUREKA_HTTPS_PORT: Final[int] = 8443
 _EUREKA_HTTP_PORT: Final[int] = 8008
 _DISCOVERY_BASE_APP_IDS: Final[frozenset[str]] = frozenset({"CC1AD845", "0F5096E8"})
-_CERT_ROTATION_POLL_INTERVAL_SECONDS: Final[float] = 60.0
-
-
-@dataclass(slots=True)
-class ReceiverConfig:
-    """Public configuration for ``CastReceiver``."""
-
-    friendly_name: str
-    device_model: str = "Chromecast"
-    device_id: str | None = None
-    bind_host: str = "0.0.0.0"
-    player_port: int = 8010
-    data_dir: Path = field(default_factory=lambda: Path.home() / ".vibecast")
+_DEFAULT_DATA_DIR: Final[Path] = Path.home() / ".vibecast"
 
 
 class CastReceiver:
@@ -54,6 +42,8 @@ class CastReceiver:
         "_certificate_store",
         "_cert_rotation_task",
         "_certificates",
+        "_data_dir",
+        "_device_id",
         "_eureka_server",
         "_http",
         "_player_server",
@@ -67,12 +57,14 @@ class CastReceiver:
 
     def __init__(
         self,
-        config: ReceiverConfig,
+        config: VibecastConfig,
         certificates: CertificateStore | CertificateBundle,
         providers: list[Provider] | None = None,
+        *,
+        device_id: str | None = None,
+        data_dir: Path = _DEFAULT_DATA_DIR,
     ) -> None:
-        device_id = config.device_id or str(uuid4())
-        config.device_id = device_id
+        resolved_device_id = device_id or str(uuid4())
 
         certificate_store = (
             certificates
@@ -80,38 +72,62 @@ class CastReceiver:
             else CertificateStore.from_bundle(certificates)
         )
         active_bundle = certificate_store.active_bundle
+        cast_capabilities = cast_device_capabilities_header(
+            config.cast.device_capabilities
+        )
 
         self.config = config
+        self._data_dir = data_dir
+        self._device_id = resolved_device_id
         self._certificate_store = certificate_store
         self._certificates = active_bundle
-        self._http = ReceiverHTTPClient(data_dir=config.data_dir)
-        self.providers = ProviderRegistry(
-            discover_providers() if providers is None else providers
+        self._http = ReceiverHTTPClient(
+            data_dir=data_dir,
+            timeout_seconds=config.network.http_timeout,
         )
+
+        provider_instances = discover_providers() if providers is None else providers
+        for provider in provider_instances:
+            provider_config = config.providers.get(provider.provider_key(), {})
+            provider.configure(provider_config)
+        self.providers = ProviderRegistry(provider_instances)
 
         self.device = Device(
             DeviceIdentity(
-                friendly_name=config.friendly_name,
-                device_model=config.device_model,
-                device_id=device_id,
+                friendly_name=config.device.friendly_name,
+                device_model=config.device.model,
+                device_id=resolved_device_id,
             ),
             get_http_client=lambda: self._http.client,
-            data_dir=config.data_dir,
+            data_dir=data_dir,
+            volume_level=config.volume.level,
+            volume_muted=config.volume.muted,
+            volume_step_interval=config.volume.step_interval,
+            receiver_user_agent=config.cast.user_agent,
+            receiver_cast_device_capabilities=cast_capabilities,
+            receiver_display_width=config.device.display_width,
+            receiver_display_height=config.device.display_height,
         )
 
         self._player_server = PlayerServer(
-            host=config.bind_host,
-            port=config.player_port,
+            host=config.network.bind_host,
+            port=config.network.player_port,
         )
 
         self._eureka_server = EurekaServer(
             active_bundle,
             EurekaIdentity(
-                friendly_name=config.friendly_name,
-                device_model=config.device_model,
-                ssdp_udn=device_id,
+                friendly_name=config.device.friendly_name,
+                device_model=config.device.model,
+                ssdp_udn=resolved_device_id,
+                manufacturer=config.device.manufacturer,
+                locale=config.device.locale,
+                country_code=config.device.country_code,
+                build_version=config.cast.build_version,
+                build_revision=config.cast.build_revision,
+                capabilities=config.device.capabilities,
             ),
-            host=config.bind_host,
+            host=config.network.bind_host,
             https_port=_EUREKA_HTTPS_PORT,
             http_port=_EUREKA_HTTP_PORT,
         )
@@ -128,7 +144,7 @@ class CastReceiver:
 
         self._server = CastServer(
             active_bundle,
-            host=config.bind_host,
+            host=config.network.bind_host,
             port=_CAST_PORT,
             on_message=self._on_message,
             on_disconnect=self._on_disconnect,
@@ -152,7 +168,10 @@ class CastReceiver:
         log.info("enabled providers: %s", _format_provider_summary(enabled_providers))
 
         if self._http.client.is_closed:
-            self._http = ReceiverHTTPClient(data_dir=self.config.data_dir)
+            self._http = ReceiverHTTPClient(
+                data_dir=self._data_dir,
+                timeout_seconds=self.config.network.http_timeout,
+            )
 
         rotated = self._certificate_store.rotate_if_needed()
         if rotated is not None:
@@ -194,17 +213,11 @@ class CastReceiver:
             msg = "server did not expose serving port"
             raise RuntimeError(msg)
 
-        device_id = self.config.device_id
-        if device_id is None:
-            await self._eureka_server.stop()
-            await self._player_server.stop()
-            await self._server.stop()
-            msg = "receiver device_id is not initialized"
-            raise RuntimeError(msg)
+        device_id = self._device_id
 
         advertisement = CastAdvertisement(
-            friendly_name=self.config.friendly_name,
-            device_model=self.config.device_model,
+            friendly_name=self.config.device.friendly_name,
+            device_model=self.config.device.model,
             device_id=device_id,
             port=port,
             cert_digest=self._certificates.cert_digest_md5,
@@ -224,8 +237,8 @@ class CastReceiver:
         self._stop_event.clear()
         log.info(
             "cast receiver started (name=%s, host=%s, port=%d, service=%s, addresses=%s)",
-            self.config.friendly_name,
-            self.config.bind_host,
+            self.config.device.friendly_name,
+            self.config.network.bind_host,
             port,
             advertisement.service_name,
             ",".join(advertisement.parsed_addresses),
@@ -282,7 +295,7 @@ class CastReceiver:
 
     async def _run_certificate_rotation(self) -> None:
         while True:
-            await asyncio.sleep(_CERT_ROTATION_POLL_INTERVAL_SECONDS)
+            await asyncio.sleep(self.config.network.cert_rotation_poll)
             try:
                 rotated = self._certificate_store.rotate_if_needed()
             except asyncio.CancelledError:
@@ -344,4 +357,4 @@ def _collect_discovery_app_ids(providers: list[Provider]) -> frozenset[str]:
     return frozenset(app_ids)
 
 
-__all__ = ["CastReceiver", "ReceiverConfig"]
+__all__ = ["CastReceiver"]

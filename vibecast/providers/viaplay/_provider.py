@@ -62,9 +62,9 @@ class _ViaplayState:
     user_id: str = ""
     profile_id: str = ""
     user_display_name: str = ""
-    country_code: str = "se"
+    country_code: str = ""
     receiver_name: str = ""
-    receiver_language_code: str = "en"
+    receiver_language_code: str = ""
 
     current_product_url: str | None = None
     loading_product_url: str | None = None
@@ -114,6 +114,8 @@ class ViaplayProvider(Provider):
         api = ViaplayAPI(
             client=session.http_client,
             device_id=session.receiver.device_id,
+            user_agent=session.receiver.user_agent,
+            cast_capabilities=session.receiver.cast_device_capabilities,
         )
         self._sessions[session.session_id] = _ViaplayState(
             api=api,
@@ -327,7 +329,7 @@ class ViaplayProvider(Provider):
     ) -> None:
         state.user_id = msg.user_id
         state.profile_id = msg.profile_id
-        state.country_code = msg.country_code or "se"
+        state.country_code = msg.country_code
         if msg.receiver_name:
             state.receiver_name = msg.receiver_name
         state.receiver_language_code = msg.receiver_language_code
