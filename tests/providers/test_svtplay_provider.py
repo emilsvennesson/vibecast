@@ -17,7 +17,7 @@ from vibecast._models import (
 )
 from vibecast.player import DrmSystem
 from vibecast.provider import LaunchCredentials, ProviderSession, ReceiverContext
-from vibecast.providers.svt_play._provider import SvtPlayProvider
+from vibecast.providers.svtplay._provider import SvtPlayProvider
 
 
 def _make_session(
@@ -36,7 +36,7 @@ def _make_session(
             friendly_name="Living Room",
             device_model="Chromecast",
             device_id="receiver-device-id",
-            data_dir=Path("/tmp/vibecast-tests/providers/svt_play"),
+            data_dir=Path("/tmp/vibecast-tests/providers/svtplay"),
         ),
         send_custom=AsyncMock(),
         broadcast_custom=AsyncMock(),

@@ -386,7 +386,7 @@ Providers implement the `Provider` ABC and register via Python entry points:
 ```toml
 # pyproject.toml
 [project.entry-points."vibecast.providers"]
-svt_play = "vibecast.providers.svt_play._provider:SvtPlayProvider"
+svtplay = "vibecast.providers.svtplay._provider:SvtPlayProvider"
 viaplay = "vibecast.providers.viaplay._provider:ViaplayProvider"
 ```
 
