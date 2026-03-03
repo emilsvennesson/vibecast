@@ -44,6 +44,10 @@ class SvtPlayProvider(Provider):
         return "https://lh3.googleusercontent.com/K3wumlt002dZrHoe4uKKdW-zMRLXdiPdgT1SRP90dnmMvLqsR-zaA3v-360EEIWLL5-SzJVt65XfqlgENw"
 
     @override
+    def provider_key(self) -> str:
+        return "svtplay"
+
+    @override
     def namespaces(self) -> frozenset[str]:
         return self._NAMESPACES
 
