@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlencode
 
 from vibecast.player import DrmInfo, DrmSystem
-from vibecast.providers.svt_play._models import (
+from vibecast.providers.svtplay._models import (
     SvtResolveResponse,
     SvtVideoReference,
     SvtVideoResponse,

@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 from vibecast._models import LoadRequest, StreamType
 from vibecast.player import PlaybackMedia, PlaybackStream
 from vibecast.provider import LaunchCredentials, Provider, ProviderSession
-from vibecast.providers.svt_play._api import SvtPlayAPI
+from vibecast.providers.svtplay._api import SvtPlayAPI
 
 if TYPE_CHECKING:
     from vibecast._models import MediaImage, MediaMetadata
