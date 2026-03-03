@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlencode
 
+from vibecast._config import CastConfig, cast_device_capabilities_header
 from vibecast.player import DrmInfo, DrmSystem
 from vibecast.providers.svtplay._models import (
     SvtResolveResponse,
@@ -18,19 +19,12 @@ from vibecast.providers.svtplay._models import (
 if TYPE_CHECKING:
     from httpx import AsyncClient
 
-_USER_AGENT = (
-    "Mozilla/5.0 (Linux; Android 11.0; Build/RQ1A.210105.003) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.0 "
-    "Safari/537.36 CrKey/1.56.500000 DeviceType/AndroidTV"
+_DEFAULT_CAST_CONFIG = CastConfig()
+_DEFAULT_CAST_CAPABILITIES = cast_device_capabilities_header(
+    _DEFAULT_CAST_CONFIG.device_capabilities
 )
 _ORIGIN = "https://www.svtstatic.se"
 _REFERER = "https://www.svtstatic.se/"
-_CAST_DEVICE_CAPABILITIES = (
-    '{"display_supported":true,'
-    '"hi_res_audio_supported":false,'
-    '"remote_control_input_supported":true,'
-    '"touch_input_supported":false}'
-)
 
 _DITTO_MANIFEST_ENDPOINT = "https://api.svt.se/ditto/api/v3/manifest"
 _PLATFORM = "chromecast;cc-androidtv"
@@ -83,18 +77,25 @@ class SvtResolvedMedia:
 class SvtPlayAPI:
     """Minimal SVT Play API client used by :class:`SvtPlayProvider`."""
 
-    def __init__(self, *, client: AsyncClient) -> None:
+    def __init__(
+        self,
+        *,
+        client: AsyncClient,
+        user_agent: str = _DEFAULT_CAST_CONFIG.user_agent,
+        cast_capabilities: str = _DEFAULT_CAST_CAPABILITIES,
+    ) -> None:
         self._client = client
+        self._user_agent = user_agent
+        self._cast_capabilities = cast_capabilities
 
-    @staticmethod
-    def _default_headers() -> dict[str, str]:
+    def _default_headers(self) -> dict[str, str]:
         return {
-            "User-Agent": _USER_AGENT,
+            "User-Agent": self._user_agent,
             "Accept": "*/*",
             "Accept-Language": "en-US",
             "Origin": _ORIGIN,
             "Referer": _REFERER,
-            "CAST-DEVICE-CAPABILITIES": _CAST_DEVICE_CAPABILITIES,
+            "CAST-DEVICE-CAPABILITIES": self._cast_capabilities,
         }
 
     async def _get_json(self, url: str) -> dict[str, Any]:

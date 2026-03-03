@@ -55,7 +55,11 @@ class SvtPlayProvider(Provider):
     ) -> None:
         _ = credentials
         self._sessions[session.session_id] = _SessionState(
-            api=SvtPlayAPI(client=session.http_client)
+            api=SvtPlayAPI(
+                client=session.http_client,
+                user_agent=session.receiver.user_agent,
+                cast_capabilities=session.receiver.cast_device_capabilities,
+            )
         )
 
     @override

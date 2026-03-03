@@ -9,9 +9,9 @@ import socket
 import ssl
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 
 from aiohttp import web
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
@@ -24,9 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from vibecast._certificate import CertificateBundle
-
-_DEFAULT_BUILD_VERSION: Final[str] = "446070"
-_DEFAULT_CAST_BUILD_REVISION: Final[str] = "3.72.446070"
+    from vibecast._config import EurekaDeviceCapabilitiesConfig
 
 log = get_logger("eureka")
 
@@ -110,8 +108,8 @@ class EurekaMultizone(_Model):
 
 class EurekaInfo(_Model):
     bssid: str = ""
-    build_version: str = _DEFAULT_BUILD_VERSION
-    cast_build_revision: str = _DEFAULT_CAST_BUILD_REVISION
+    build_version: str = "446070"
+    cast_build_revision: str = "3.72.446070"
     connected: bool = True
     ethernet_connected: bool = True
     has_update: bool = False
@@ -143,6 +141,12 @@ class EurekaIdentity:
     friendly_name: str
     device_model: str
     ssdp_udn: str
+    manufacturer: str = "Google Inc."
+    locale: str = "en-US"
+    country_code: str = "US"
+    build_version: str = "446070"
+    build_revision: str = "3.72.446070"
+    capabilities: EurekaDeviceCapabilitiesConfig | None = None
 
 
 class EurekaServer:
@@ -320,17 +324,27 @@ class EurekaServer:
         uptime = max(time.monotonic() - self._started_at, 0.0)
         product_name = _product_name(self._identity.device_model)
         cloud_device_id = _cloud_device_id(self._identity.ssdp_udn)
+        capabilities = (
+            DeviceCapabilities(**asdict(self._identity.capabilities))
+            if self._identity.capabilities is not None
+            else DeviceCapabilities()
+        )
 
         full_response = EurekaInfo(
+            build_version=self._identity.build_version,
+            cast_build_revision=self._identity.build_revision,
             ip_address=self._ip_address,
+            locale=self._identity.locale,
+            location=_Location(country_code=self._identity.country_code),
             name=self._identity.friendly_name,
             public_key=self._public_key_b64,
             ssdp_udn=self._identity.ssdp_udn,
             uptime=uptime,
             device_info=EurekaDeviceInfo(
-                capabilities=DeviceCapabilities(),
+                capabilities=capabilities,
                 cloud_device_id=cloud_device_id,
                 local_authorization_token_hash=self._local_authorization_token_hash,
+                manufacturer=self._identity.manufacturer,
                 model_name=self._identity.device_model,
                 product_name=product_name,
                 public_key=self._public_key_b64,

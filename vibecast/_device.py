@@ -9,6 +9,7 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 import vibecast._namespace as ns
+from vibecast._config import CastConfig, cast_device_capabilities_header
 from vibecast._coordinator import PlaybackCoordinator
 from vibecast._log import get_logger
 from vibecast._models import (
@@ -42,6 +43,10 @@ if TYPE_CHECKING:
     from vibecast.player import Player
 
 log = get_logger("device")
+_DEFAULT_CAST_CONFIG = CastConfig()
+_DEFAULT_CAST_DEVICE_CAPABILITIES = cast_device_capabilities_header(
+    _DEFAULT_CAST_CONFIG.device_capabilities
+)
 
 
 class TransportHandler(Protocol):
@@ -249,6 +254,10 @@ class Device:
     __slots__ = (
         "_data_dir",
         "_get_http_client",
+        "_receiver_cast_device_capabilities",
+        "_receiver_display_height",
+        "_receiver_display_width",
+        "_receiver_user_agent",
         "_subscriptions",
         "config",
         "sessions",
@@ -262,19 +271,30 @@ class Device:
         *,
         get_http_client: Callable[[], AsyncClient],
         data_dir: Path,
+        volume_level: float = 1.0,
+        volume_muted: bool = False,
+        volume_step_interval: float = 0.05,
+        receiver_user_agent: str = _DEFAULT_CAST_CONFIG.user_agent,
+        receiver_cast_device_capabilities: str = _DEFAULT_CAST_DEVICE_CAPABILITIES,
+        receiver_display_width: int = 1920,
+        receiver_display_height: int = 1080,
     ) -> None:
         self.config = config
         self._get_http_client = get_http_client
         self._data_dir = data_dir
+        self._receiver_user_agent = receiver_user_agent
+        self._receiver_cast_device_capabilities = receiver_cast_device_capabilities
+        self._receiver_display_width = receiver_display_width
+        self._receiver_display_height = receiver_display_height
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self.transports: dict[str, Transport] = {}
         self.sessions: dict[str, AppSession] = {}
         self._subscriptions: dict[tuple[Connection, str], str] = {}
         self.volume = Volume(
-            level=1.0,
-            muted=False,
+            level=volume_level,
+            muted=volume_muted,
             control_type="attenuation",
-            step_interval=0.05,
+            step_interval=volume_step_interval,
         )
 
     @property
@@ -466,6 +486,10 @@ class Device:
                 device_model=self.config.device_model,
                 device_id=self.config.device_id,
                 data_dir=provider_data_dir,
+                user_agent=self._receiver_user_agent,
+                cast_device_capabilities=self._receiver_cast_device_capabilities,
+                display_width=self._receiver_display_width,
+                display_height=self._receiver_display_height,
             ),
             credentials=credentials,
             namespaces=tuple(provider_namespaces),

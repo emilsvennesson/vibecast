@@ -6,11 +6,13 @@ import argparse
 import asyncio
 import contextlib
 import logging
+from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
 
 from vibecast._certificate import CertificateStore
-from vibecast.receiver import CastReceiver, ReceiverConfig
+from vibecast._config import load_config
+from vibecast.receiver import CastReceiver
 
 _DEFAULT_DATA_DIR = Path.home() / ".vibecast"
 _DEVICE_ID_FILE_NAME = "cast_receiver_device_id"
@@ -19,45 +21,16 @@ _DEVICE_ID_FILE_NAME = "cast_receiver_device_id"
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a vibecast receiver")
     _ = parser.add_argument(
-        "--manifest",
+        "--certs",
         type=Path,
-        required=True,
-        help="Path to go-cast compatible certificate manifest JSON",
-    )
-    _ = parser.add_argument(
-        "--name",
-        required=True,
-        help="Friendly receiver name advertised over mDNS",
-    )
-    _ = parser.add_argument(
-        "--model",
-        default="Chromecast",
-        help="Device model string advertised via mDNS",
-    )
-    _ = parser.add_argument(
-        "--device-id",
         default=None,
-        help=(
-            "Stable device ID for mDNS/discovery. "
-            "If omitted, vibecast persists one at ~/.vibecast/cast_receiver_device_id"
-        ),
+        help="Path to certificate bundle JSON (overrides config)",
     )
     _ = parser.add_argument(
         "--data-dir",
         type=Path,
         default=_DEFAULT_DATA_DIR,
-        help="Persistent receiver data (cookies, device IDs, provider state)",
-    )
-    _ = parser.add_argument(
-        "--bind-host",
-        default="0.0.0.0",
-        help="Host/interface to bind Cast, eureka, and player servers to",
-    )
-    _ = parser.add_argument(
-        "--player-port",
-        type=int,
-        default=8010,
-        help="Port to bind the player HTTP/WebSocket server to",
+        help="Persistent data directory (contains config.toml)",
     )
     _ = parser.add_argument(
         "--log-level",
@@ -87,20 +60,52 @@ def _load_or_create_device_id(path: Path) -> str:
     return device_id
 
 
+def _resolve_certs_path(configured_certs: str, *, data_dir: Path) -> Path:
+    path = Path(configured_certs).expanduser()
+    if path.is_absolute():
+        return path
+    return data_dir / path
+
+
+def _load_certificate_store(certs_path: Path) -> CertificateStore:
+    if not certs_path.exists():
+        msg = (
+            "certificate bundle file not found: "
+            f"{certs_path} (set [device].certs or pass --certs)"
+        )
+        raise RuntimeError(msg)
+    return CertificateStore.from_manifest(certs_path)
+
+
 async def _run(args: argparse.Namespace) -> None:
-    certificates = CertificateStore.from_manifest(args.manifest)
     data_dir = args.data_dir
+    config = load_config(data_dir)
+
+    if args.certs is not None:
+        config = replace(
+            config,
+            device=replace(config.device, certs=str(args.certs)),
+        )
+
+    configured_certs = config.device.certs.strip()
+    if not configured_certs:
+        msg = (
+            "certificate bundle is not configured; set [device].certs in "
+            f"{data_dir / 'config.toml'} or pass --certs"
+        )
+        raise RuntimeError(msg)
+
+    certs_path = _resolve_certs_path(configured_certs, data_dir=data_dir)
+    certificates = _load_certificate_store(certs_path)
+
     device_id_path = data_dir / _DEVICE_ID_FILE_NAME
-    device_id = args.device_id or _load_or_create_device_id(device_id_path)
-    config = ReceiverConfig(
-        friendly_name=args.name,
-        device_model=args.model,
+    device_id = _load_or_create_device_id(device_id_path)
+    receiver = CastReceiver(
+        config=config,
+        certificates=certificates,
         device_id=device_id,
-        bind_host=args.bind_host,
-        player_port=args.player_port,
         data_dir=data_dir,
     )
-    receiver = CastReceiver(config=config, certificates=certificates)
     await receiver.run_forever()
 
 

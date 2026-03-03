@@ -3,6 +3,7 @@
 # pyright: reportUnsupportedDunderAll=false
 
 from vibecast._certificate import CertificateBundle, CertificateStore
+from vibecast._config import VibecastConfig, load_config
 from vibecast.player import (
     DefaultPlayer,
     DrmInfo,
@@ -33,7 +34,7 @@ from vibecast.provider import (
     ProviderSession,
     ReceiverContext,
 )
-from vibecast.receiver import CastReceiver, ReceiverConfig
+from vibecast.receiver import CastReceiver
 
 __all__ = [
     "CastReceiver",
@@ -60,10 +61,11 @@ __all__ = [
     "PlayerReport",
     "Provider",
     "ProviderSession",
-    "ReceiverConfig",
     "ReceiverContext",
     "SeekCommand",
     "StateReport",
     "StopCommand",
+    "VibecastConfig",
     "VolumeCommand",
+    "load_config",
 ]

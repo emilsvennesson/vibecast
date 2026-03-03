@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from importlib.metadata import EntryPoint, EntryPoints, entry_points
 from typing import TYPE_CHECKING, Any, cast
 
+from vibecast._config import (
+    CastConfig,
+    cast_device_capabilities_header,
+)
 from vibecast._log import get_logger
 
 if TYPE_CHECKING:
@@ -33,6 +37,10 @@ if TYPE_CHECKING:
 log = get_logger("provider")
 
 _ENTRY_POINT_GROUP = "vibecast.providers"
+_DEFAULT_CAST_CONFIG = CastConfig()
+_DEFAULT_CAST_CAPABILITIES_HEADER = cast_device_capabilities_header(
+    _DEFAULT_CAST_CONFIG.device_capabilities
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -51,6 +59,10 @@ class ReceiverContext:
     device_model: str
     device_id: str
     data_dir: Path
+    user_agent: str = _DEFAULT_CAST_CONFIG.user_agent
+    cast_device_capabilities: str = _DEFAULT_CAST_CAPABILITIES_HEADER
+    display_width: int = 1920
+    display_height: int = 1080
 
 
 class ProviderSession:
@@ -131,6 +143,11 @@ class Provider(ABC):
         if not name:
             name = self.__class__.__name__
         return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+    def configure(self, config: dict[str, Any]) -> None:
+        """Apply provider-specific configuration loaded from TOML."""
+
+        _ = config
 
     @abstractmethod
     async def on_launch(
