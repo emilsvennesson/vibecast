@@ -18,8 +18,8 @@ from vibecast.player import (
     PlaybackStream,
 )
 from vibecast.provider import LaunchCredentials, Provider, ProviderSession
-from vibecast.providers.amazon_prime._api import PrimeVideoAPI
-from vibecast.providers.amazon_prime._models import (
+from vibecast.providers.primevideo._api import PrimeVideoAPI
+from vibecast.providers.primevideo._models import (
     ApplySettingsMessage,
     ApplySettingsResponseMessage,
     PlaybackUrlSetPayload,
@@ -33,7 +33,7 @@ from vibecast.providers.amazon_prime._models import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-log = get_logger("amazon_prime")
+log = get_logger("primevideo")
 
 _NS_PRIME = "urn:x-cast:com.amazon.primevideo.cast"
 _DEFAULT_MARKETPLACE_ID = "A3K6Y4MI8GDYMT"
@@ -60,7 +60,7 @@ class _PrimeSessionState:
     current_title_id: str | None = None
 
 
-class AmazonPrimeProvider(Provider):
+class PrimeVideoProvider(Provider):
     """Amazon Prime Video provider implementation."""
 
     _APP_IDS = frozenset({"17608BC8"})
@@ -435,4 +435,4 @@ def _title_id_from_url(url: str) -> str | None:
     return title_id
 
 
-__all__ = ["AmazonPrimeProvider", "_NS_PRIME"]
+__all__ = ["PrimeVideoProvider", "_NS_PRIME"]

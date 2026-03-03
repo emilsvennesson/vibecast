@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.entry-points."vibecast.providers"]
-amazon_prime = "vibecast.providers.amazon_prime._provider:AmazonPrimeProvider"
+primevideo = "vibecast.providers.primevideo._provider:PrimeVideoProvider"
 svt_play = "vibecast.providers.svt_play._provider:SvtPlayProvider"
 viaplay = "vibecast.providers.viaplay._provider:ViaplayProvider"
 

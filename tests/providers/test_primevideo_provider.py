@@ -9,11 +9,11 @@ from unittest.mock import AsyncMock, patch
 from vibecast._models import LoadRequest, MediaInfo, MediaMetadata, StreamType
 from vibecast.player import DrmSystem, LicenseRequest, LicenseRoute
 from vibecast.provider import LaunchCredentials, ProviderSession, ReceiverContext
-from vibecast.providers.amazon_prime._api import PrimeVideoAPI
-from vibecast.providers.amazon_prime._models import VodPlaybackResourcesResponse
-from vibecast.providers.amazon_prime._provider import (
+from vibecast.providers.primevideo._api import PrimeVideoAPI
+from vibecast.providers.primevideo._models import VodPlaybackResourcesResponse
+from vibecast.providers.primevideo._provider import (
     _NS_PRIME,
-    AmazonPrimeProvider,
+    PrimeVideoProvider,
     _TitlePlaybackState,
 )
 
@@ -31,7 +31,7 @@ def _make_session() -> ProviderSession:
             friendly_name="Living Room",
             device_model="Chromecast",
             device_id="receiver-device-id",
-            data_dir=Path("/tmp/vibecast-tests/providers/amazon_prime"),
+            data_dir=Path("/tmp/vibecast-tests/providers/primevideo"),
         ),
         send_custom=AsyncMock(),
         broadcast_custom=AsyncMock(),
@@ -39,14 +39,14 @@ def _make_session() -> ProviderSession:
 
 
 def test_provider_metadata() -> None:
-    provider = AmazonPrimeProvider()
+    provider = PrimeVideoProvider()
     assert provider.app_ids() == frozenset({"17608BC8"})
     assert provider.display_name() == "Prime Video"
     assert provider.namespaces() == frozenset({_NS_PRIME})
 
 
 async def test_resolve_media_uses_preload_stream_data() -> None:
-    provider = AmazonPrimeProvider()
+    provider = PrimeVideoProvider()
     session = _make_session()
     await provider.on_launch(session, LaunchCredentials(credentials="actor-token"))
 
@@ -122,7 +122,7 @@ async def test_resolve_media_uses_preload_stream_data() -> None:
 
 
 async def test_resolve_license_uses_prime_api() -> None:
-    provider = AmazonPrimeProvider()
+    provider = PrimeVideoProvider()
     session = _make_session()
     await provider.on_launch(session, LaunchCredentials(credentials="actor-token"))
 

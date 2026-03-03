@@ -10,7 +10,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
 from vibecast._log import get_logger
-from vibecast.providers.amazon_prime._models import (
+from vibecast.providers.primevideo._models import (
     AuthRegisterResponse,
     AuthTokenResponse,
     PlaybackUrlSetPayload,
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
     from httpx import AsyncClient
 
-log = get_logger("amazon_prime.api")
+log = get_logger("primevideo.api")
 
 _USER_AGENT = (
     "Mozilla/5.0 (Linux; Android 11.0; Build/RQ1A.210105.003) "
