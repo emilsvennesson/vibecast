@@ -46,6 +46,8 @@ class ReceiverHTTPClient:
             follow_redirects=True,
             headers=headers,
         )
+        if not user_agent and "User-Agent" in self._client.headers:
+            del self._client.headers["User-Agent"]
         self._closed = False
 
     @property

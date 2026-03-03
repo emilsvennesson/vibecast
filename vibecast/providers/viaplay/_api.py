@@ -26,11 +26,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("vibecast.viaplay.api")
 
-if TYPE_CHECKING:
-    from httpx import AsyncClient
-
-log = logging.getLogger("vibecast.viaplay.api")
-
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
