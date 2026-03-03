@@ -20,6 +20,9 @@ from vibecast.player import (
 from vibecast.provider import LaunchCredentials, Provider, ProviderSession
 from vibecast.providers.primevideo._api import PrimeVideoAPI
 from vibecast.providers.primevideo._models import (
+    AmIRegisteredError,
+    AmIRegisteredMessage,
+    AmIRegisteredResponseMessage,
     ApplySettingsMessage,
     ApplySettingsResponseMessage,
     PlaybackUrlSetPayload,
@@ -116,6 +119,8 @@ class PrimeVideoProvider(Provider):
             return
 
         match message:
+            case AmIRegisteredMessage():
+                await self._handle_am_i_registered(session, state, message)
             case RegisterMessage():
                 await self._handle_register(session, state, message)
             case ApplySettingsMessage():
@@ -318,6 +323,31 @@ class PrimeVideoProvider(Provider):
         await session.send_custom(
             _NS_PRIME,
             RegisterResponseMessage().model_dump(exclude_none=True),
+        )
+
+    async def _handle_am_i_registered(
+        self,
+        session: ProviderSession,
+        state: _PrimeSessionState,
+        message: AmIRegisteredMessage,
+    ) -> None:
+        if message.device_id:
+            state.device_id = message.device_id
+
+        response = AmIRegisteredResponseMessage()
+        if not state.actor_access_token:
+            response.error = AmIRegisteredError(
+                code="NotRegistered",
+                internal_name="NotRegistered",
+                message=(
+                    f"deviceId {message.device_id or state.device_id or session.receiver.device_id} "
+                    "is not registered"
+                ),
+            )
+
+        await session.send_custom(
+            _NS_PRIME,
+            response.model_dump(exclude_none=True),
         )
 
     @staticmethod

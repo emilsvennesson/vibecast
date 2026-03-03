@@ -21,6 +21,30 @@ class RegisterMessage(CastModel):
     device_id: str | None = None
 
 
+class AmIRegisteredMessage(CastModel):
+    """Prime sender registration check message."""
+
+    type: Literal["AmIRegistered"] = "AmIRegistered"
+    message_protocol_version: int | None = None
+    device_id: str | None = None
+
+
+class AmIRegisteredError(CastModel):
+    """Error payload for ``AmIRegisteredResponse``."""
+
+    code: str
+    internal_name: str | None = None
+    message: str | None = None
+    is_fatal: bool = False
+
+
+class AmIRegisteredResponseMessage(CastModel):
+    """Prime registration check response."""
+
+    type: Literal["AmIRegisteredResponse"] = "AmIRegisteredResponse"
+    error: AmIRegisteredError | None = None
+
+
 class ApplySettingsMessage(CastModel):
     """Prime sender settings update message."""
 
@@ -51,7 +75,7 @@ class PreloadMessage(CastModel):
 
 
 PrimeMessage = Annotated[
-    RegisterMessage | ApplySettingsMessage | PreloadMessage,
+    AmIRegisteredMessage | RegisterMessage | ApplySettingsMessage | PreloadMessage,
     Discriminator("type"),
 ]
 
@@ -295,6 +319,9 @@ class WidevineLicenseResponse(BaseModel):
 
 
 __all__ = [
+    "AmIRegisteredError",
+    "AmIRegisteredMessage",
+    "AmIRegisteredResponseMessage",
     "ActorAccessToken",
     "ApplySettingsMessage",
     "ApplySettingsResponseMessage",

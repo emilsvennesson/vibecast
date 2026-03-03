@@ -154,3 +154,57 @@ async def test_resolve_license_uses_prime_api() -> None:
     assert response.status == 200
     assert response.body == b"license-bytes"
     mock_license.assert_awaited_once()
+
+
+async def test_am_i_registered_returns_not_registered_without_token() -> None:
+    provider = PrimeVideoProvider()
+    session = _make_session()
+    await provider.on_launch(session, LaunchCredentials())
+
+    await provider.on_message(
+        session,
+        _NS_PRIME,
+        {
+            "type": "AmIRegistered",
+            "messageProtocolVersion": 1,
+            "deviceId": "cast-device-1",
+        },
+    )
+
+    send_custom = cast("AsyncMock", session._send_custom)  # noqa: SLF001
+    send_custom.assert_awaited_once_with(
+        _NS_PRIME,
+        {
+            "type": "AmIRegisteredResponse",
+            "error": {
+                "code": "NotRegistered",
+                "internalName": "NotRegistered",
+                "message": "deviceId cast-device-1 is not registered",
+                "isFatal": False,
+            },
+        },
+    )
+
+
+async def test_am_i_registered_returns_success_with_token() -> None:
+    provider = PrimeVideoProvider()
+    session = _make_session()
+    await provider.on_launch(session, LaunchCredentials(credentials="actor-token"))
+
+    await provider.on_message(
+        session,
+        _NS_PRIME,
+        {
+            "type": "AmIRegistered",
+            "messageProtocolVersion": 1,
+            "deviceId": "cast-device-1",
+        },
+    )
+
+    send_custom = cast("AsyncMock", session._send_custom)  # noqa: SLF001
+    send_custom.assert_awaited_once_with(
+        _NS_PRIME,
+        {
+            "type": "AmIRegisteredResponse",
+        },
+    )
