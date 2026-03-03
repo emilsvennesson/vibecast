@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
-from vibecast._log import get_logger
 from vibecast.providers.primevideo._models import (
     AuthRegisterResponse,
     AuthTokenResponse,
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
     from httpx import AsyncClient
 
-log = get_logger("primevideo.api")
+log = logging.getLogger("vibecast.primevideo.api")
 
 _ORIGIN = "https://cloudfront.xp-assets.aiv-cdn.net"
 _REFERER = "https://cloudfront.xp-assets.aiv-cdn.net/"
@@ -58,7 +58,6 @@ class PrimeVideoAPI:
 
     __slots__ = (
         "_auth_base_url",
-        "_cast_capabilities",
         "_client",
         "_display_height",
         "_display_width",
@@ -68,15 +67,12 @@ class PrimeVideoAPI:
         "_supported_codecs",
         "_supported_frame_rates",
         "_supported_subtitle_formats",
-        "_user_agent",
     )
 
     def __init__(
         self,
         *,
         client: AsyncClient,
-        user_agent: str,
-        cast_capabilities: str,
         auth_base_url: str,
         display_width: int,
         display_height: int,
@@ -88,8 +84,6 @@ class PrimeVideoAPI:
         supported_subtitle_formats: tuple[str, ...],
     ) -> None:
         self._client = client
-        self._user_agent = user_agent
-        self._cast_capabilities = cast_capabilities
         self._auth_base_url = auth_base_url
         self._display_width = display_width
         self._display_height = display_height
@@ -411,12 +405,10 @@ class PrimeVideoAPI:
         content_type: str,
     ) -> dict[str, str]:
         headers = {
-            "User-Agent": self._user_agent,
             "Accept": "*/*",
             "Accept-Language": "en-US",
             "Origin": _ORIGIN,
             "Referer": _REFERER,
-            "CAST-DEVICE-CAPABILITIES": self._cast_capabilities,
             "Content-Type": content_type,
         }
         if token:

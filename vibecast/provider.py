@@ -13,6 +13,8 @@ from vibecast._config import (
     cast_device_capabilities_header,
 )
 from vibecast._log import get_logger
+from vibecast._models import LoadRequest, MediaInfo, MediaMetadata
+from vibecast._models._base import CastModel
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -20,7 +22,6 @@ if TYPE_CHECKING:
 
     from httpx import AsyncClient
 
-    from vibecast._models import LoadRequest
     from vibecast.player import (
         LicenseRequest,
         LicenseResponse,
@@ -279,7 +280,11 @@ class ProviderRegistry:
 
 
 __all__ = [
+    "CastModel",
     "LaunchCredentials",
+    "LoadRequest",
+    "MediaInfo",
+    "MediaMetadata",
     "Provider",
     "ProviderRegistry",
     "ProviderSession",

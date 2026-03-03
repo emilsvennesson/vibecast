@@ -82,3 +82,30 @@ class TestClientLifecycle:
         http = ReceiverHTTPClient(data_dir=tmp_path)
         await http.close()
         assert http.client.is_closed
+
+
+class TestDefaultHeaders:
+    async def test_sets_configured_default_headers(self, tmp_path: Path) -> None:
+        http = ReceiverHTTPClient(
+            data_dir=tmp_path,
+            user_agent="custom-agent/1.2.3",
+            cast_capabilities='{"display_supported":true}',
+        )
+
+        assert http.client.headers["User-Agent"] == "custom-agent/1.2.3"
+        assert (
+            http.client.headers["CAST-DEVICE-CAPABILITIES"]
+            == '{"display_supported":true}'
+        )
+        await http.close()
+
+    async def test_omits_optional_headers_when_empty(self, tmp_path: Path) -> None:
+        http = ReceiverHTTPClient(
+            data_dir=tmp_path,
+            user_agent="",
+            cast_capabilities="",
+        )
+
+        assert "User-Agent" not in http.client.headers
+        assert "CAST-DEVICE-CAPABILITIES" not in http.client.headers
+        await http.close()

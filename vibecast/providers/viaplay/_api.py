@@ -13,8 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from uritemplate import expand as uri_expand
 
-from vibecast._config import CastConfig, cast_device_capabilities_header
-from vibecast._models import StreamType
+from vibecast.player import StreamType
 from vibecast.providers.viaplay._models import (
     ViaplayAuthorizedPollResponse,
     ViaplayDeviceAuthResponse,
@@ -26,10 +25,6 @@ if TYPE_CHECKING:
     from httpx import AsyncClient
 
 log = logging.getLogger("vibecast.viaplay.api")
-_DEFAULT_CAST_CONFIG = CastConfig()
-_DEFAULT_CAST_CAPABILITIES = cast_device_capabilities_header(
-    _DEFAULT_CAST_CONFIG.device_capabilities
-)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -101,13 +96,11 @@ class ViaplayAPI:
         *,
         client: AsyncClient,
         device_id: str,
-        user_agent: str = _DEFAULT_CAST_CONFIG.user_agent,
-        cast_capabilities: str = _DEFAULT_CAST_CAPABILITIES,
+        user_agent: str,
     ) -> None:
         self._client = client
         self._device_id = device_id
         self._user_agent = user_agent
-        self._cast_capabilities = cast_capabilities
 
         # Populated by set_setup_info()
         self._content_root = ""
@@ -155,12 +148,10 @@ class ViaplayAPI:
 
     def _default_headers(self) -> dict[str, str]:
         return {
-            "User-Agent": self._user_agent,
             "Accept": "*/*",
             "Accept-Language": "en-US",
             "Origin": _ORIGIN,
             "Referer": _REFERER,
-            "CAST-DEVICE-CAPABILITIES": self._cast_capabilities,
         }
 
     def request_headers(self) -> dict[str, str]:

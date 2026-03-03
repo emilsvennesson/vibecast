@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 import pytest
 
-from vibecast._models import StreamType
+from vibecast.player import StreamType
 from vibecast.providers.viaplay._api import (
     DeviceAuthInfo,
     SessionCheckResult,
@@ -46,7 +46,7 @@ def _mock_api(
         raise AssertionError(msg)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    api = ViaplayAPI(client=client, device_id=device_id)
+    api = ViaplayAPI(client=client, device_id=device_id, user_agent="test-agent")
     if with_setup:
         api.set_setup_info(
             content_root="https://content.viaplay.se/stotta",

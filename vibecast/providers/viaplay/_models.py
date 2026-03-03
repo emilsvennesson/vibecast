@@ -19,7 +19,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, TypeAdapter
 
-from vibecast._models._base import CastModel
+from vibecast.provider import CastModel
 
 # ---------------------------------------------------------------------------
 # Shared sub-models (Cast namespace)

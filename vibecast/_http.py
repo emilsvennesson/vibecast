@@ -24,6 +24,8 @@ class ReceiverHTTPClient:
         *,
         data_dir: Path,
         timeout_seconds: float = 15.0,
+        user_agent: str = "",
+        cast_capabilities: str = "",
     ) -> None:
         data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -32,11 +34,20 @@ class ReceiverHTTPClient:
         self._cookie_jar = LWPCookieJar(filename=str(cookie_path))
         _load_cookie_jar(self._cookie_jar)
 
+        headers: dict[str, str] = {}
+        if user_agent:
+            headers["User-Agent"] = user_agent
+        if cast_capabilities:
+            headers["CAST-DEVICE-CAPABILITIES"] = cast_capabilities
+
         self._client = httpx.AsyncClient(
             cookies=self._cookie_jar,
             timeout=timeout_seconds,
             follow_redirects=True,
+            headers=headers,
         )
+        if not user_agent and "User-Agent" in self._client.headers:
+            del self._client.headers["User-Agent"]
         self._closed = False
 
     @property

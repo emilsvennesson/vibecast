@@ -8,21 +8,23 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from vibecast._models import (
-    LoadRequest,
-    MediaInfo,
-    MediaMetadata,
-    PlayerState,
-    StreamType,
-)
 from vibecast.player import (
     DrmSystem,
     LicenseRequest,
     LicenseResponse,
     LicenseRoute,
     PlaybackState,
+    PlayerState,
+    StreamType,
 )
-from vibecast.provider import LaunchCredentials, ProviderSession, ReceiverContext
+from vibecast.provider import (
+    LaunchCredentials,
+    LoadRequest,
+    MediaInfo,
+    MediaMetadata,
+    ProviderSession,
+    ReceiverContext,
+)
 from vibecast.providers.viaplay._api import (
     DeviceAuthInfo,
     SessionCheckResult,
@@ -159,7 +161,7 @@ class TestResolveMedia:
         assert media.streams[0].drm is not None
         assert media.streams[0].drm.system is DrmSystem.WIDEVINE
         assert media.streams[0].drm.license_url == "https://drm.example.com/license"
-        assert "User-Agent" in media.streams[0].drm.headers
+        assert "Origin" in media.streams[0].drm.headers
 
     async def test_requires_authentication(self) -> None:
         provider = ViaplayProvider()
