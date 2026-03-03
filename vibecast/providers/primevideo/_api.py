@@ -337,7 +337,7 @@ class PrimeVideoAPI:
         """Ensure ``amznDtid`` query parameter is present on playback URLs."""
         parts = urlsplit(url)
         query = dict(parse_qsl(parts.query, keep_blank_values=True))
-        query.setdefault("amznDtid", _API_DEVICE_TYPE_ID)
+        _ = query.setdefault("amznDtid", _API_DEVICE_TYPE_ID)
         return urlunsplit(
             (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
         )
@@ -394,11 +394,7 @@ class PrimeVideoAPI:
         query: Mapping[str, str | int | bool],
     ) -> str:
         encoded = urlencode(
-            {
-                key: _normalize_query_value(value)
-                for key, value in query.items()
-                if value is not None
-            }
+            {key: _normalize_query_value(value) for key, value in query.items()}
         )
         return f"{base}{path}?{encoded}"
 

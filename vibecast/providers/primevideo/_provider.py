@@ -240,7 +240,10 @@ class PrimeVideoProvider(Provider):
             else None,
             autoplay=load_request.autoplay,
             start_time=load_request.current_time,
-            custom_data=dict(load_request.media.custom_data or {}),
+            custom_data={
+                **(load_request.media.custom_data or {}),
+                **(load_request.custom_data or {}),
+            },
         )
 
     @override
