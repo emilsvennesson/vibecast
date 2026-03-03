@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlencode
 
-from vibecast._config import CastConfig, cast_device_capabilities_header
 from vibecast.player import DrmInfo, DrmSystem
 from vibecast.providers.svtplay._models import (
     SvtResolveResponse,
@@ -19,10 +18,6 @@ from vibecast.providers.svtplay._models import (
 if TYPE_CHECKING:
     from httpx import AsyncClient
 
-_DEFAULT_CAST_CONFIG = CastConfig()
-_DEFAULT_CAST_CAPABILITIES = cast_device_capabilities_header(
-    _DEFAULT_CAST_CONFIG.device_capabilities
-)
 _ORIGIN = "https://www.svtstatic.se"
 _REFERER = "https://www.svtstatic.se/"
 
@@ -81,21 +76,15 @@ class SvtPlayAPI:
         self,
         *,
         client: AsyncClient,
-        user_agent: str = _DEFAULT_CAST_CONFIG.user_agent,
-        cast_capabilities: str = _DEFAULT_CAST_CAPABILITIES,
     ) -> None:
         self._client = client
-        self._user_agent = user_agent
-        self._cast_capabilities = cast_capabilities
 
     def _default_headers(self) -> dict[str, str]:
         return {
-            "User-Agent": self._user_agent,
             "Accept": "*/*",
             "Accept-Language": "en-US",
             "Origin": _ORIGIN,
             "Referer": _REFERER,
-            "CAST-DEVICE-CAPABILITIES": self._cast_capabilities,
         }
 
     async def _get_json(self, url: str) -> dict[str, Any]:

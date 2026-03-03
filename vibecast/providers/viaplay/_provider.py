@@ -8,7 +8,6 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, override
 
-from vibecast._models import LoadRequest, PlayerState, StreamType
 from vibecast.player import (
     DrmInfo,
     DrmSystem,
@@ -18,8 +17,10 @@ from vibecast.player import (
     PlaybackMedia,
     PlaybackState,
     PlaybackStream,
+    PlayerState,
+    StreamType,
 )
-from vibecast.provider import LaunchCredentials, Provider, ProviderSession
+from vibecast.provider import LaunchCredentials, LoadRequest, Provider, ProviderSession
 from vibecast.providers.viaplay._api import (
     DeviceAuthInfo,
     SessionCheckResult,
@@ -115,7 +116,6 @@ class ViaplayProvider(Provider):
             client=session.http_client,
             device_id=session.receiver.device_id,
             user_agent=session.receiver.user_agent,
-            cast_capabilities=session.receiver.cast_device_capabilities,
         )
         self._sessions[session.session_id] = _ViaplayState(
             api=api,

@@ -6,13 +6,18 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, override
 from urllib.parse import urlsplit
 
-from vibecast._models import LoadRequest, StreamType
-from vibecast.player import PlaybackMedia, PlaybackStream
-from vibecast.provider import LaunchCredentials, Provider, ProviderSession
+from vibecast.player import PlaybackMedia, PlaybackStream, StreamType
+from vibecast.provider import (
+    LaunchCredentials,
+    LoadRequest,
+    MediaMetadata,
+    Provider,
+    ProviderSession,
+)
 from vibecast.providers.svtplay._api import SvtPlayAPI
 
 if TYPE_CHECKING:
-    from vibecast._models import MediaImage, MediaMetadata
+    from vibecast.player import MediaImage
 
 
 @dataclass(slots=True)
@@ -61,8 +66,6 @@ class SvtPlayProvider(Provider):
         self._sessions[session.session_id] = _SessionState(
             api=SvtPlayAPI(
                 client=session.http_client,
-                user_agent=session.receiver.user_agent,
-                cast_capabilities=session.receiver.cast_device_capabilities,
             )
         )
 

@@ -80,6 +80,8 @@ select = [
   "ASYNC",
   # tryceratops
   "TRY",
+  # flake8-self
+  "SLF",
 ]
 
 # Disable specific rules
@@ -87,6 +89,8 @@ ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "scripts/*.py" = ["T201"]
+"tests/**/*.py" = ["SLF001"]
+"**/tests/**/*.py" = ["SLF001"]
 
 [tool.deptry]
 extend_exclude = ["scripts", ".*/tests/", "kodi"]
@@ -115,8 +119,10 @@ exclude = [".venv", "scripts", "kodi", "vibecast/_proto/cast_channel_pb2.py", "v
 venvPath = "."
 venv = ".venv"
 
+reportPrivateUsage = "none"
+
 executionEnvironments = [
-  { root = "vibecast/providers/viaplay/tests", reportPrivateUsage = "none", reportUnknownMemberType = "none", extraPaths = ["."] },
-  { root = "tests", reportPrivateUsage = "none", extraPaths = ["."] },
+  { root = "vibecast/providers/viaplay/tests", reportUnknownMemberType = "none", extraPaths = ["."] },
+  { root = "tests", extraPaths = ["."] },
   { root = "." },
 ]

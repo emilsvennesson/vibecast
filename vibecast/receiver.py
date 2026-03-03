@@ -84,6 +84,8 @@ class CastReceiver:
         self._http = ReceiverHTTPClient(
             data_dir=data_dir,
             timeout_seconds=config.network.http_timeout,
+            user_agent=config.cast.user_agent,
+            cast_capabilities=cast_capabilities,
         )
 
         provider_instances = discover_providers() if providers is None else providers
@@ -168,9 +170,14 @@ class CastReceiver:
         log.info("enabled providers: %s", _format_provider_summary(enabled_providers))
 
         if self._http.client.is_closed:
+            cast_capabilities = cast_device_capabilities_header(
+                self.config.cast.device_capabilities
+            )
             self._http = ReceiverHTTPClient(
                 data_dir=self._data_dir,
                 timeout_seconds=self.config.network.http_timeout,
+                user_agent=self.config.cast.user_agent,
+                cast_capabilities=cast_capabilities,
             )
 
         rotated = self._certificate_store.rotate_if_needed()

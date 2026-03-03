@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast, override
 from urllib.parse import parse_qsl, urlsplit
 
-from vibecast._log import get_logger
-from vibecast._models import LoadRequest, StreamType
 from vibecast.player import (
     DrmInfo,
     DrmSystem,
@@ -16,8 +15,9 @@ from vibecast.player import (
     LicenseRoute,
     PlaybackMedia,
     PlaybackStream,
+    StreamType,
 )
-from vibecast.provider import LaunchCredentials, Provider, ProviderSession
+from vibecast.provider import LaunchCredentials, LoadRequest, Provider, ProviderSession
 from vibecast.providers.primevideo._api import PrimeVideoAPI
 from vibecast.providers.primevideo._models import (
     AmIRegisteredError,
@@ -36,7 +36,7 @@ from vibecast.providers.primevideo._models import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-log = get_logger("primevideo")
+log = logging.getLogger("vibecast.primevideo")
 
 _NS_PRIME = "urn:x-cast:com.amazon.primevideo.cast"
 _DEFAULT_MARKETPLACE_ID = "A3K6Y4MI8GDYMT"
@@ -182,8 +182,6 @@ class PrimeVideoProvider(Provider):
         state = _PrimeSessionState(
             api=PrimeVideoAPI(
                 client=session.http_client,
-                user_agent=session.receiver.user_agent,
-                cast_capabilities=session.receiver.cast_device_capabilities,
                 auth_base_url=self._auth_base_url,
                 display_width=session.receiver.display_width,
                 display_height=session.receiver.display_height,
