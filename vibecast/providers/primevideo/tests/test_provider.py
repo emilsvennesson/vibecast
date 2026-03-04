@@ -16,8 +16,11 @@ from vibecast.provider import (
     ProviderSession,
     ReceiverContext,
 )
-from vibecast.providers.primevideo._api import PrimeVideoAPI
-from vibecast.providers.primevideo._models import VodPlaybackResourcesResponse
+from vibecast.providers.primevideo._api import PrimeCatalogMetadata, PrimeVideoAPI
+from vibecast.providers.primevideo._models import (
+    LivePlaybackResourcesResponse,
+    VodPlaybackResourcesResponse,
+)
 from vibecast.providers.primevideo._provider import (
     _NS_PRIME,
     PrimeVideoProvider,
@@ -124,9 +127,162 @@ async def test_resolve_media_uses_preload_stream_data() -> None:
     assert len(media.streams) == 2
     assert media.streams[0].url.startswith("https://cdn.example.com/main.mpd")
     assert media.streams[0].drm is not None
+    assert "/playback/drm-vod/GetWidevineLicense" in media.streams[0].drm.license_url
     assert "titleId=amzn1.dv.gti.example" in media.streams[0].drm.license_url
     assert media.title == "Episode 1"
     assert media.subtitle == "Pilot"
+
+
+async def test_resolve_media_live_uses_live_playback_resources() -> None:
+    provider = PrimeVideoProvider()
+    session = _make_session()
+    await provider.on_launch(session, LaunchCredentials(credentials="actor-token"))
+
+    resources = LivePlaybackResourcesResponse.model_validate(
+        {
+            "sessionization": {"sessionHandoffToken": "live-handoff-1"},
+            "livePlaybackUrls": {
+                "result": {
+                    "defaultUrlSetId": "live-main",
+                    "urlSets": [
+                        {
+                            "urlSetId": "live-alt",
+                            "urls": {
+                                "manifest": {
+                                    "url": "https://cdn.example.com/live-alt.mpd"
+                                }
+                            },
+                        },
+                        {
+                            "urlSetId": "live-main",
+                            "urls": {
+                                "manifest": {
+                                    "url": "https://cdn.example.com/live-main.mpd"
+                                }
+                            },
+                        },
+                    ],
+                }
+            },
+        }
+    )
+
+    with (
+        patch.object(
+            PrimeVideoAPI,
+            "refresh_playback_envelope",
+            new=AsyncMock(side_effect=RuntimeError("skip refresh")),
+        ),
+        patch.object(
+            PrimeVideoAPI,
+            "get_live_playback_resources",
+            new=AsyncMock(return_value=resources),
+        ),
+    ):
+        media = await provider.resolve_media(
+            session,
+            LoadRequest(
+                request_id=1,
+                media=MediaInfo(
+                    content_id="amzn1.dv.gti.live-example",
+                    content_type="video/mp4",
+                    stream_type=StreamType.LIVE,
+                    metadata=MediaMetadata(title="Live Match", subtitle="Prime Video"),
+                    duration=0.0,
+                ),
+                current_time=64092211200,
+                custom_data={
+                    "deviceId": "cast-device-live",
+                    "playbackEnvelope": {
+                        "envelope": "live-envelope-v1",
+                        "correlationId": "live-corr-1",
+                    },
+                },
+            ),
+        )
+
+    assert not isinstance(media, MediaResolveFailure)
+    assert media.stream_type is StreamType.LIVE
+    assert media.start_time == 64092211200
+    assert len(media.streams) == 2
+    assert media.streams[0].url.startswith("https://cdn.example.com/live-main.mpd")
+    assert media.streams[0].drm is not None
+    assert "/playback/drm/GetWidevineLicense" in media.streams[0].drm.license_url
+
+
+async def test_resolve_media_uses_catalog_metadata_when_title_missing() -> None:
+    provider = PrimeVideoProvider()
+    session = _make_session()
+    await provider.on_launch(session, LaunchCredentials(credentials="actor-token"))
+
+    resources = LivePlaybackResourcesResponse.model_validate(
+        {
+            "sessionization": {"sessionHandoffToken": "live-handoff-1"},
+            "livePlaybackUrls": {
+                "result": {
+                    "defaultUrlSetId": "live-main",
+                    "urlSets": [
+                        {
+                            "urlSetId": "live-main",
+                            "urls": {
+                                "manifest": {
+                                    "url": "https://cdn.example.com/live-main.mpd"
+                                }
+                            },
+                        }
+                    ],
+                }
+            },
+        }
+    )
+
+    with (
+        patch.object(
+            PrimeVideoAPI,
+            "refresh_playback_envelope",
+            new=AsyncMock(side_effect=RuntimeError("skip refresh")),
+        ),
+        patch.object(
+            PrimeVideoAPI,
+            "get_live_playback_resources",
+            new=AsyncMock(return_value=resources),
+        ),
+        patch.object(
+            PrimeVideoAPI,
+            "get_catalog_metadata",
+            new=AsyncMock(
+                return_value=PrimeCatalogMetadata(
+                    title="Newcastle v Manchester United",
+                    subtitle="Premier League",
+                )
+            ),
+        ),
+    ):
+        media = await provider.resolve_media(
+            session,
+            LoadRequest(
+                request_id=1,
+                media=MediaInfo(
+                    content_id="amzn1.dv.gti.live-example",
+                    content_type="video/mp4",
+                    stream_type=StreamType.LIVE,
+                    metadata=MediaMetadata(title="", subtitle=""),
+                    duration=0.0,
+                ),
+                current_time=0,
+                custom_data={
+                    "deviceId": "cast-device-live",
+                    "playbackEnvelope": {
+                        "envelope": "live-envelope-v1",
+                        "correlationId": "live-corr-1",
+                    },
+                },
+            ),
+        )
+
+    assert not isinstance(media, MediaResolveFailure)
+    assert media.title == "Newcastle v Manchester United"
+    assert media.subtitle == "Premier League"
 
 
 async def test_resolve_license_uses_prime_api() -> None:
@@ -162,6 +318,48 @@ async def test_resolve_license_uses_prime_api() -> None:
     assert response.status == 200
     assert response.body == b"license-bytes"
     mock_license.assert_awaited_once()
+    await_args = mock_license.await_args
+    assert await_args is not None
+    assert await_args.kwargs["is_live"] is False
+
+
+async def test_resolve_license_live_uses_live_license_mode() -> None:
+    provider = PrimeVideoProvider()
+    session = _make_session()
+    await provider.on_launch(session, LaunchCredentials(credentials="actor-token"))
+
+    state = provider._sessions[session.session_id]  # noqa: SLF001
+    state.device_id = "cast-device-1"
+    state.marketplace_id = "A3K6Y4MI8GDYMT"
+    state.current_title_id = "amzn1.dv.gti.live-example"
+    state.title_state[state.current_title_id] = _TitlePlaybackState(
+        playback_envelope="envelope-live-v1",
+        session_handoff_token="handoff-live-1",
+        is_live=True,
+    )
+
+    with patch.object(
+        PrimeVideoAPI,
+        "get_widevine_license",
+        new=AsyncMock(return_value=b"live-license-bytes"),
+    ) as mock_license:
+        response = await provider.resolve_license(
+            session,
+            LicenseRequest(session_id=session.session_id, route_id="r0", body=b"abc"),
+            LicenseRoute(
+                route_id="r0",
+                system=DrmSystem.WIDEVINE,
+                upstream_url="https://example.com/license?titleId=amzn1.dv.gti.live-example",
+            ),
+            AsyncMock(),
+        )
+
+    assert response.status == 200
+    assert response.body == b"live-license-bytes"
+    mock_license.assert_awaited_once()
+    await_args = mock_license.await_args
+    assert await_args is not None
+    assert await_args.kwargs["is_live"] is True
 
 
 async def test_am_i_registered_returns_not_registered_without_token() -> None:

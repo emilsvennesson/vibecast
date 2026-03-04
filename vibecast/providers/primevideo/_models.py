@@ -299,6 +299,100 @@ class VodPlaybackResourcesResponse(BaseModel):
     )
 
 
+class LiveManifestPayload(BaseModel):
+    """Manifest payload embedded within one live URL-set entry."""
+
+    model_config = _API_MODEL_CONFIG
+
+    url: str | None = None
+
+
+class LiveUrlsPayload(BaseModel):
+    """Live URL container with manifest details."""
+
+    model_config = _API_MODEL_CONFIG
+
+    manifest: LiveManifestPayload | None = None
+
+
+class LivePlaybackUrlSetPayload(BaseModel):
+    """One live playback URL-set entry."""
+
+    model_config = _API_MODEL_CONFIG
+
+    url_set_id: str = Field(alias="urlSetId")
+    urls: LiveUrlsPayload | None = None
+
+
+class LivePlaybackUrlsResult(BaseModel):
+    """Result payload for ``livePlaybackUrls`` section."""
+
+    model_config = _API_MODEL_CONFIG
+
+    default_url_set_id: str | None = Field(default=None, alias="defaultUrlSetId")
+    url_sets: list[LivePlaybackUrlSetPayload] = Field(
+        default_factory=list,
+        alias="urlSets",
+    )
+
+
+class LivePlaybackUrlsSection(BaseModel):
+    """``livePlaybackUrls`` wrapper section."""
+
+    model_config = _API_MODEL_CONFIG
+
+    result: LivePlaybackUrlsResult | None = None
+
+
+class LivePlaybackResourcesResponse(BaseModel):
+    """Top-level live playback resources response payload."""
+
+    model_config = _API_MODEL_CONFIG
+
+    sessionization: SessionizationPayload | None = None
+    live_playback_urls: LivePlaybackUrlsSection | None = Field(
+        default=None,
+        alias="livePlaybackUrls",
+    )
+
+
+class CatalogMetadataPayload(BaseModel):
+    """Catalog metadata payload returned by lumina resources API."""
+
+    model_config = _API_MODEL_CONFIG
+
+    title: str | None = None
+    event_title: str | None = Field(default=None, alias="eventTitle")
+    series_title: str | None = Field(default=None, alias="seriesTitle")
+
+
+class CatalogMetadataSection(BaseModel):
+    """``catalogMetadataV2`` wrapper section."""
+
+    model_config = _API_MODEL_CONFIG
+
+    catalog: CatalogMetadataPayload | None = None
+
+
+class PlayerChromeResourcesPayload(BaseModel):
+    """Resources payload from the player chrome endpoint."""
+
+    model_config = _API_MODEL_CONFIG
+
+    catalog_metadata_v2: CatalogMetadataSection | None = Field(
+        default=None,
+        alias="catalogMetadataV2",
+    )
+
+
+class PlayerChromeResourcesResponse(BaseModel):
+    """Top-level response payload from player chrome resources endpoint."""
+
+    model_config = _API_MODEL_CONFIG
+
+    resources: PlayerChromeResourcesPayload | None = None
+
+
 class WidevineLicensePayload(BaseModel):
     """Widevine license payload returned by Prime DRM endpoint."""
 
@@ -327,7 +421,13 @@ __all__ = [
     "ApplySettingsResponseMessage",
     "AuthRegisterResponse",
     "AuthTokenResponse",
+    "LivePlaybackResourcesResponse",
+    "LivePlaybackUrlSetPayload",
+    "LivePlaybackUrlsResult",
+    "LiveUrlsPayload",
+    "LiveManifestPayload",
     "PlaybackUrlSetPayload",
+    "PlayerChromeResourcesResponse",
     "PreloadMessage",
     "PreloadResponseMessage",
     "RefreshedEnvelopeResponse",

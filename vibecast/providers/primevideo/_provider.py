@@ -15,6 +15,7 @@ from vibecast.player import (
     LicenseRoute,
     PlaybackMedia,
     PlaybackStream,
+    StreamType,
 )
 from vibecast.provider import (
     LaunchCredentials,
@@ -64,6 +65,7 @@ class _TitlePlaybackState:
     playback_envelope: str
     correlation_id: str | None = None
     session_handoff_token: str | None = None
+    is_live: bool = False
 
 
 @dataclass(slots=True)
@@ -272,6 +274,9 @@ class PrimeVideoProvider(StatefulProvider[_PrimeSessionState]):
                 detail_code="INVALID_CONTENT_ID",
             )
 
+        stream_type = self.normalize_stream_type(load_request.media.stream_type)
+        is_live_stream = stream_type is StreamType.LIVE
+
         route_data = self._preload_for_title(load_request, state, title_id)
         if not route_data.playback_envelope:
             return MediaResolveFailure(
@@ -297,14 +302,24 @@ class PrimeVideoProvider(StatefulProvider[_PrimeSessionState]):
                 log.debug("prime envelope refresh failed", exc_info=True)
 
         try:
-            resources = await state.api.get_vod_playback_resources(
-                token=token,
-                device_id=device_id,
-                marketplace_id=marketplace_id,
-                title_id=title_id,
-                playback_envelope=route_data.playback_envelope,
-                locale=state.locale,
-            )
+            if is_live_stream:
+                resources = await state.api.get_live_playback_resources(
+                    token=token,
+                    device_id=device_id,
+                    marketplace_id=marketplace_id,
+                    title_id=title_id,
+                    playback_envelope=route_data.playback_envelope,
+                    locale=state.locale,
+                )
+            else:
+                resources = await state.api.get_vod_playback_resources(
+                    token=token,
+                    device_id=device_id,
+                    marketplace_id=marketplace_id,
+                    title_id=title_id,
+                    playback_envelope=route_data.playback_envelope,
+                    locale=state.locale,
+                )
             default_url_set_id, url_sets = state.api.extract_playback_url_sets(
                 resources
             )
@@ -325,6 +340,7 @@ class PrimeVideoProvider(StatefulProvider[_PrimeSessionState]):
             marketplace_id=marketplace_id,
             title_id=title_id,
             locale=state.locale,
+            is_live=is_live_stream,
         )
         drm = DrmInfo(system=DrmSystem.WIDEVINE, license_url=license_url)
 
@@ -342,19 +358,46 @@ class PrimeVideoProvider(StatefulProvider[_PrimeSessionState]):
             if resources.sessionization
             else None
         )
+        route_data.is_live = is_live_stream
         state.title_state[title_id] = route_data
         state.current_title_id = title_id
         state.device_id = device_id
         state.marketplace_id = marketplace_id
 
         metadata = load_request.media.metadata
+        title = metadata.title if metadata else None
+        if title is not None:
+            title = title.strip() or None
+
+        subtitle = metadata.subtitle if metadata else None
+        if subtitle is not None:
+            subtitle = subtitle.strip() or None
+
+        if title is None or subtitle is None:
+            try:
+                catalog_metadata = await state.api.get_catalog_metadata(
+                    token=token,
+                    device_id=device_id,
+                    marketplace_id=marketplace_id,
+                    title_id=title_id,
+                    locale=state.locale,
+                )
+            except Exception:
+                log.debug("prime catalog metadata lookup failed", exc_info=True)
+            else:
+                if catalog_metadata is not None:
+                    if title is None:
+                        title = catalog_metadata.title
+                    if subtitle is None:
+                        subtitle = catalog_metadata.subtitle
+
         return PlaybackMedia(
             session_id=session.session_id,
             streams=streams,
-            stream_type=self.normalize_stream_type(load_request.media.stream_type),
+            stream_type=stream_type,
             content_id=title_id,
-            title=metadata.title if metadata else None,
-            subtitle=metadata.subtitle if metadata else None,
+            title=title,
+            subtitle=subtitle,
             images=tuple(metadata.images) if metadata else (),
             duration=load_request.media.duration
             if load_request.media.duration is not None
@@ -406,6 +449,7 @@ class PrimeVideoProvider(StatefulProvider[_PrimeSessionState]):
                 session_handoff_token=title_state.session_handoff_token,
                 challenge=request.body,
                 locale=state.locale,
+                is_live=title_state.is_live,
             )
         except Exception:
             log.exception("prime license request failed")
