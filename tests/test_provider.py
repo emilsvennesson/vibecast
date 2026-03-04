@@ -39,6 +39,10 @@ class DummyProvider(Provider):
         return self._name
 
     @override
+    def provider_key(self) -> str:
+        return self._name.lower()
+
+    @override
     def namespaces(self) -> frozenset[str]:
         return frozenset({"urn:x-cast:test"})
 
@@ -93,6 +97,10 @@ class MinimalProvider(Provider):
         return "Minimal"
 
     @override
+    def provider_key(self) -> str:
+        return "minimal"
+
+    @override
     async def on_launch(
         self,
         session: ProviderSession,
@@ -120,6 +128,10 @@ class StatefulStringProvider(StatefulProvider[str]):
     @override
     def display_name(self) -> str:
         return "Stateful"
+
+    @override
+    def provider_key(self) -> str:
+        return "stateful"
 
     @override
     async def create_session_state(

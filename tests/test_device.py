@@ -87,6 +87,10 @@ class FakeProvider(Provider):
         return self._display_name
 
     @override
+    def provider_key(self) -> str:
+        return "fake"
+
+    @override
     def namespaces(self) -> frozenset[str]:
         return self._namespaces
 

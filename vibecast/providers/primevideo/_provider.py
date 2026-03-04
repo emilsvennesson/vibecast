@@ -114,6 +114,10 @@ class PrimeVideoProvider(StatefulProvider[_PrimeSessionState]):
         return self._NAMESPACES
 
     @override
+    def provider_key(self) -> str:
+        return "primevideo"
+
+    @override
     def configure(self, config: dict[str, Any]) -> None:
         self._default_marketplace_id = _config_string(
             config,

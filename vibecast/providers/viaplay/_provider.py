@@ -125,6 +125,10 @@ class ViaplayProvider(StatefulProvider[_ViaplayState]):
         return "Viaplay"
 
     @override
+    def provider_key(self) -> str:
+        return "viaplay"
+
+    @override
     def icon_url(self) -> str | None:
         return "https://lh3.googleusercontent.com/qXqoFPVkEZBwm7f1Yo8_7Xjv8wVeqbBeI-HfbD_KHjt0aOJf5dP_kbyQKMB1stIc0HIywc__C_Qq2CKjsg"
 

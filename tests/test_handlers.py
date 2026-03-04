@@ -58,6 +58,10 @@ class FakeProvider(Provider):
         return "Viaplay"
 
     @override
+    def provider_key(self) -> str:
+        return "fake"
+
+    @override
     def namespaces(self) -> frozenset[str]:
         return frozenset({"urn:x-cast:tv.viaplay.chromecast"})
 

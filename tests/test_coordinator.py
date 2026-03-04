@@ -75,6 +75,10 @@ class FakeProvider(Provider):
         return "Provider"
 
     @override
+    def provider_key(self) -> str:
+        return "test_provider"
+
+    @override
     def namespaces(self) -> frozenset[str]:
         return frozenset({"urn:x-cast:test"})
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import StrEnum
@@ -304,20 +303,9 @@ class Provider(ABC):
         """
         return None
 
+    @abstractmethod
     def provider_key(self) -> str:
-        """Stable filesystem-safe key for receiver-managed provider data.
-
-        Derived from the class name: strips a ``Provider`` suffix (if
-        present) and converts PascalCase to snake_case. For example,
-        ``ViaplayProvider`` yields ``"viaplay"``; ``MyCustomProvider``
-        yields ``"my_custom"``.
-        """
-        name = self.__class__.__name__
-        if name.endswith("Provider"):
-            name = name[:-8]
-        if not name:
-            name = self.__class__.__name__
-        return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+        """Return stable provider key used for config and data directories."""
 
     def configure(self, config: dict[str, Any]) -> None:
         """Apply provider-specific configuration loaded from TOML."""
