@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, override
@@ -11,7 +12,7 @@ from vibecast import _namespace as ns
 from vibecast._device import Device, DeviceIdentity, build_receiver_status
 from vibecast._models import LoadRequest, StreamType
 from vibecast.player import DefaultPlayer, PlaybackMedia, PlaybackStream
-from vibecast.provider import LaunchCredentials, Provider
+from vibecast.provider import LaunchCredentials, Provider, ProviderMessageDisposition
 
 if TYPE_CHECKING:
     from httpx import AsyncClient
@@ -65,9 +66,16 @@ class RecordingHandler:
 class FakeProvider(Provider):
     """Minimal provider implementation used by session tests."""
 
-    def __init__(self, display_name: str, namespaces: frozenset[str]) -> None:
+    def __init__(
+        self,
+        display_name: str,
+        namespaces: frozenset[str],
+        *,
+        message_disposition: ProviderMessageDisposition = ProviderMessageDisposition.HANDLED,
+    ) -> None:
         self._display_name = display_name
         self._namespaces = namespaces
+        self._message_disposition = message_disposition
         self.stop_calls = 0
 
     @override
@@ -77,6 +85,10 @@ class FakeProvider(Provider):
     @override
     def display_name(self) -> str:
         return self._display_name
+
+    @override
+    def provider_key(self) -> str:
+        return "fake"
 
     @override
     def namespaces(self) -> frozenset[str]:
@@ -90,10 +102,11 @@ class FakeProvider(Provider):
     @override
     async def on_message(
         self, session: Any, namespace: str, data: dict[str, Any]
-    ) -> None:
+    ) -> ProviderMessageDisposition:
         _ = session
         _ = namespace
         _ = data
+        return self._message_disposition
 
     @override
     async def on_stop(self, session: Any) -> None:
@@ -375,3 +388,32 @@ class TestSessionLifecycle:
         status = build_receiver_status(device)
         app = status.status.applications[0]
         assert app.sender_connected is True
+
+    async def test_logs_unhandled_provider_message(self, caplog: Any) -> None:
+        device = _build_device()
+        provider = FakeProvider(
+            display_name="Viaplay",
+            namespaces=frozenset({"urn:x-cast:tv.viaplay.chromecast"}),
+            message_disposition=ProviderMessageDisposition.UNHANDLED,
+        )
+        session = device.start_session(
+            "6313CF39",
+            provider,
+            LaunchCredentials(),
+            player=_build_player(),
+            player_server=None,
+        )
+        conn = _as_connection(RecordingConnection())
+
+        with caplog.at_level(logging.DEBUG, logger="vibecast.device"):
+            await device.route_message(
+                conn,
+                make_cast_message(
+                    source="sender-1",
+                    destination=session.transport_id,
+                    namespace="urn:x-cast:tv.viaplay.chromecast",
+                    payload_utf8='{"type":"UNKNOWN"}',
+                ),
+            )
+
+        assert "left message unhandled" in caplog.text

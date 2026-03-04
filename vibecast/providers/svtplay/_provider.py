@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, override
+from typing import TYPE_CHECKING, override
 from urllib.parse import urlsplit
 
-from vibecast.player import PlaybackMedia, PlaybackStream, StreamType
+from vibecast.player import PlaybackMedia, PlaybackStream
 from vibecast.provider import (
     LaunchCredentials,
     LoadRequest,
     MediaMetadata,
-    Provider,
+    MediaResolveFailure,
+    MediaResolveFailureCode,
+    MediaResolveResult,
     ProviderSession,
+    StatefulProvider,
+    media_failure_from_exception,
 )
 from vibecast.providers.svtplay._api import SvtPlayAPI
 
@@ -27,14 +31,23 @@ class _SessionState:
     api: SvtPlayAPI
 
 
-class SvtPlayProvider(Provider):
+class SvtPlayProvider(StatefulProvider[_SessionState]):
     """SVT Play provider implementation."""
 
     _APP_IDS = frozenset({"95370A1C"})
-    _NAMESPACES = frozenset[str]()
 
-    def __init__(self) -> None:
-        self._sessions: dict[str, _SessionState] = {}
+    @override
+    async def create_session_state(
+        self,
+        session: ProviderSession,
+        credentials: LaunchCredentials,
+    ) -> _SessionState:
+        _ = credentials
+        return _SessionState(
+            api=SvtPlayAPI(
+                client=session.http_client,
+            )
+        )
 
     @override
     def app_ids(self) -> frozenset[str]:
@@ -45,64 +58,53 @@ class SvtPlayProvider(Provider):
         return "SVT Play"
 
     @override
-    def icon_url(self) -> str | None:
-        return "https://lh3.googleusercontent.com/K3wumlt002dZrHoe4uKKdW-zMRLXdiPdgT1SRP90dnmMvLqsR-zaA3v-360EEIWLL5-SzJVt65XfqlgENw"
-
-    @override
     def provider_key(self) -> str:
         return "svtplay"
 
     @override
-    def namespaces(self) -> frozenset[str]:
-        return self._NAMESPACES
-
-    @override
-    async def on_launch(
-        self,
-        session: ProviderSession,
-        credentials: LaunchCredentials,
-    ) -> None:
-        _ = credentials
-        self._sessions[session.session_id] = _SessionState(
-            api=SvtPlayAPI(
-                client=session.http_client,
-            )
-        )
-
-    @override
-    async def on_message(
-        self,
-        session: ProviderSession,
-        namespace: str,
-        data: dict[str, Any],
-    ) -> None:
-        _ = session
-        _ = namespace
-        _ = data
+    def icon_url(self) -> str | None:
+        return "https://lh3.googleusercontent.com/K3wumlt002dZrHoe4uKKdW-zMRLXdiPdgT1SRP90dnmMvLqsR-zaA3v-360EEIWLL5-SzJVt65XfqlgENw"
 
     @override
     async def resolve_media(
         self,
         session: ProviderSession,
         load_request: LoadRequest,
-    ) -> PlaybackMedia:
-        state = self._sessions.get(session.session_id)
+    ) -> MediaResolveResult:
+        state = self.state_or_none(session)
         if state is None:
-            msg = "unknown session"
-            raise RuntimeError(msg)
+            return MediaResolveFailure(
+                code=MediaResolveFailureCode.INTERNAL_ERROR,
+                detail_code="MISSING_PROVIDER_SESSION_STATE",
+            )
 
         media = load_request.media
         svt_id = _extract_svt_id(media.content_id)
         if not svt_id:
-            msg = "INVALID_CONTENT_ID"
-            raise RuntimeError(msg)
+            return MediaResolveFailure(
+                code=MediaResolveFailureCode.INVALID_REQUEST,
+                detail_code="INVALID_CONTENT_ID",
+            )
 
-        resolved = await state.api.resolve_media(svt_id, media.custom_data)
+        try:
+            resolved = await state.api.resolve_media(svt_id, media.custom_data)
+        except RuntimeError as exc:
+            mapped = _resolve_failure_from_runtime_error(str(exc))
+            if mapped is not None:
+                return mapped
+            return media_failure_from_exception(
+                exc,
+                detail_code="SVT_RESOLVE_RUNTIME_ERROR",
+            )
+        except Exception as exc:
+            return media_failure_from_exception(
+                exc,
+                detail_code="SVT_RESOLVE_EXCEPTION",
+            )
+
         metadata = media.metadata
 
-        stream_type = media.stream_type
-        if stream_type is StreamType.NONE:
-            stream_type = StreamType.BUFFERED
+        stream_type = self.normalize_stream_type(media.stream_type)
 
         streams = tuple(
             PlaybackStream(
@@ -114,8 +116,10 @@ class SvtPlayProvider(Provider):
         )
 
         if not streams:
-            msg = "NO_RESOLVED_STREAMS"
-            raise RuntimeError(msg)
+            return MediaResolveFailure(
+                code=MediaResolveFailureCode.CONTENT_UNAVAILABLE,
+                detail_code="NO_RESOLVED_STREAMS",
+            )
 
         return PlaybackMedia(
             session_id=session.session_id,
@@ -131,10 +135,6 @@ class SvtPlayProvider(Provider):
             start_time=load_request.current_time,
             custom_data=resolved.custom_data,
         )
-
-    @override
-    async def on_stop(self, session: ProviderSession) -> None:
-        _ = self._sessions.pop(session.session_id, None)
 
 
 def _extract_svt_id(content_id: str) -> str:
@@ -168,6 +168,26 @@ def _metadata_images(metadata: MediaMetadata | None) -> tuple[MediaImage, ...]:
     if metadata is None:
         return ()
     return tuple(metadata.images)
+
+
+def _resolve_failure_from_runtime_error(
+    message: str,
+) -> MediaResolveFailure | None:
+    normalized = message.strip().upper()
+    if normalized == "NO_DASH_REFERENCE":
+        return MediaResolveFailure(
+            code=MediaResolveFailureCode.CONTENT_UNAVAILABLE,
+            detail_code="NO_DASH_REFERENCE",
+            message=message,
+        )
+    if normalized == "NO_RESOLVED_STREAMS":
+        return MediaResolveFailure(
+            code=MediaResolveFailureCode.CONTENT_UNAVAILABLE,
+            detail_code="NO_RESOLVED_STREAMS",
+            message=message,
+        )
+
+    return None
 
 
 __all__ = ["SvtPlayProvider"]

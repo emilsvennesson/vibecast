@@ -43,6 +43,7 @@ from vibecast.player import (
     Player,
     PlayerContext,
 )
+from vibecast.provider import MediaResolveFailure, MediaResolveFailureCode
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -314,12 +315,22 @@ class PlaybackCoordinator:
         if route is None:
             return LicenseResponse(status=404, body=b"unknown license route")
 
-        return await self._provider.resolve_license(
-            self._provider_session,
-            request,
-            route,
-            self._forward_license_request,
-        )
+        try:
+            return await self._provider.resolve_license(
+                self._provider_session,
+                request,
+                route,
+                self._forward_license_request,
+            )
+        except Exception:
+            log.warning(
+                "provider failed to resolve license for session %s",
+                self.session_id,
+                exc_info=True,
+            )
+            return LicenseResponse(
+                status=502, body=b"provider license resolution failed"
+            )
 
     async def send_current_status(
         self,
@@ -364,41 +375,52 @@ class PlaybackCoordinator:
 
         # Phase 2: resolve media through the provider.
         try:
-            media = await self._provider.resolve_media(self._provider_session, request)
+            resolved = await self._provider.resolve_media(
+                self._provider_session, request
+            )
         except Exception:
+            await self._fail_load(
+                connection,
+                sender_id,
+                request_id=request.request_id,
+                failure=MediaResolveFailure(
+                    code=MediaResolveFailureCode.INTERNAL_ERROR,
+                    detail_code="PROVIDER_EXCEPTION",
+                    message="provider threw during resolve_media",
+                ),
+            )
             log.warning(
                 "provider failed to resolve media for session %s",
                 self.session_id,
                 exc_info=True,
             )
-            failed = LoadFailedResponse(
-                request_id=request.request_id, reason="LOAD_FAILED"
-            )
-            await self._send_fn(
+            return
+
+        if isinstance(resolved, MediaResolveFailure):
+            await self._fail_load(
                 connection,
                 sender_id,
-                ns.MEDIA,
-                failed.model_dump(exclude_none=True),
+                request_id=request.request_id,
+                failure=resolved,
             )
-            self._current_media = None
             return
+
+        media = resolved
 
         if media.session_id != self.session_id:
             media = replace(media, session_id=self.session_id)
 
         if not media.streams:
-            log.warning("provider returned no streams for session %s", self.session_id)
-            failed = LoadFailedResponse(
-                request_id=request.request_id,
-                reason="LOAD_FAILED",
-            )
-            await self._send_fn(
+            await self._fail_load(
                 connection,
                 sender_id,
-                ns.MEDIA,
-                failed.model_dump(exclude_none=True),
+                request_id=request.request_id,
+                failure=MediaResolveFailure(
+                    code=MediaResolveFailureCode.INTERNAL_ERROR,
+                    detail_code="INVALID_PROVIDER_MEDIA",
+                    message="provider returned no playable streams",
+                ),
             )
-            self._current_media = None
             return
 
         media = self._with_license_proxy(media)
@@ -417,27 +439,65 @@ class PlaybackCoordinator:
         try:
             await self._player.on_load(self._player_context, media)
         except Exception:
+            await self._fail_load(
+                connection,
+                sender_id,
+                request_id=request.request_id,
+                failure=MediaResolveFailure(
+                    code=MediaResolveFailureCode.PLAYER_FAILURE,
+                    detail_code="PLAYER_ON_LOAD_FAILED",
+                    message="player.on_load raised",
+                    retryable=True,
+                ),
+            )
             log.warning(
                 "player on_load failed for session %s", self.session_id, exc_info=True
             )
-            self._set_idle_state(idle_reason=IdleReason.ERROR)
-            self._clear_media()
-            self._unregister_license_handler()
-
-            failed = LoadFailedResponse(
-                request_id=request.request_id,
-                reason="PLAYER_LOAD_FAILED",
-            )
-            await self._send_fn(
-                connection,
-                sender_id,
-                ns.MEDIA,
-                failed.model_dump(exclude_none=True),
-            )
-            await self._broadcast_media_status(request.request_id)
-            await self._notify_provider()
             return
 
+        await self._notify_provider()
+
+    async def _fail_load(
+        self,
+        connection: Connection,
+        sender_id: str,
+        *,
+        request_id: int,
+        failure: MediaResolveFailure,
+    ) -> None:
+        if failure.message is not None:
+            log.warning(
+                "load failure session=%s reason=%s detail=%s retryable=%s message=%s",
+                self.session_id,
+                failure.code.value,
+                failure.detail_code,
+                failure.retryable,
+                failure.message,
+            )
+        else:
+            log.warning(
+                "load failure session=%s reason=%s detail=%s retryable=%s",
+                self.session_id,
+                failure.code.value,
+                failure.detail_code,
+                failure.retryable,
+            )
+
+        self._set_idle_state(idle_reason=IdleReason.ERROR)
+        self._clear_media()
+        self._unregister_license_handler()
+
+        failed = LoadFailedResponse(
+            request_id=request_id,
+            reason=failure.code.value,
+        )
+        await self._send_fn(
+            connection,
+            sender_id,
+            ns.MEDIA,
+            failed.model_dump(exclude_none=True),
+        )
+        await self._broadcast_media_status(request_id)
         await self._notify_provider()
 
     async def _broadcast_loading_status(

@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
-import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from enum import StrEnum
 from importlib.metadata import EntryPoint, EntryPoints, entry_points
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast, override
+
+from pydantic import TypeAdapter, ValidationError
 
 from vibecast._config import (
     CastConfig,
     cast_device_capabilities_header,
 )
 from vibecast._log import get_logger
-from vibecast._models import LoadRequest, MediaInfo, MediaMetadata
+from vibecast._models import LoadRequest, MediaInfo, MediaMetadata, StreamType
 from vibecast._models._base import CastModel
+from vibecast.player import PlaybackMedia
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -26,7 +29,6 @@ if TYPE_CHECKING:
         LicenseRequest,
         LicenseResponse,
         LicenseRoute,
-        PlaybackMedia,
         PlaybackState,
     )
 
@@ -43,6 +45,8 @@ _DEFAULT_CAST_CAPABILITIES_HEADER = cast_device_capabilities_header(
     _DEFAULT_CAST_CONFIG.device_capabilities
 )
 
+_MessageT = TypeVar("_MessageT")
+
 
 @dataclass(slots=True, frozen=True)
 class LaunchCredentials:
@@ -50,6 +54,175 @@ class LaunchCredentials:
 
     credentials: str | None = None
     credentials_type: str | None = None
+
+
+class MediaResolveFailureCode(StrEnum):
+    """Canonical provider media-resolution failure reasons."""
+
+    INVALID_REQUEST = "INVALID_REQUEST"
+    AUTH_REQUIRED = "AUTH_REQUIRED"
+    ACCESS_DENIED = "ACCESS_DENIED"
+    MISSING_CONTEXT = "MISSING_CONTEXT"
+    CONTENT_UNAVAILABLE = "CONTENT_UNAVAILABLE"
+    UPSTREAM_FAILURE = "UPSTREAM_FAILURE"
+    PLAYER_FAILURE = "PLAYER_FAILURE"
+    INTERNAL_ERROR = "INTERNAL_ERROR"
+
+
+class ProviderMessageDisposition(StrEnum):
+    """Outcome for provider custom namespace message handling."""
+
+    HANDLED = "HANDLED"
+    UNHANDLED = "UNHANDLED"
+
+
+@dataclass(slots=True, frozen=True)
+class MediaResolveFailure:
+    """Structured provider failure result for media resolution."""
+
+    code: MediaResolveFailureCode
+    detail_code: str | None = None
+    message: str | None = None
+    retryable: bool = False
+
+
+type MediaResolveResult = PlaybackMedia | MediaResolveFailure
+
+
+class ProviderHttpStatusError(RuntimeError):
+    """Typed upstream HTTP failure that preserves status metadata."""
+
+    __slots__ = ("detail_code", "retryable", "status_code")
+
+    def __init__(
+        self,
+        status_code: int,
+        message: str | None = None,
+        *,
+        detail_code: str | None = None,
+        retryable: bool | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.detail_code = detail_code
+        self.retryable = retryable
+        super().__init__(
+            message
+            if message is not None
+            else f"upstream request failed with {status_code}"
+        )
+
+
+def media_failure_from_http_status(
+    status_code: int,
+    *,
+    detail_code: str | None = None,
+    message: str | None = None,
+    retryable: bool | None = None,
+) -> MediaResolveFailure:
+    """Map one upstream HTTP status code to a canonical media failure."""
+    if status_code == 401:
+        code = MediaResolveFailureCode.AUTH_REQUIRED
+        default_retryable = False
+    elif status_code == 403:
+        code = MediaResolveFailureCode.ACCESS_DENIED
+        default_retryable = False
+    elif status_code == 404:
+        code = MediaResolveFailureCode.CONTENT_UNAVAILABLE
+        default_retryable = False
+    elif status_code == 429 or status_code >= 500:
+        code = MediaResolveFailureCode.UPSTREAM_FAILURE
+        default_retryable = True
+    elif status_code >= 400:
+        code = MediaResolveFailureCode.INVALID_REQUEST
+        default_retryable = False
+    else:
+        code = MediaResolveFailureCode.UPSTREAM_FAILURE
+        default_retryable = True
+
+    resolved_detail = (
+        detail_code if detail_code is not None else f"UPSTREAM_{status_code}"
+    )
+    resolved_retryable = retryable if retryable is not None else default_retryable
+    return MediaResolveFailure(
+        code=code,
+        detail_code=resolved_detail,
+        message=message,
+        retryable=resolved_retryable,
+    )
+
+
+def media_failure_from_exception(
+    exc: Exception,
+    *,
+    detail_code: str | None = None,
+    default_code: MediaResolveFailureCode = MediaResolveFailureCode.UPSTREAM_FAILURE,
+    message: str | None = None,
+    retryable: bool | None = None,
+) -> MediaResolveFailure:
+    """Map one provider exception into a canonical media failure."""
+    status_code = _status_code_from_exception(exc)
+    if status_code is not None:
+        resolved_detail = detail_code
+        resolved_retryable = retryable
+        if isinstance(exc, ProviderHttpStatusError):
+            if resolved_detail is None:
+                resolved_detail = exc.detail_code
+            if resolved_retryable is None:
+                resolved_retryable = exc.retryable
+        return media_failure_from_http_status(
+            status_code,
+            detail_code=resolved_detail,
+            message=message if message is not None else str(exc),
+            retryable=resolved_retryable,
+        )
+
+    resolved_message = message if message is not None else str(exc)
+    if not resolved_message:
+        resolved_message = exc.__class__.__name__
+
+    resolved_retryable = retryable
+    if resolved_retryable is None:
+        if isinstance(exc, TimeoutError | OSError):
+            resolved_retryable = True
+        else:
+            resolved_retryable = (
+                default_code is MediaResolveFailureCode.UPSTREAM_FAILURE
+            )
+
+    return MediaResolveFailure(
+        code=default_code,
+        detail_code=detail_code,
+        message=resolved_message,
+        retryable=resolved_retryable,
+    )
+
+
+def _status_code_from_exception(exc: Exception) -> int | None:
+    if isinstance(exc, ProviderHttpStatusError):
+        return exc.status_code
+
+    raw_status = getattr(exc, "status_code", None)
+    if isinstance(raw_status, int):
+        return raw_status
+
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None
+    response_status = getattr(response, "status_code", None)
+    if isinstance(response_status, int):
+        return response_status
+    return None
+
+
+class ProviderSessionStateError(RuntimeError):
+    """Raised when a stateful provider callback has no backing session state."""
+
+    def __init__(self, provider: Provider, session_id: str) -> None:
+        self.provider_key = provider.provider_key()
+        self.session_id = session_id
+        super().__init__(
+            f"missing session state provider={self.provider_key} session={session_id}"
+        )
 
 
 @dataclass(slots=True, frozen=True)
@@ -118,9 +291,9 @@ class Provider(ABC):
     def display_name(self) -> str:
         """Return human-readable app name shown in receiver status."""
 
-    @abstractmethod
     def namespaces(self) -> frozenset[str]:
         """Return custom namespaces handled by this provider."""
+        return frozenset()
 
     def icon_url(self) -> str | None:
         """Return an icon URL for this app shown in receiver status.
@@ -130,20 +303,9 @@ class Provider(ABC):
         """
         return None
 
+    @abstractmethod
     def provider_key(self) -> str:
-        """Stable filesystem-safe key for receiver-managed provider data.
-
-        Derived from the class name: strips a ``Provider`` suffix (if
-        present) and converts PascalCase to snake_case. For example,
-        ``ViaplayProvider`` yields ``"viaplay"``; ``MyCustomProvider``
-        yields ``"my_custom"``.
-        """
-        name = self.__class__.__name__
-        if name.endswith("Provider"):
-            name = name[:-8]
-        if not name:
-            name = self.__class__.__name__
-        return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+        """Return stable provider key used for config and data directories."""
 
     def configure(self, config: dict[str, Any]) -> None:
         """Apply provider-specific configuration loaded from TOML."""
@@ -158,22 +320,43 @@ class Provider(ABC):
     ) -> None:
         """Handle ``LAUNCH`` for one of ``app_ids()``."""
 
-    @abstractmethod
     async def on_message(
         self,
         session: ProviderSession,
         namespace: str,
         data: dict[str, Any],
-    ) -> None:
+    ) -> ProviderMessageDisposition:
         """Handle provider namespace messages (excluding media namespace)."""
+        _ = session
+        _ = namespace
+        _ = data
+        return ProviderMessageDisposition.UNHANDLED
 
     @abstractmethod
     async def resolve_media(
         self,
         session: ProviderSession,
         load_request: LoadRequest,
-    ) -> PlaybackMedia:
+    ) -> MediaResolveResult:
         """Translate a Cast ``LOAD`` request into canonical playback media."""
+
+    @staticmethod
+    def normalize_stream_type(stream_type: StreamType) -> StreamType:
+        """Normalize provider stream types to Cast media semantics."""
+        if stream_type is StreamType.NONE:
+            return StreamType.BUFFERED
+        return stream_type
+
+    def parse_message(
+        self,
+        adapter: TypeAdapter[_MessageT],
+        data: dict[str, Any],
+    ) -> _MessageT | None:
+        """Parse provider custom message payloads using a shared policy."""
+        try:
+            return adapter.validate_python(data)
+        except ValidationError:
+            return None
 
     async def on_sender_connected(
         self,
@@ -208,6 +391,61 @@ class Provider(ABC):
         _ = session
         _ = request
         return await forward(request, route)
+
+
+class StatefulProvider[StateT](Provider, ABC):
+    """Provider base class that manages per-session provider state."""
+
+    def __init__(self) -> None:
+        self._sessions: dict[str, StateT] = {}
+
+    @abstractmethod
+    async def create_session_state(
+        self,
+        session: ProviderSession,
+        credentials: LaunchCredentials,
+    ) -> StateT:
+        """Build mutable provider state for one launched app session."""
+
+    async def teardown_session_state(
+        self,
+        session: ProviderSession,
+        state: StateT,
+    ) -> None:
+        """Release resources for one stopped app session."""
+        _ = session
+        _ = state
+
+    @override
+    async def on_launch(
+        self,
+        session: ProviderSession,
+        credentials: LaunchCredentials,
+    ) -> None:
+        self._sessions[session.session_id] = await self.create_session_state(
+            session,
+            credentials,
+        )
+
+    @override
+    async def on_stop(self, session: ProviderSession) -> None:
+        state = self._sessions.pop(session.session_id, None)
+        if state is None:
+            return
+        await self.teardown_session_state(session, state)
+
+    def state_or_none(self, session: ProviderSession | str) -> StateT | None:
+        """Return session state if present, else ``None``."""
+        session_id = session if isinstance(session, str) else session.session_id
+        return self._sessions.get(session_id)
+
+    def require_state(self, session: ProviderSession | str) -> StateT:
+        """Return session state or raise ``ProviderSessionStateError``."""
+        session_id = session if isinstance(session, str) else session.session_id
+        state = self._sessions.get(session_id)
+        if state is None:
+            raise ProviderSessionStateError(self, session_id)
+        return state
 
 
 def discover_providers() -> list[Provider]:
@@ -283,11 +521,20 @@ __all__ = [
     "CastModel",
     "LaunchCredentials",
     "LoadRequest",
+    "MediaResolveFailure",
+    "MediaResolveFailureCode",
+    "MediaResolveResult",
+    "ProviderHttpStatusError",
     "MediaInfo",
     "MediaMetadata",
+    "ProviderMessageDisposition",
     "Provider",
+    "ProviderSessionStateError",
     "ProviderRegistry",
     "ProviderSession",
     "ReceiverContext",
+    "StatefulProvider",
     "discover_providers",
+    "media_failure_from_exception",
+    "media_failure_from_http_status",
 ]

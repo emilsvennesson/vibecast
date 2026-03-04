@@ -20,7 +20,17 @@ from vibecast.player import (
     PlayerState,
     StreamType,
 )
-from vibecast.provider import LaunchCredentials, LoadRequest, Provider, ProviderSession
+from vibecast.provider import (
+    LaunchCredentials,
+    LoadRequest,
+    MediaResolveFailure,
+    MediaResolveFailureCode,
+    MediaResolveResult,
+    ProviderMessageDisposition,
+    ProviderSession,
+    StatefulProvider,
+    media_failure_from_exception,
+)
 from vibecast.providers.viaplay._api import (
     DeviceAuthInfo,
     SessionCheckResult,
@@ -81,14 +91,30 @@ class _ViaplayState:
     poll_task: asyncio.Task[None] | None = field(default=None, repr=False)
 
 
-class ViaplayProvider(Provider):
+class ViaplayProvider(StatefulProvider[_ViaplayState]):
     """Viaplay provider implementation."""
 
     _APP_IDS = frozenset({"6313CF39", "2DB7CC49"})
     _NAMESPACES = frozenset({_NS_VIAPLAY})
 
-    def __init__(self) -> None:
-        self._sessions: dict[str, _ViaplayState] = {}
+    @override
+    async def create_session_state(
+        self,
+        session: ProviderSession,
+        credentials: LaunchCredentials,
+    ) -> _ViaplayState:
+        api = ViaplayAPI(
+            client=session.http_client,
+            device_id=session.receiver.device_id,
+            user_agent=session.receiver.user_agent,
+        )
+        state = _ViaplayState(
+            api=api,
+            credentials=credentials,
+            broadcast=session.broadcast_custom,
+        )
+        log.info("viaplay session %s launched", session.session_id)
+        return state
 
     @override
     def app_ids(self) -> frozenset[str]:
@@ -99,6 +125,10 @@ class ViaplayProvider(Provider):
         return "Viaplay"
 
     @override
+    def provider_key(self) -> str:
+        return "viaplay"
+
+    @override
     def icon_url(self) -> str | None:
         return "https://lh3.googleusercontent.com/qXqoFPVkEZBwm7f1Yo8_7Xjv8wVeqbBeI-HfbD_KHjt0aOJf5dP_kbyQKMB1stIc0HIywc__C_Qq2CKjsg"
 
@@ -107,31 +137,13 @@ class ViaplayProvider(Provider):
         return self._NAMESPACES
 
     @override
-    async def on_launch(
-        self,
-        session: ProviderSession,
-        credentials: LaunchCredentials,
-    ) -> None:
-        api = ViaplayAPI(
-            client=session.http_client,
-            device_id=session.receiver.device_id,
-            user_agent=session.receiver.user_agent,
-        )
-        self._sessions[session.session_id] = _ViaplayState(
-            api=api,
-            credentials=credentials,
-            broadcast=session.broadcast_custom,
-        )
-        log.info("viaplay session %s launched", session.session_id)
-
-    @override
     async def on_sender_connected(
         self,
         session: ProviderSession,
         sender_id: str,
     ) -> None:
         _ = sender_id
-        state = self._sessions.get(session.session_id)
+        state = self.state_or_none(session)
         if state is None:
             return
         await self._broadcast_receiver_state(
@@ -145,17 +157,15 @@ class ViaplayProvider(Provider):
         session: ProviderSession,
         namespace: str,
         data: dict[str, Any],
-    ) -> None:
+    ) -> ProviderMessageDisposition:
         _ = namespace
-        state = self._sessions.get(session.session_id)
+        state = self.state_or_none(session)
         if state is None:
-            return
+            return ProviderMessageDisposition.UNHANDLED
 
-        try:
-            msg = viaplay_request_adapter.validate_python(data)
-        except Exception:
-            log.debug("unhandled viaplay message type: %s", data.get("type", ""))
-            return
+        msg = self.parse_message(viaplay_request_adapter, data)
+        if msg is None:
+            return ProviderMessageDisposition.UNHANDLED
 
         match msg:
             case SetupInfo():
@@ -163,7 +173,7 @@ class ViaplayProvider(Provider):
             case AuthorizationDone():
                 if not msg.success:
                     log.debug("ignoring AUTHORIZATION_DONE with success=false")
-                    return
+                    return ProviderMessageDisposition.HANDLED
                 await _cancel_task(state.auth_task)
                 state.auth_task = asyncio.create_task(
                     self._complete_device_auth(session, state)
@@ -172,23 +182,29 @@ class ViaplayProvider(Provider):
                 state.playback_state = PlaybackState(player_state=PlayerState.IDLE)
                 await self._broadcast_receiver_state(state, "IDLE")
 
+        return ProviderMessageDisposition.HANDLED
+
     @override
     async def resolve_media(
         self,
         session: ProviderSession,
         load_request: LoadRequest,
-    ) -> PlaybackMedia:
-        state = self._sessions.get(session.session_id)
+    ) -> MediaResolveResult:
+        state = self.state_or_none(session)
         if state is None:
-            msg = "unknown session"
-            raise RuntimeError(msg)
+            return MediaResolveFailure(
+                code=MediaResolveFailureCode.INTERNAL_ERROR,
+                detail_code="MISSING_PROVIDER_SESSION_STATE",
+            )
 
         with contextlib.suppress(TimeoutError):
             _ = await asyncio.wait_for(state.auth_event.wait(), timeout=30)
 
         if not state.authenticated:
-            msg = "NOT_AUTHENTICATED"
-            raise RuntimeError(msg)
+            return MediaResolveFailure(
+                code=MediaResolveFailureCode.AUTH_REQUIRED,
+                detail_code="NOT_AUTHENTICATED",
+            )
 
         custom_data = load_request.custom_data or {}
         templated_product_url = custom_data.get(
@@ -219,14 +235,26 @@ class ViaplayProvider(Provider):
 
         play_url = custom_data.get("playUrl") or custom_data.get("contentUrl") or ""
         if not isinstance(play_url, str) or not play_url:
-            msg = "NO_PLAY_URL"
-            raise RuntimeError(msg)
+            return MediaResolveFailure(
+                code=MediaResolveFailureCode.INVALID_REQUEST,
+                detail_code="NO_PLAY_URL",
+            )
 
-        stream_info = await state.api.fetch_stream(play_url)
+        try:
+            stream_info = await state.api.fetch_stream(play_url)
+        except Exception as exc:
+            message = str(exc)
+            if "no stream url" in message.lower():
+                return MediaResolveFailure(
+                    code=MediaResolveFailureCode.CONTENT_UNAVAILABLE,
+                    detail_code="NO_STREAM_URL",
+                    message=message,
+                )
+            return media_failure_from_exception(exc)
 
-        resolved_stream_type = stream_info.stream_type or load_request.media.stream_type
-        if resolved_stream_type is StreamType.NONE:
-            resolved_stream_type = StreamType.BUFFERED
+        resolved_stream_type = self.normalize_stream_type(
+            stream_info.stream_type or load_request.media.stream_type
+        )
 
         resolved_duration = stream_info.duration
         if resolved_duration is None and load_request.media.duration:
@@ -265,8 +293,10 @@ class ViaplayProvider(Provider):
             _add_stream(fallback_url)
 
         if not streams:
-            msg = "NO_STREAM_URL"
-            raise RuntimeError(msg)
+            return MediaResolveFailure(
+                code=MediaResolveFailureCode.CONTENT_UNAVAILABLE,
+                detail_code="NO_STREAM_URL",
+            )
 
         state.stream_type = resolved_stream_type
 
@@ -290,7 +320,7 @@ class ViaplayProvider(Provider):
         session: ProviderSession,
         state: PlaybackState,
     ) -> None:
-        internal = self._sessions.get(session.session_id)
+        internal = self.state_or_none(session)
         if internal is None:
             return
         internal.playback_state = state
@@ -308,15 +338,16 @@ class ViaplayProvider(Provider):
         route: LicenseRoute,
         forward: Callable[[LicenseRequest, LicenseRoute], Awaitable[LicenseResponse]],
     ) -> LicenseResponse:
-        if session.session_id not in self._sessions:
-            return LicenseResponse(status=500, body=b"unknown session")
+        if self.state_or_none(session) is None:
+            return LicenseResponse(status=409, body=b"missing provider session state")
         return await forward(request, route)
 
     @override
-    async def on_stop(self, session: ProviderSession) -> None:
-        state = self._sessions.pop(session.session_id, None)
-        if state is None:
-            return
+    async def teardown_session_state(
+        self,
+        session: ProviderSession,
+        state: _ViaplayState,
+    ) -> None:
         for task in (state.auth_task, state.poll_task):
             await _cancel_task(task)
         log.info("viaplay session %s stopped", session.session_id)

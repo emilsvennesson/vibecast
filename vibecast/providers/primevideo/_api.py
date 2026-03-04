@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
+from vibecast.provider import ProviderHttpStatusError
 from vibecast.providers.primevideo._models import (
     AuthRegisterResponse,
     AuthTokenResponse,
@@ -390,7 +391,11 @@ class PrimeVideoAPI:
         if response.status_code >= 400:
             preview = response.text[:300].replace("\n", " ")
             msg = f"prime api request failed ({response.status_code}): {preview}"
-            raise RuntimeError(msg)
+            raise ProviderHttpStatusError(
+                response.status_code,
+                msg,
+                detail_code="PRIME_API_REQUEST",
+            )
 
         data = response.json()
         if not isinstance(data, dict):

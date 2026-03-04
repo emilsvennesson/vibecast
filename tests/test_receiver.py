@@ -20,7 +20,12 @@ from vibecast._proto.cast_channel_pb2 import (
     DeviceAuthMessage,
 )
 from vibecast.player import PlaybackMedia, PlaybackStream
-from vibecast.provider import LaunchCredentials, Provider, ProviderSession
+from vibecast.provider import (
+    LaunchCredentials,
+    Provider,
+    ProviderMessageDisposition,
+    ProviderSession,
+)
 from vibecast.receiver import CastReceiver
 
 if TYPE_CHECKING:
@@ -139,9 +144,10 @@ class DummyProvider(Provider):
         session: ProviderSession,
         namespace: str,
         data: dict[str, Any],
-    ) -> None:
+    ) -> ProviderMessageDisposition:
         _ = session
         self.custom_messages.append((namespace, data))
+        return ProviderMessageDisposition.HANDLED
 
     @override
     async def resolve_media(

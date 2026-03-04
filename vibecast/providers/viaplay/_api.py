@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 from uritemplate import expand as uri_expand
 
 from vibecast.player import StreamType
+from vibecast.provider import ProviderHttpStatusError
 from vibecast.providers.viaplay._models import (
     ViaplayAuthorizedPollResponse,
     ViaplayDeviceAuthResponse,
@@ -279,7 +280,11 @@ class ViaplayAPI:
         body, status = await self._get(auth_url)
         if status != 200:
             msg = f"device authorization request failed with status {status}"
-            raise RuntimeError(msg)
+            raise ProviderHttpStatusError(
+                status,
+                msg,
+                detail_code="VIAPLAY_DEVICE_AUTH",
+            )
 
         resp = ViaplayDeviceAuthResponse.model_validate(body)
         if not resp.user_code:
@@ -350,7 +355,11 @@ class ViaplayAPI:
                 body,
             )
             msg = f"stream fetch failed with status {status}"
-            raise RuntimeError(msg)
+            raise ProviderHttpStatusError(
+                status,
+                msg,
+                detail_code="VIAPLAY_STREAM_FETCH",
+            )
 
         resp = ViaplayStreamResponse.model_validate(body)
         stream_type = self._resolve_stream_type(resp, play_url)

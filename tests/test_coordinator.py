@@ -36,7 +36,11 @@ from vibecast.player import (
 )
 from vibecast.provider import (
     LaunchCredentials,
+    MediaResolveFailure,
+    MediaResolveFailureCode,
+    MediaResolveResult,
     Provider,
+    ProviderMessageDisposition,
     ProviderSession,
     ReceiverContext,
 )
@@ -46,9 +50,18 @@ if TYPE_CHECKING:
 
 
 class FakeProvider(Provider):
-    def __init__(self, media: PlaybackMedia, *, use_forwarder: bool = False) -> None:
+    def __init__(
+        self,
+        media: MediaResolveResult,
+        *,
+        use_forwarder: bool = False,
+        raise_on_resolve: bool = False,
+        raise_on_license: bool = False,
+    ) -> None:
         self._media = media
         self._use_forwarder = use_forwarder
+        self._raise_on_resolve = raise_on_resolve
+        self._raise_on_license = raise_on_license
         self.playback_updates: list[PlaybackState] = []
         self.license_requests: list[LicenseRequest] = []
         self.license_routes: list[LicenseRoute] = []
@@ -60,6 +73,10 @@ class FakeProvider(Provider):
     @override
     def display_name(self) -> str:
         return "Provider"
+
+    @override
+    def provider_key(self) -> str:
+        return "test_provider"
 
     @override
     def namespaces(self) -> frozenset[str]:
@@ -80,19 +97,23 @@ class FakeProvider(Provider):
         session: ProviderSession,
         namespace: str,
         data: dict[str, Any],
-    ) -> None:
+    ) -> ProviderMessageDisposition:
         _ = session
         _ = namespace
         _ = data
+        return ProviderMessageDisposition.HANDLED
 
     @override
     async def resolve_media(
         self,
         session: ProviderSession,
         load_request: LoadRequest,
-    ) -> PlaybackMedia:
+    ) -> MediaResolveResult:
         _ = session
         _ = load_request
+        if self._raise_on_resolve:
+            msg = "resolve exploded"
+            raise RuntimeError(msg)
         return self._media
 
     @override
@@ -113,6 +134,9 @@ class FakeProvider(Provider):
         forward: Any,
     ) -> LicenseResponse:
         _ = session
+        if self._raise_on_license:
+            msg = "license exploded"
+            raise RuntimeError(msg)
         self.license_requests.append(request)
         self.license_routes.append(route)
         if self._use_forwarder:
@@ -611,6 +635,201 @@ class TestCoordinator:
         assert captured_request["body"] == b"challenge"
         assert response.status == 201
         assert response.body == b"upstream-license"
+
+    async def test_provider_load_failure_reason_is_passthrough(self) -> None:
+        provider = FakeProvider(
+            MediaResolveFailure(code=MediaResolveFailureCode.AUTH_REQUIRED)
+        )
+        player = FakePlayer()
+        player_server = FakePlayerServer()
+        sent: list[tuple[str, str, dict[str, Any]]] = []
+        broadcast: list[tuple[str, dict[str, Any]]] = []
+
+        async def _send_fn(
+            connection: object,
+            sender_id: str,
+            namespace: str,
+            data: dict[str, Any],
+        ) -> None:
+            _ = connection
+            sent.append((sender_id, namespace, data))
+
+        async def _broadcast_fn(namespace: str, data: dict[str, Any]) -> None:
+            broadcast.append((namespace, data))
+
+        coordinator = PlaybackCoordinator(
+            session_id="session-1",
+            transport_id="pid-1",
+            provider=provider,
+            provider_session=_provider_session(),
+            player=player,
+            player_server=cast("Any", player_server),
+            broadcast_fn=_broadcast_fn,
+            send_fn=_send_fn,
+            initial_volume=Volume(level=1.0, muted=False),
+        )
+
+        await coordinator.handle_media_message(
+            cast("Any", object()),
+            "sender-1",
+            LoadRequest(
+                request_id=1,
+                media=MediaInfo(content_id="x", stream_type=StreamType.BUFFERED),
+            ),
+        )
+
+        assert player.load_calls == []
+        assert sent[-1][1] == ns.MEDIA
+        assert sent[-1][2]["type"] == "LOAD_FAILED"
+        assert sent[-1][2]["reason"] == MediaResolveFailureCode.AUTH_REQUIRED
+        assert player_server.unregister_calls[-1] == "session-1"
+        assert broadcast[-1][1]["status"][0]["playerState"] == "IDLE"
+        assert broadcast[-1][1]["status"][0]["idleReason"] == "ERROR"
+
+    async def test_provider_load_exception_maps_to_internal_reason(self) -> None:
+        provider = FakeProvider(
+            MediaResolveFailure(code=MediaResolveFailureCode.CONTENT_UNAVAILABLE),
+            raise_on_resolve=True,
+        )
+        player_server = FakePlayerServer()
+        sent: list[tuple[str, str, dict[str, Any]]] = []
+
+        async def _send_fn(
+            connection: object,
+            sender_id: str,
+            namespace: str,
+            data: dict[str, Any],
+        ) -> None:
+            _ = connection
+            sent.append((sender_id, namespace, data))
+
+        coordinator = PlaybackCoordinator(
+            session_id="session-1",
+            transport_id="pid-1",
+            provider=provider,
+            provider_session=_provider_session(),
+            player=FakePlayer(),
+            player_server=cast("Any", player_server),
+            broadcast_fn=lambda _namespace, _data: _noop_async(),
+            send_fn=_send_fn,
+            initial_volume=Volume(level=1.0, muted=False),
+        )
+
+        await coordinator.handle_media_message(
+            cast("Any", object()),
+            "sender-1",
+            LoadRequest(
+                request_id=1,
+                media=MediaInfo(content_id="x", stream_type=StreamType.BUFFERED),
+            ),
+        )
+
+        assert sent[-1][2]["type"] == "LOAD_FAILED"
+        assert sent[-1][2]["reason"] == MediaResolveFailureCode.INTERNAL_ERROR
+        assert player_server.unregister_calls[-1] == "session-1"
+
+    async def test_failed_second_load_clears_stale_license_routes(self) -> None:
+        first_media = PlaybackMedia(
+            session_id="session-1",
+            streams=(
+                PlaybackStream(
+                    url="https://cdn.example.com/manifest.mpd",
+                    content_type="application/dash+xml",
+                    drm=DrmInfo(
+                        system=DrmSystem.WIDEVINE,
+                        license_url="https://drm.example.com/license",
+                    ),
+                ),
+            ),
+            stream_type=StreamType.BUFFERED,
+        )
+        provider = FakeProvider(first_media)
+        player_server = FakePlayerServer()
+
+        coordinator = PlaybackCoordinator(
+            session_id="session-1",
+            transport_id="pid-1",
+            provider=provider,
+            provider_session=_provider_session(),
+            player=FakePlayer(),
+            player_server=cast("Any", player_server),
+            broadcast_fn=lambda _namespace, _data: _noop_async(),
+            send_fn=lambda _c, _s, _n, _d: _noop_async(),
+            initial_volume=Volume(level=1.0, muted=False),
+        )
+
+        await coordinator.handle_media_message(
+            cast("Any", object()),
+            "sender-1",
+            LoadRequest(
+                request_id=1,
+                media=MediaInfo(content_id="x", stream_type=StreamType.BUFFERED),
+            ),
+        )
+        assert player_server.register_calls == ["session-1"]
+
+        provider._media = MediaResolveFailure(  # noqa: SLF001
+            code=MediaResolveFailureCode.CONTENT_UNAVAILABLE
+        )
+        await coordinator.handle_media_message(
+            cast("Any", object()),
+            "sender-1",
+            LoadRequest(
+                request_id=2,
+                media=MediaInfo(content_id="x", stream_type=StreamType.BUFFERED),
+            ),
+        )
+
+        response = await coordinator.handle_license(
+            LicenseRequest(session_id="session-1", route_id="r0", body=b"challenge")
+        )
+        assert response.status == 404
+        assert response.body == b"unknown license route"
+
+    async def test_license_provider_exception_returns_502(self) -> None:
+        media = PlaybackMedia(
+            session_id="session-1",
+            streams=(
+                PlaybackStream(
+                    url="https://cdn.example.com/manifest.mpd",
+                    content_type="application/dash+xml",
+                    drm=DrmInfo(
+                        system=DrmSystem.WIDEVINE,
+                        license_url="https://drm.example.com/license",
+                    ),
+                ),
+            ),
+            stream_type=StreamType.BUFFERED,
+        )
+        provider = FakeProvider(media, raise_on_license=True)
+
+        coordinator = PlaybackCoordinator(
+            session_id="session-1",
+            transport_id="pid-1",
+            provider=provider,
+            provider_session=_provider_session(),
+            player=FakePlayer(),
+            player_server=cast("Any", FakePlayerServer()),
+            broadcast_fn=lambda _namespace, _data: _noop_async(),
+            send_fn=lambda _c, _s, _n, _d: _noop_async(),
+            initial_volume=Volume(level=1.0, muted=False),
+        )
+
+        await coordinator.handle_media_message(
+            cast("Any", object()),
+            "sender-1",
+            LoadRequest(
+                request_id=1,
+                media=MediaInfo(content_id="x", stream_type=StreamType.BUFFERED),
+            ),
+        )
+
+        response = await coordinator.handle_license(
+            LicenseRequest(session_id="session-1", route_id="r0", body=b"challenge")
+        )
+
+        assert response.status == 502
+        assert response.body == b"provider license resolution failed"
 
 
 async def _noop_async() -> None:

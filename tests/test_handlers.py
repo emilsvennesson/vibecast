@@ -20,7 +20,7 @@ from vibecast._models import (
     StreamType,
 )
 from vibecast.player import DefaultPlayer, PlaybackMedia, PlaybackStream
-from vibecast.provider import LaunchCredentials, Provider
+from vibecast.provider import LaunchCredentials, Provider, ProviderMessageDisposition
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -58,6 +58,10 @@ class FakeProvider(Provider):
         return "Viaplay"
 
     @override
+    def provider_key(self) -> str:
+        return "fake"
+
+    @override
     def namespaces(self) -> frozenset[str]:
         return frozenset({"urn:x-cast:tv.viaplay.chromecast"})
 
@@ -69,10 +73,11 @@ class FakeProvider(Provider):
     @override
     async def on_message(
         self, session: Any, namespace: str, data: dict[str, Any]
-    ) -> None:
+    ) -> ProviderMessageDisposition:
         _ = session
         _ = namespace
         _ = data
+        return ProviderMessageDisposition.HANDLED
 
     @override
     async def resolve_media(
