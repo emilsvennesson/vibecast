@@ -14,6 +14,7 @@ from vibecast.provider import ProviderHttpStatusError
 from vibecast.providers.primevideo._models import (
     AuthRegisterResponse,
     AuthTokenResponse,
+    LivePlaybackResourcesResponse,
     PlaybackUrlSetPayload,
     RefreshedEnvelopeResponse,
     VodPlaybackResourcesResponse,
@@ -52,6 +53,11 @@ class PrimeEnvelopeData:
 
     playback_envelope: str
     correlation_id: str | None = None
+
+
+type PrimePlaybackResourcesResponse = (
+    VodPlaybackResourcesResponse | LivePlaybackResourcesResponse
+)
 
 
 class PrimeVideoAPI:
@@ -107,6 +113,7 @@ class PrimeVideoAPI:
         marketplace_id: str,
         title_id: str,
         locale: str,
+        is_live: bool = False,
     ) -> str:
         """Build Prime Widevine license endpoint URL for one title."""
         query = {
@@ -119,9 +126,14 @@ class PrimeVideoAPI:
             "titleId": title_id,
             "nerid": self._new_nerid(),
         }
+        path = (
+            "/playback/drm/GetWidevineLicense"
+            if is_live
+            else "/playback/drm-vod/GetWidevineLicense"
+        )
         return self._build_url(
             _PLAYBACK_ZAZ_BASE_URL,
-            "/playback/drm-vod/GetWidevineLicense",
+            path,
             query,
         )
 
@@ -309,6 +321,52 @@ class PrimeVideoAPI:
         )
         return VodPlaybackResourcesResponse.model_validate(response)
 
+    async def get_live_playback_resources(
+        self,
+        *,
+        token: str,
+        device_id: str,
+        marketplace_id: str,
+        title_id: str,
+        playback_envelope: str,
+        locale: str,
+    ) -> LivePlaybackResourcesResponse:
+        """Resolve one live title ID to playback URL sets + sessionization data."""
+        query = {
+            "deviceID": device_id,
+            "deviceTypeID": _API_DEVICE_TYPE_ID,
+            "gascEnabled": True,
+            "marketplaceID": marketplace_id,
+            "uxLocale": locale,
+            "firmware": _API_FIRMWARE_VERSION,
+            "titleId": title_id,
+            "nerid": self._new_nerid(),
+        }
+        url = self._build_url(
+            _PLAYBACK_ZAZ_BASE_URL,
+            "/playback/prs/GetLivePlaybackResources",
+            query,
+        )
+        payload = _build_live_playback_request(
+            title_id=title_id,
+            playback_envelope=playback_envelope,
+            locale=locale,
+            display_width=self._display_width,
+            display_height=self._display_height,
+            hdcp_level=self._hdcp_level,
+            max_video_resolution=self._max_video_resolution,
+            supported_codecs=self._supported_codecs,
+            dynamic_range_formats=self._dynamic_range_formats,
+            supported_frame_rates=self._supported_frame_rates,
+        )
+        response = await self._post_json(
+            url,
+            payload,
+            token=token,
+            content_type="text/plain",
+        )
+        return LivePlaybackResourcesResponse.model_validate(response)
+
     async def get_widevine_license(
         self,
         *,
@@ -320,6 +378,7 @@ class PrimeVideoAPI:
         session_handoff_token: str | None,
         challenge: bytes,
         locale: str,
+        is_live: bool,
     ) -> bytes:
         """Resolve one Widevine challenge to a license blob."""
         url = self.widevine_license_url(
@@ -327,6 +386,7 @@ class PrimeVideoAPI:
             marketplace_id=marketplace_id,
             title_id=title_id,
             locale=locale,
+            is_live=is_live,
         )
         payload: dict[str, Any] = {
             "includeHdcpTestKey": True,
@@ -351,18 +411,44 @@ class PrimeVideoAPI:
 
     @staticmethod
     def extract_playback_url_sets(
-        resources: VodPlaybackResourcesResponse,
+        resources: PrimePlaybackResourcesResponse,
     ) -> tuple[str | None, tuple[PlaybackUrlSetPayload, ...]]:
         """Extract default URL-set ID and URL sets from playback response."""
-        playback_urls = (
-            resources.vod_playback_urls.result.playback_urls
-            if resources.vod_playback_urls and resources.vod_playback_urls.result
+        if isinstance(resources, VodPlaybackResourcesResponse):
+            playback_urls = (
+                resources.vod_playback_urls.result.playback_urls
+                if resources.vod_playback_urls and resources.vod_playback_urls.result
+                else None
+            )
+            if playback_urls is None:
+                msg = "prime playback response missing playback URLs"
+                raise RuntimeError(msg)
+            return playback_urls.default_url_set_id, tuple(playback_urls.url_sets)
+
+        live_result = (
+            resources.live_playback_urls.result
+            if resources.live_playback_urls and resources.live_playback_urls.result
             else None
         )
-        if playback_urls is None:
-            msg = "prime playback response missing playback URLs"
+        if live_result is None:
+            msg = "prime live playback response missing playback URLs"
             raise RuntimeError(msg)
-        return playback_urls.default_url_set_id, tuple(playback_urls.url_sets)
+
+        live_url_sets: list[PlaybackUrlSetPayload] = []
+        for url_set in live_result.url_sets:
+            manifest = url_set.urls.manifest if url_set.urls else None
+            manifest_url = manifest.url if manifest else None
+            if not manifest_url:
+                continue
+            live_url_sets.append(
+                PlaybackUrlSetPayload(urlSetId=url_set.url_set_id, url=manifest_url)
+            )
+
+        if not live_url_sets:
+            msg = "prime live playback response has no manifest URLs"
+            raise RuntimeError(msg)
+
+        return live_result.default_url_set_id, tuple(live_url_sets)
 
     def with_device_type_query(self, url: str) -> str:
         """Ensure ``amznDtid`` query parameter is present on playback URLs."""
@@ -526,6 +612,115 @@ def _build_vod_playback_request(
             },
         },
         "vodXrayMetadataRequest": {
+            "xrayDeviceClass": "normal",
+            "xrayPlaybackMode": "playback",
+            "xrayToken": "XRAY_WEB_2023_V2",
+        },
+    }
+
+
+def _build_live_playback_request(
+    *,
+    title_id: str,
+    playback_envelope: str,
+    locale: str,
+    display_width: int,
+    display_height: int,
+    hdcp_level: str,
+    max_video_resolution: str,
+    supported_codecs: tuple[str, ...],
+    dynamic_range_formats: tuple[str, ...],
+    supported_frame_rates: tuple[str, ...],
+) -> dict[str, Any]:
+    return {
+        "globalParameters": {
+            "deviceCapabilityFamily": "WebPlayer",
+            "playbackEnvelope": playback_envelope,
+            "capabilityDiscriminators": {
+                "operatingSystem": {"name": "Android", "version": "11.0"},
+                "deviceModel": {"name": "SHIELD Android TV", "version": "UNKNOWN"},
+                "middleware": {"name": "Chrome", "version": "92.0.4515.0"},
+                "nativeApplication": {
+                    "name": "CAF Receiver SDK",
+                    "version": "3.0.0137",
+                },
+                "firmware": {"name": "UNKNOWN", "version": "1.56.500000"},
+                "hfrControlMode": "Legacy",
+                "displayResolution": {
+                    "height": display_height,
+                    "width": display_width,
+                },
+            },
+            "sessionTrackingMode": "WITH_SESSION_HANDOFF",
+            "userWatchSessionId": str(uuid4()),
+        },
+        "auditPingsRequest": {},
+        "widevineServiceCertificateRequest": {},
+        "playbackDataRequest": {},
+        "livePlaybackUrlsRequest": {
+            "ads": {
+                "gdpr": {
+                    "enabled": False,
+                    "consentMap": {},
+                }
+            },
+            "device": {
+                "firmwareVersion": "1.56.500000",
+                "hdcpLevel": hdcp_level,
+                "liveManifestTypes": ["PatternTemplate", "Live"],
+                "playableLiveManifestTypes": {
+                    "PatternTemplate": {
+                        "daiSettings": {
+                            "supportsDai": "notSupported",
+                            "supportedDaiFeatures": {
+                                "supportsEmbeddedTrickplay": "notSupported",
+                            },
+                        },
+                        "embeddedTrickplaySettings": {
+                            "supportsEmbeddedTrickplay": "notSupported",
+                        },
+                    },
+                    "Live": {
+                        "daiSettings": {
+                            "supportsDai": "supported",
+                            "supportedDaiFeatures": {
+                                "supportsEmbeddedTrickplay": "notSupported",
+                            },
+                        },
+                        "embeddedTrickplaySettings": {
+                            "supportsEmbeddedTrickplay": "notSupported",
+                        },
+                    },
+                },
+                "maxVideoResolution": max_video_resolution,
+                "operatingSystem": "Android",
+                "supportedStreamingTechnologies": ["DASH"],
+                "streamingTechnologies": {
+                    "DASH": {
+                        "bitrateAdaptations": ["CBR", "CVBR"],
+                        "codecs": list(supported_codecs),
+                        "drmKeyScheme": "DualKey",
+                        "drmType": "Widevine",
+                        "dynamicRangeFormats": list(dynamic_range_formats),
+                        "edgeDeliveryAuthorizationSchemes": [
+                            "PVExchangeV1",
+                            "Transparent",
+                        ],
+                        "fragmentRepresentations": ["ByteOffsetRange", "SeparateFile"],
+                        "frameRates": list(supported_frame_rates),
+                    }
+                },
+            },
+            "playbackSettingsRequest": {
+                "deviceModel": "SHIELD Android TV",
+                "firmware": "1.56.500000",
+                "playerType": "xp",
+                "responseFormatVersion": "1.0.0",
+                "titleId": title_id,
+            },
+        },
+        "xrayMetadataRequest": {
+            "preferredLocale": locale,
             "xrayDeviceClass": "normal",
             "xrayPlaybackMode": "playback",
             "xrayToken": "XRAY_WEB_2023_V2",
