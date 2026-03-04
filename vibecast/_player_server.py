@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, override
+from typing import TYPE_CHECKING, Protocol, override
 
 from aiohttp import WSCloseCode, WSMsgType, web
 from pydantic import ValidationError
 
 from vibecast._log import get_logger
+from vibecast._manifest_proxy import ManifestProxyRequest, ManifestProxyResponse
 from vibecast._models import PlayerState
 from vibecast._player_web import player_web_page, player_web_script
 from vibecast.player import (
@@ -34,6 +35,9 @@ from vibecast.player import (
     player_report_adapter,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
 log = get_logger("player_server")
 
 
@@ -41,6 +45,15 @@ class LicenseHandler(Protocol):
     """Session-scoped DRM license proxy callback."""
 
     async def handle_license(self, request: LicenseRequest) -> LicenseResponse: ...
+
+
+class ManifestHandler(Protocol):
+    """Session-scoped manifest proxy callback."""
+
+    async def handle_manifest(
+        self,
+        request: ManifestProxyRequest,
+    ) -> ManifestProxyResponse: ...
 
 
 @dataclass(slots=True)
@@ -65,6 +78,7 @@ class PlayerServer(Player):
         "_connections",
         "_host",
         "_license_handlers",
+        "_manifest_handlers",
         "_player_path",
         "_port",
         "_primary",
@@ -82,6 +96,7 @@ class PlayerServer(Player):
         self._connections: list[_PlayerConnection] = []
         self._primary: _PlayerConnection | None = None
         self._license_handlers: dict[str, LicenseHandler] = {}
+        self._manifest_handlers: dict[str, ManifestHandler] = {}
         self._session_snapshots: dict[str, _SessionSnapshot] = {}
         self._serving_port: int | None = None
 
@@ -96,6 +111,10 @@ class PlayerServer(Player):
         _ = app.router.add_get("/player.js", self._handle_web_player_script)
         _ = app.router.add_get(self._player_path, self._handle_ws)
         _ = app.router.add_post("/license/{session_id}", self._handle_license)
+        _ = app.router.add_get(
+            "/manifest/{session_id}/{route_path}",
+            self._handle_manifest,
+        )
 
         runner = web.AppRunner(app)
         await runner.setup()
@@ -129,6 +148,7 @@ class PlayerServer(Player):
 
         self._session_snapshots.clear()
         self._license_handlers.clear()
+        self._manifest_handlers.clear()
         await runner.cleanup()
         self._runner = None
         self._app = None
@@ -153,6 +173,20 @@ class PlayerServer(Player):
     def unregister_license_handler(self, session_id: str) -> None:
         """Unregister a previously registered session license handler."""
         _ = self._license_handlers.pop(session_id, None)
+
+    def register_manifest_handler(
+        self,
+        session_id: str,
+        handler: ManifestHandler,
+    ) -> str:
+        """Register a manifest handler and return proxy URL prefix."""
+        self._manifest_handlers[session_id] = handler
+        port = self._serving_port if self._serving_port is not None else self._port
+        return f"http://{self._resolved_host}:{port}/manifest/{session_id}"
+
+    def unregister_manifest_handler(self, session_id: str) -> None:
+        """Unregister a previously registered session manifest handler."""
+        _ = self._manifest_handlers.pop(session_id, None)
 
     @override
     async def on_load(self, ctx: PlayerContext, media: PlaybackMedia) -> None:
@@ -412,6 +446,42 @@ class PlayerServer(Player):
             headers={"Content-Type": response.content_type},
         )
 
+    async def _handle_manifest(self, request: web.Request) -> web.Response:
+        session_id = request.match_info["session_id"]
+        handler = self._manifest_handlers.get(session_id)
+        if handler is None:
+            return web.Response(status=404)
+
+        route_path = request.match_info["route_path"]
+        route_id, _, _ = route_path.partition(".")
+        if not route_id:
+            return web.Response(status=400)
+
+        manifest_request = ManifestProxyRequest(
+            session_id=session_id,
+            route_id=route_id,
+            method=request.method,
+            headers=_filter_request_headers(request),
+        )
+
+        try:
+            response = await handler.handle_manifest(manifest_request)
+        except Exception:
+            log.warning("manifest request failed for %s", session_id, exc_info=True)
+            return web.Response(status=500)
+
+        headers = _filter_response_headers(response.headers)
+        headers["Content-Type"] = response.content_type
+
+        if request.method == "HEAD":
+            return web.Response(status=response.status, headers=headers)
+
+        return web.Response(
+            body=response.body,
+            status=response.status,
+            headers=headers,
+        )
+
 
 def _media_to_payload(media: PlaybackMedia) -> PlaybackMediaPayload:
     return PlaybackMediaPayload(
@@ -455,6 +525,22 @@ def _filter_request_headers(request: web.Request) -> dict[str, str]:
     return headers
 
 
+def _filter_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    blocked = {
+        "connection",
+        "content-encoding",
+        "content-length",
+        "content-type",
+        "transfer-encoding",
+    }
+    filtered: dict[str, str] = {}
+    for key, value in headers.items():
+        if key.lower() in blocked:
+            continue
+        filtered[key] = value
+    return filtered
+
+
 def _resolve_serving_port(runner: web.AppRunner) -> int | None:
     addresses = runner.addresses
     if not addresses:
@@ -465,4 +551,4 @@ def _resolve_serving_port(runner: web.AppRunner) -> int | None:
     return int(port)
 
 
-__all__ = ["LicenseHandler", "PlayerServer"]
+__all__ = ["LicenseHandler", "ManifestHandler", "PlayerServer"]
