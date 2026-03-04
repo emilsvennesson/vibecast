@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast, override
 from urllib.parse import parse_qsl, urlsplit
 
-from vibecast._models import StreamType
 from vibecast.player import (
     DrmInfo,
     DrmSystem,
@@ -16,6 +15,7 @@ from vibecast.player import (
     LicenseRoute,
     PlaybackMedia,
     PlaybackStream,
+    StreamType,
 )
 from vibecast.provider import (
     LaunchCredentials,
