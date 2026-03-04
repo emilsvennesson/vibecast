@@ -16,7 +16,7 @@ from vibecast.provider import (
     ProviderSession,
     ReceiverContext,
 )
-from vibecast.providers.primevideo._api import PrimeVideoAPI
+from vibecast.providers.primevideo._api import PrimeCatalogMetadata, PrimeVideoAPI
 from vibecast.providers.primevideo._models import (
     LivePlaybackResourcesResponse,
     VodPlaybackResourcesResponse,
@@ -187,7 +187,7 @@ async def test_resolve_media_live_uses_live_playback_resources() -> None:
                     content_id="amzn1.dv.gti.live-example",
                     content_type="video/mp4",
                     stream_type=StreamType.LIVE,
-                    metadata=MediaMetadata(title="Live Match"),
+                    metadata=MediaMetadata(title="Live Match", subtitle="Prime Video"),
                     duration=0.0,
                 ),
                 current_time=64092211200,
@@ -208,6 +208,81 @@ async def test_resolve_media_live_uses_live_playback_resources() -> None:
     assert media.streams[0].url.startswith("https://cdn.example.com/live-main.mpd")
     assert media.streams[0].drm is not None
     assert "/playback/drm/GetWidevineLicense" in media.streams[0].drm.license_url
+
+
+async def test_resolve_media_uses_catalog_metadata_when_title_missing() -> None:
+    provider = PrimeVideoProvider()
+    session = _make_session()
+    await provider.on_launch(session, LaunchCredentials(credentials="actor-token"))
+
+    resources = LivePlaybackResourcesResponse.model_validate(
+        {
+            "sessionization": {"sessionHandoffToken": "live-handoff-1"},
+            "livePlaybackUrls": {
+                "result": {
+                    "defaultUrlSetId": "live-main",
+                    "urlSets": [
+                        {
+                            "urlSetId": "live-main",
+                            "urls": {
+                                "manifest": {
+                                    "url": "https://cdn.example.com/live-main.mpd"
+                                }
+                            },
+                        }
+                    ],
+                }
+            },
+        }
+    )
+
+    with (
+        patch.object(
+            PrimeVideoAPI,
+            "refresh_playback_envelope",
+            new=AsyncMock(side_effect=RuntimeError("skip refresh")),
+        ),
+        patch.object(
+            PrimeVideoAPI,
+            "get_live_playback_resources",
+            new=AsyncMock(return_value=resources),
+        ),
+        patch.object(
+            PrimeVideoAPI,
+            "get_catalog_metadata",
+            new=AsyncMock(
+                return_value=PrimeCatalogMetadata(
+                    title="Newcastle v Manchester United",
+                    subtitle="Premier League",
+                )
+            ),
+        ),
+    ):
+        media = await provider.resolve_media(
+            session,
+            LoadRequest(
+                request_id=1,
+                media=MediaInfo(
+                    content_id="amzn1.dv.gti.live-example",
+                    content_type="video/mp4",
+                    stream_type=StreamType.LIVE,
+                    metadata=MediaMetadata(title="", subtitle=""),
+                    duration=0.0,
+                ),
+                current_time=0,
+                custom_data={
+                    "deviceId": "cast-device-live",
+                    "playbackEnvelope": {
+                        "envelope": "live-envelope-v1",
+                        "correlationId": "live-corr-1",
+                    },
+                },
+            ),
+        )
+
+    assert not isinstance(media, MediaResolveFailure)
+    assert media.title == "Newcastle v Manchester United"
+    assert media.subtitle == "Premier League"
 
 
 async def test_resolve_license_uses_prime_api() -> None:

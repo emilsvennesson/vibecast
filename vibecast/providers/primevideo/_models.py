@@ -356,6 +356,43 @@ class LivePlaybackResourcesResponse(BaseModel):
     )
 
 
+class CatalogMetadataPayload(BaseModel):
+    """Catalog metadata payload returned by lumina resources API."""
+
+    model_config = _API_MODEL_CONFIG
+
+    title: str | None = None
+    event_title: str | None = Field(default=None, alias="eventTitle")
+    series_title: str | None = Field(default=None, alias="seriesTitle")
+
+
+class CatalogMetadataSection(BaseModel):
+    """``catalogMetadataV2`` wrapper section."""
+
+    model_config = _API_MODEL_CONFIG
+
+    catalog: CatalogMetadataPayload | None = None
+
+
+class PlayerChromeResourcesPayload(BaseModel):
+    """Resources payload from the player chrome endpoint."""
+
+    model_config = _API_MODEL_CONFIG
+
+    catalog_metadata_v2: CatalogMetadataSection | None = Field(
+        default=None,
+        alias="catalogMetadataV2",
+    )
+
+
+class PlayerChromeResourcesResponse(BaseModel):
+    """Top-level response payload from player chrome resources endpoint."""
+
+    model_config = _API_MODEL_CONFIG
+
+    resources: PlayerChromeResourcesPayload | None = None
+
+
 class WidevineLicensePayload(BaseModel):
     """Widevine license payload returned by Prime DRM endpoint."""
 
@@ -390,6 +427,7 @@ __all__ = [
     "LiveUrlsPayload",
     "LiveManifestPayload",
     "PlaybackUrlSetPayload",
+    "PlayerChromeResourcesResponse",
     "PreloadMessage",
     "PreloadResponseMessage",
     "RefreshedEnvelopeResponse",

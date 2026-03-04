@@ -16,6 +16,7 @@ from vibecast.providers.primevideo._models import (
     AuthTokenResponse,
     LivePlaybackResourcesResponse,
     PlaybackUrlSetPayload,
+    PlayerChromeResourcesResponse,
     RefreshedEnvelopeResponse,
     VodPlaybackResourcesResponse,
     WidevineLicenseResponse,
@@ -53,6 +54,14 @@ class PrimeEnvelopeData:
 
     playback_envelope: str
     correlation_id: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class PrimeCatalogMetadata:
+    """Resolved human-readable metadata for one Prime title."""
+
+    title: str | None = None
+    subtitle: str | None = None
 
 
 type PrimePlaybackResourcesResponse = (
@@ -367,6 +376,55 @@ class PrimeVideoAPI:
         )
         return LivePlaybackResourcesResponse.model_validate(response)
 
+    async def get_catalog_metadata(
+        self,
+        *,
+        token: str,
+        device_id: str,
+        marketplace_id: str,
+        title_id: str,
+        locale: str,
+    ) -> PrimeCatalogMetadata | None:
+        """Resolve one Prime title ID to display metadata when available."""
+        query = {
+            "deviceID": device_id,
+            "deviceTypeID": _API_DEVICE_TYPE_ID,
+            "gascEnabled": True,
+            "marketplaceID": marketplace_id,
+            "uxLocale": locale,
+            "desiredResources": "catalogMetadataV2",
+            "entityId": title_id,
+            "firmware": _API_FIRMWARE_VERSION,
+            "widgetScheme": "pvplayer-web-v2",
+            "nerid": self._new_nerid(),
+        }
+        url = self._build_url(
+            _PLAYBACK_BASE_URL,
+            "/cdp/lumina/playerChromeResources/v1",
+            query,
+        )
+        response = await self._get_json(url, token=token)
+        parsed = PlayerChromeResourcesResponse.model_validate(response)
+        catalog = (
+            parsed.resources.catalog_metadata_v2.catalog
+            if parsed.resources and parsed.resources.catalog_metadata_v2
+            else None
+        )
+        if catalog is None:
+            return None
+
+        title = catalog.event_title or catalog.title
+        if title is not None:
+            title = title.strip() or None
+
+        subtitle = catalog.series_title
+        if subtitle is not None:
+            subtitle = subtitle.strip() or None
+
+        if title is None and subtitle is None:
+            return None
+        return PrimeCatalogMetadata(title=title, subtitle=subtitle)
+
     async def get_widevine_license(
         self,
         *,
@@ -489,19 +547,44 @@ class PrimeVideoAPI:
             raise TypeError(msg)
         return cast("dict[str, Any]", data)
 
+    async def _get_json(
+        self,
+        url: str,
+        *,
+        token: str | None = None,
+    ) -> dict[str, Any]:
+        headers = self._headers(token=token, content_type=None)
+        response = await self._client.get(url, headers=headers)
+
+        if response.status_code >= 400:
+            preview = response.text[:300].replace("\n", " ")
+            msg = f"prime api request failed ({response.status_code}): {preview}"
+            raise ProviderHttpStatusError(
+                response.status_code,
+                msg,
+                detail_code="PRIME_API_REQUEST",
+            )
+
+        data = response.json()
+        if not isinstance(data, dict):
+            msg = "prime api returned non-object JSON"
+            raise TypeError(msg)
+        return cast("dict[str, Any]", data)
+
     def _headers(
         self,
         *,
         token: str | None,
-        content_type: str,
+        content_type: str | None,
     ) -> dict[str, str]:
         headers = {
             "Accept": "*/*",
             "Accept-Language": "en-US",
             "Origin": _ORIGIN,
             "Referer": _REFERER,
-            "Content-Type": content_type,
         }
+        if content_type is not None:
+            headers["Content-Type"] = content_type
         if token:
             headers["Authorization"] = f"Bearer {token}"
         return headers
@@ -741,6 +824,7 @@ def _decode_b64(value: str) -> bytes:
 
 __all__ = [
     "PrimeAuthTokens",
+    "PrimeCatalogMetadata",
     "PrimeEnvelopeData",
     "PrimeVideoAPI",
 ]

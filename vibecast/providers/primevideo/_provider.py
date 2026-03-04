@@ -365,13 +365,39 @@ class PrimeVideoProvider(StatefulProvider[_PrimeSessionState]):
         state.marketplace_id = marketplace_id
 
         metadata = load_request.media.metadata
+        title = metadata.title if metadata else None
+        if title is not None:
+            title = title.strip() or None
+
+        subtitle = metadata.subtitle if metadata else None
+        if subtitle is not None:
+            subtitle = subtitle.strip() or None
+
+        if title is None or subtitle is None:
+            try:
+                catalog_metadata = await state.api.get_catalog_metadata(
+                    token=token,
+                    device_id=device_id,
+                    marketplace_id=marketplace_id,
+                    title_id=title_id,
+                    locale=state.locale,
+                )
+            except Exception:
+                log.debug("prime catalog metadata lookup failed", exc_info=True)
+            else:
+                if catalog_metadata is not None:
+                    if title is None:
+                        title = catalog_metadata.title
+                    if subtitle is None:
+                        subtitle = catalog_metadata.subtitle
+
         return PlaybackMedia(
             session_id=session.session_id,
             streams=streams,
             stream_type=stream_type,
             content_id=title_id,
-            title=metadata.title if metadata else None,
-            subtitle=metadata.subtitle if metadata else None,
+            title=title,
+            subtitle=subtitle,
             images=tuple(metadata.images) if metadata else (),
             duration=load_request.media.duration
             if load_request.media.duration is not None
