@@ -6,8 +6,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, patch
 
-import pytest
-
 from vibecast.player import (
     DrmSystem,
     LicenseRequest,
@@ -22,6 +20,8 @@ from vibecast.provider import (
     LoadRequest,
     MediaInfo,
     MediaMetadata,
+    MediaResolveFailure,
+    MediaResolveFailureCode,
     ProviderSession,
     ReceiverContext,
 )
@@ -87,7 +87,7 @@ class TestLifecycle:
         with patch.object(
             provider, "_run_auth_flow", new_callable=AsyncMock
         ) as mock_auth:
-            await provider.on_message(
+            _ = await provider.on_message(
                 session,
                 _NS_VIAPLAY,
                 {
@@ -150,6 +150,7 @@ class TestResolveMedia:
                 ),
             )
 
+        assert not isinstance(media, MediaResolveFailure)
         assert media.session_id == "sess-1"
         assert len(media.streams) == 1
         assert media.streams[0].url == "https://cdn.example.com/manifest.mpd"
@@ -178,11 +179,8 @@ class TestResolveMedia:
                 _ = close()
             raise TimeoutError
 
-        with (
-            patch("asyncio.wait_for", side_effect=_timeout_wait_for),
-            pytest.raises(RuntimeError, match="NOT_AUTHENTICATED"),
-        ):
-            _ = await provider.resolve_media(
+        with patch("asyncio.wait_for", side_effect=_timeout_wait_for):
+            result = await provider.resolve_media(
                 session,
                 LoadRequest(
                     request_id=1,
@@ -193,6 +191,10 @@ class TestResolveMedia:
                     custom_data={"playUrl": "https://content.viaplay.se/play/123"},
                 ),
             )
+
+        assert isinstance(result, MediaResolveFailure)
+        assert result.code is MediaResolveFailureCode.AUTH_REQUIRED
+        assert result.detail_code == "NOT_AUTHENTICATED"
 
 
 class TestPlaybackAndLicense:

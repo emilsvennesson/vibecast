@@ -15,6 +15,7 @@ from vibecast.provider import (
     LoadRequest,
     MediaInfo,
     MediaMetadata,
+    MediaResolveFailure,
     ProviderSession,
     ReceiverContext,
 )
@@ -169,6 +170,7 @@ class TestResolveMedia:
                 ),
             )
 
+        assert not isinstance(media, MediaResolveFailure)
         assert len(media.streams) >= 2
 
         parsed = parse_qs(urlsplit(media.streams[0].url).query)
@@ -259,6 +261,7 @@ class TestResolveMedia:
                 ),
             )
 
+        assert not isinstance(media, MediaResolveFailure)
         assert requested_urls[0] == "https://video.svt.se/video/eXv13pb"
 
         assert len(media.streams) >= 2
@@ -388,6 +391,7 @@ class TestResolveMedia:
                 ),
             )
 
+        assert not isinstance(media, MediaResolveFailure)
         assert len(media.streams) >= 3
         assert any(
             stream.drm is not None and stream.drm.system is DrmSystem.CLEARKEY

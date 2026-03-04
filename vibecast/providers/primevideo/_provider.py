@@ -15,9 +15,18 @@ from vibecast.player import (
     LicenseRoute,
     PlaybackMedia,
     PlaybackStream,
-    StreamType,
 )
-from vibecast.provider import LaunchCredentials, LoadRequest, Provider, ProviderSession
+from vibecast.provider import (
+    LaunchCredentials,
+    LoadRequest,
+    MediaResolveFailure,
+    MediaResolveFailureCode,
+    MediaResolveResult,
+    ProviderMessageDisposition,
+    ProviderSession,
+    StatefulProvider,
+    media_failure_from_exception,
+)
 from vibecast.providers.primevideo._api import PrimeVideoAPI
 from vibecast.providers.primevideo._models import (
     AmIRegisteredError,
@@ -70,14 +79,14 @@ class _PrimeSessionState:
     current_title_id: str | None = None
 
 
-class PrimeVideoProvider(Provider):
+class PrimeVideoProvider(StatefulProvider[_PrimeSessionState]):
     """Amazon Prime Video provider implementation."""
 
     _APP_IDS = frozenset({"17608BC8"})
     _NAMESPACES = frozenset({_NS_PRIME})
 
     def __init__(self) -> None:
-        self._sessions: dict[str, _PrimeSessionState] = {}
+        super().__init__()
         self._default_marketplace_id = _DEFAULT_MARKETPLACE_ID
         self._default_locale = _DEFAULT_LOCALE
         self._auth_base_url = _DEFAULT_AUTH_BASE_URL
@@ -103,10 +112,6 @@ class PrimeVideoProvider(Provider):
     @override
     def namespaces(self) -> frozenset[str]:
         return self._NAMESPACES
-
-    @override
-    def provider_key(self) -> str:
-        return "primevideo"
 
     @override
     def configure(self, config: dict[str, Any]) -> None:
@@ -174,11 +179,11 @@ class PrimeVideoProvider(Provider):
         )
 
     @override
-    async def on_launch(
+    async def create_session_state(
         self,
         session: ProviderSession,
         credentials: LaunchCredentials,
-    ) -> None:
+    ) -> _PrimeSessionState:
         state = _PrimeSessionState(
             api=PrimeVideoAPI(
                 client=session.http_client,
@@ -198,7 +203,7 @@ class PrimeVideoProvider(Provider):
         state.device_id = session.receiver.device_id
         if credentials.credentials:
             state.actor_access_token = credentials.credentials
-        self._sessions[session.session_id] = state
+        return state
 
     @override
     async def on_message(
@@ -206,17 +211,15 @@ class PrimeVideoProvider(Provider):
         session: ProviderSession,
         namespace: str,
         data: dict[str, Any],
-    ) -> None:
+    ) -> ProviderMessageDisposition:
         _ = namespace
-        state = self._sessions.get(session.session_id)
+        state = self.state_or_none(session)
         if state is None:
-            return
+            return ProviderMessageDisposition.UNHANDLED
 
-        try:
-            message = prime_message_adapter.validate_python(data)
-        except Exception:
-            log.debug("unhandled prime message type: %s", data.get("type", ""))
-            return
+        message = self.parse_message(prime_message_adapter, data)
+        if message is None:
+            return ProviderMessageDisposition.UNHANDLED
 
         match message:
             case AmIRegisteredMessage():
@@ -236,31 +239,41 @@ class PrimeVideoProvider(Provider):
                     PreloadResponseMessage().model_dump(exclude_none=True),
                 )
 
+        return ProviderMessageDisposition.HANDLED
+
     @override
     async def resolve_media(
         self,
         session: ProviderSession,
         load_request: LoadRequest,
-    ) -> PlaybackMedia:
-        state = self._sessions.get(session.session_id)
+    ) -> MediaResolveResult:
+        state = self.state_or_none(session)
         if state is None:
-            msg = "unknown session"
-            raise RuntimeError(msg)
+            return MediaResolveFailure(
+                code=MediaResolveFailureCode.INTERNAL_ERROR,
+                detail_code="MISSING_PROVIDER_SESSION_STATE",
+            )
 
         token = state.actor_access_token
         if not token:
-            msg = "NOT_AUTHENTICATED"
-            raise RuntimeError(msg)
+            return MediaResolveFailure(
+                code=MediaResolveFailureCode.AUTH_REQUIRED,
+                detail_code="NOT_AUTHENTICATED",
+            )
 
         title_id = load_request.media.content_id.strip()
         if not title_id:
-            msg = "INVALID_CONTENT_ID"
-            raise RuntimeError(msg)
+            return MediaResolveFailure(
+                code=MediaResolveFailureCode.INVALID_REQUEST,
+                detail_code="INVALID_CONTENT_ID",
+            )
 
         route_data = self._preload_for_title(load_request, state, title_id)
         if not route_data.playback_envelope:
-            msg = "NO_PLAYBACK_ENVELOPE"
-            raise RuntimeError(msg)
+            return MediaResolveFailure(
+                code=MediaResolveFailureCode.MISSING_CONTEXT,
+                detail_code="NO_PLAYBACK_ENVELOPE",
+            )
 
         device_id = self._device_id(load_request.custom_data, state, session)
         marketplace_id = self._marketplace_id(load_request.custom_data, state)
@@ -279,22 +292,29 @@ class PrimeVideoProvider(Provider):
             except Exception:
                 log.debug("prime envelope refresh failed", exc_info=True)
 
-        resources = await state.api.get_vod_playback_resources(
-            token=token,
-            device_id=device_id,
-            marketplace_id=marketplace_id,
-            title_id=title_id,
-            playback_envelope=route_data.playback_envelope,
-            locale=state.locale,
-        )
+        try:
+            resources = await state.api.get_vod_playback_resources(
+                token=token,
+                device_id=device_id,
+                marketplace_id=marketplace_id,
+                title_id=title_id,
+                playback_envelope=route_data.playback_envelope,
+                locale=state.locale,
+            )
+            default_url_set_id, url_sets = state.api.extract_playback_url_sets(
+                resources
+            )
+        except Exception as exc:
+            return media_failure_from_exception(exc)
 
-        default_url_set_id, url_sets = state.api.extract_playback_url_sets(resources)
         ordered_sets = _ordered_url_sets(
             url_sets, default_url_set_id=default_url_set_id
         )
         if not ordered_sets:
-            msg = "NO_STREAM_URL"
-            raise RuntimeError(msg)
+            return MediaResolveFailure(
+                code=MediaResolveFailureCode.CONTENT_UNAVAILABLE,
+                detail_code="NO_STREAM_URL",
+            )
 
         license_url = state.api.widevine_license_url(
             device_id=device_id,
@@ -327,9 +347,7 @@ class PrimeVideoProvider(Provider):
         return PlaybackMedia(
             session_id=session.session_id,
             streams=streams,
-            stream_type=load_request.media.stream_type
-            if load_request.media.stream_type is not StreamType.NONE
-            else StreamType.BUFFERED,
+            stream_type=self.normalize_stream_type(load_request.media.stream_type),
             content_id=title_id,
             title=metadata.title if metadata else None,
             subtitle=metadata.subtitle if metadata else None,
@@ -355,9 +373,9 @@ class PrimeVideoProvider(Provider):
         forward: Callable[[LicenseRequest, LicenseRoute], Awaitable[LicenseResponse]],
     ) -> LicenseResponse:
         _ = forward
-        state = self._sessions.get(session.session_id)
+        state = self.state_or_none(session)
         if state is None:
-            return LicenseResponse(status=500, body=b"unknown session")
+            return LicenseResponse(status=409, body=b"missing provider session state")
 
         token = state.actor_access_token
         if not token:
@@ -390,10 +408,6 @@ class PrimeVideoProvider(Provider):
             return LicenseResponse(status=502, body=b"license request failed")
 
         return LicenseResponse(body=body)
-
-    @override
-    async def on_stop(self, session: ProviderSession) -> None:
-        _ = self._sessions.pop(session.session_id, None)
 
     async def _handle_register(
         self,

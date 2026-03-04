@@ -233,3 +233,47 @@ class TestPlayerServer:
             assert missing.status == 404
 
         await server.stop()
+
+    async def test_license_proxy_preserves_explicit_error_response(self) -> None:
+        server = PlayerServer(host="127.0.0.1", port=0)
+        await server.start()
+
+        class _Handler:
+            async def handle_license(self, request: LicenseRequest) -> LicenseResponse:
+                _ = request
+                return LicenseResponse(
+                    status=403,
+                    body=b"forbidden",
+                    content_type="text/plain",
+                )
+
+        proxy_url = server.register_license_handler("session-1", _Handler())
+
+        async with ClientSession() as client:
+            response = await client.post(proxy_url, data=b"challenge")
+            body = await response.read()
+
+        assert response.status == 403
+        assert response.content_type == "text/plain"
+        assert body == b"forbidden"
+
+        await server.stop()
+
+    async def test_license_proxy_unhandled_error_returns_500(self) -> None:
+        server = PlayerServer(host="127.0.0.1", port=0)
+        await server.start()
+
+        class _Handler:
+            async def handle_license(self, request: LicenseRequest) -> LicenseResponse:
+                _ = request
+                msg = "boom"
+                raise RuntimeError(msg)
+
+        proxy_url = server.register_license_handler("session-1", _Handler())
+
+        async with ClientSession() as client:
+            response = await client.post(proxy_url, data=b"challenge")
+
+        assert response.status == 500
+
+        await server.stop()

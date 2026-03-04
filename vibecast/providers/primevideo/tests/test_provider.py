@@ -12,6 +12,7 @@ from vibecast.provider import (
     LoadRequest,
     MediaInfo,
     MediaMetadata,
+    MediaResolveFailure,
     ProviderSession,
     ReceiverContext,
 )
@@ -56,7 +57,7 @@ async def test_resolve_media_uses_preload_stream_data() -> None:
     session = _make_session()
     await provider.on_launch(session, LaunchCredentials(credentials="actor-token"))
 
-    await provider.on_message(
+    _ = await provider.on_message(
         session,
         _NS_PRIME,
         {
@@ -119,6 +120,7 @@ async def test_resolve_media_uses_preload_stream_data() -> None:
             ),
         )
 
+    assert not isinstance(media, MediaResolveFailure)
     assert len(media.streams) == 2
     assert media.streams[0].url.startswith("https://cdn.example.com/main.mpd")
     assert media.streams[0].drm is not None
@@ -167,7 +169,7 @@ async def test_am_i_registered_returns_not_registered_without_token() -> None:
     session = _make_session()
     await provider.on_launch(session, LaunchCredentials())
 
-    await provider.on_message(
+    _ = await provider.on_message(
         session,
         _NS_PRIME,
         {
@@ -197,7 +199,7 @@ async def test_am_i_registered_returns_success_with_token() -> None:
     session = _make_session()
     await provider.on_launch(session, LaunchCredentials(credentials="actor-token"))
 
-    await provider.on_message(
+    _ = await provider.on_message(
         session,
         _NS_PRIME,
         {

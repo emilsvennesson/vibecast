@@ -27,6 +27,7 @@ from vibecast._util import extract_request_id, parse_json_payload
 from vibecast.provider import (
     LaunchCredentials,
     Provider,
+    ProviderMessageDisposition,
     ProviderSession,
     ReceiverContext,
 )
@@ -134,7 +135,28 @@ class AppSession(TransportHandler):
             return
 
         if msg.namespace in self.namespaces and msg.namespace != ns.MEDIA:
-            await self.provider.on_message(context, msg.namespace, payload)
+            disposition = await self.provider.on_message(
+                context,
+                msg.namespace,
+                payload,
+            )
+            if disposition != ProviderMessageDisposition.HANDLED:
+                raw_type = payload.get("type")
+                if isinstance(raw_type, str):
+                    log.debug(
+                        "session %s provider %s left message unhandled namespace=%s type=%s",
+                        self.session_id,
+                        self.provider.provider_key(),
+                        msg.namespace,
+                        raw_type,
+                    )
+                else:
+                    log.debug(
+                        "session %s provider %s left message unhandled namespace=%s",
+                        self.session_id,
+                        self.provider.provider_key(),
+                        msg.namespace,
+                    )
             return
 
         log.warning(
