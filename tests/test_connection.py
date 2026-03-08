@@ -9,17 +9,17 @@ from typing import TYPE_CHECKING, override
 from unittest.mock import AsyncMock
 
 from tests.conftest import frame_message, make_cast_message
-from vibecast import _namespace as ns
-from vibecast._connection import Connection
 from vibecast._proto.cast_channel_pb2 import (
     AuthChallenge,
     CastMessage,
     DeviceAuthMessage,
     HashAlgorithm,
 )
+from vibecast._transport import namespace as ns
+from vibecast._transport.connection import Connection
 
 if TYPE_CHECKING:
-    from vibecast._certificate import CertificateBundle
+    from vibecast._security.certificate import CertificateBundle
 
 
 # ---------------------------------------------------------------------------

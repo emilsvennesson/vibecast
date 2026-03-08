@@ -8,17 +8,18 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, override
 
 from tests.conftest import make_cast_message
-from vibecast import _namespace as ns
-from vibecast._device import Device, DeviceIdentity, build_receiver_status
 from vibecast._models import LoadRequest, StreamType
+from vibecast._runtime.device import Device, DeviceIdentity
+from vibecast._runtime.receiver_status import build_receiver_status
+from vibecast._transport import namespace as ns
 from vibecast.player import DefaultPlayer, PlaybackMedia, PlaybackStream
 from vibecast.provider import LaunchCredentials, Provider, ProviderMessageDisposition
 
 if TYPE_CHECKING:
     from httpx import AsyncClient
 
-    from vibecast._connection import Connection
     from vibecast._proto.cast_channel_pb2 import CastMessage
+    from vibecast._transport.connection import Connection
 
 
 class RecordingConnection:

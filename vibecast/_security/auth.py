@@ -22,7 +22,7 @@ from vibecast._proto.cast_channel_pb2 import (
 if TYPE_CHECKING:
     from httpx import AsyncClient
 
-    from vibecast._certificate import CertificateBundle
+    from vibecast._security.certificate import CertificateBundle
 
 #: Google's public endpoint serving the Cast device CRL.
 CRL_URL = "https://clients3.google.com/cast/chromecast/device/crl"

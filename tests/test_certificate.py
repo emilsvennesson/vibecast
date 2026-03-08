@@ -19,7 +19,7 @@ from cryptography.x509 import (
 )
 from cryptography.x509.oid import NameOID
 
-from vibecast._certificate import CertificateBundle, CertificateStore
+from vibecast._security.certificate import CertificateBundle, CertificateStore
 
 if TYPE_CHECKING:
     from pathlib import Path

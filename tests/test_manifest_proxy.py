@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from vibecast._manifest_proxy import (
+from vibecast._playback.manifest_proxy import (
     ManifestKind,
     infer_manifest_kind,
     manifest_route_suffix,

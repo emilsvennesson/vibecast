@@ -8,22 +8,22 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 from uuid import uuid4
 
-from vibecast._auth import fetch_crl
-from vibecast._certificate import CertificateBundle, CertificateStore
 from vibecast._config import VibecastConfig, cast_device_capabilities_header
-from vibecast._device import Device, DeviceIdentity
-from vibecast._discovery import CastAdvertisement
-from vibecast._eureka import EurekaIdentity, EurekaServer
-from vibecast._handlers import PlatformHandler
+from vibecast._discovery.eureka import EurekaIdentity, EurekaServer
+from vibecast._discovery.mdns import CastAdvertisement
 from vibecast._http import ReceiverHTTPClient
 from vibecast._log import get_logger
-from vibecast._player_server import PlayerServer
-from vibecast._server import CastServer
+from vibecast._playback.player_server import PlayerServer
+from vibecast._runtime.device import Device, DeviceIdentity
+from vibecast._runtime.handlers import PlatformHandler
+from vibecast._security.auth import fetch_crl
+from vibecast._security.certificate import CertificateBundle, CertificateStore
+from vibecast._transport.server import CastServer
 from vibecast.provider import Provider, ProviderRegistry, discover_providers
 
 if TYPE_CHECKING:
-    from vibecast._connection import Connection
     from vibecast._proto.cast_channel_pb2 import CastMessage
+    from vibecast._transport.connection import Connection
 
 log = get_logger("receiver")
 

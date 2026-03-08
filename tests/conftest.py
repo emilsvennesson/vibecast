@@ -19,8 +19,8 @@ from cryptography.x509 import (
 )
 from cryptography.x509.oid import NameOID
 
-from vibecast._certificate import CertificateBundle
 from vibecast._proto.cast_channel_pb2 import CastMessage
+from vibecast._security.certificate import CertificateBundle
 
 # ---------------------------------------------------------------------------
 # Crypto helpers

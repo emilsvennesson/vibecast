@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, override
+from typing import Protocol, override
 
 from aiohttp import WSCloseCode, WSMsgType, web
 from pydantic import ValidationError
 
 from vibecast._log import get_logger
-from vibecast._manifest_proxy import ManifestProxyRequest, ManifestProxyResponse
 from vibecast._models import PlayerState
-from vibecast._player_web import player_web_page, player_web_script
+from vibecast._playback.headers import (
+    filter_upstream_headers,
+    filter_upstream_response_headers,
+)
+from vibecast._playback.manifest_proxy import (
+    ManifestProxyRequest,
+    ManifestProxyResponse,
+)
+from vibecast._playback.player_web import player_web_page, player_web_script
 from vibecast.player import (
     DrmPayload,
     ErrorReport,
@@ -35,29 +42,7 @@ from vibecast.player import (
     player_report_adapter,
 )
 
-if TYPE_CHECKING:
-    from collections.abc import Mapping
-
 log = get_logger("player_server")
-
-_HOP_BY_HOP_RESPONSE_HEADERS = {
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-}
-
-_MANIFEST_PROXY_BLOCKED_RESPONSE_HEADERS = {
-    *_HOP_BY_HOP_RESPONSE_HEADERS,
-    "content-encoding",
-    "content-length",
-    "content-type",
-    "set-cookie",
-}
 
 
 class LicenseHandler(Protocol):
@@ -489,7 +474,7 @@ class PlayerServer(Player):
             log.warning("manifest request failed for %s", session_id, exc_info=True)
             return web.Response(status=500)
 
-        headers = _filter_response_headers(response.headers)
+        headers = filter_upstream_response_headers(response.headers)
         headers["Content-Type"] = response.content_type
 
         if request.method == "HEAD":
@@ -535,37 +520,7 @@ def _stream_to_payload(stream: PlaybackStream) -> PlaybackStreamPayload:
 
 
 def _filter_request_headers(request: web.Request) -> dict[str, str]:
-    blocked = {"connection", "content-length", "host", "transfer-encoding"}
-    headers: dict[str, str] = {}
-    for key, value in request.headers.items():
-        if key.lower() in blocked:
-            continue
-        headers[key] = value
-    return headers
-
-
-def _filter_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
-    blocked = set(_MANIFEST_PROXY_BLOCKED_RESPONSE_HEADERS)
-    blocked.update(_connection_header_tokens(headers))
-
-    filtered: dict[str, str] = {}
-    for key, value in headers.items():
-        if key.lower() in blocked:
-            continue
-        filtered[key] = value
-    return filtered
-
-
-def _connection_header_tokens(headers: Mapping[str, str]) -> set[str]:
-    tokens: set[str] = set()
-    for key, value in headers.items():
-        if key.lower() != "connection":
-            continue
-        for token in value.split(","):
-            normalized = token.strip().lower()
-            if normalized:
-                tokens.add(normalized)
-    return tokens
+    return filter_upstream_headers(request.headers)
 
 
 def _resolve_serving_port(runner: web.AppRunner) -> int | None:

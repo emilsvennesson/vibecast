@@ -41,11 +41,11 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from vibecast._auth import build_auth_error, build_auth_response, fetch_crl
-from vibecast._certificate import CertificateBundle, CertificateStore
-from vibecast._discovery import CastAdvertisement
-from vibecast._framing import FramingError, read_message, write_message
-from vibecast._namespace import DEVICE_AUTH, HEARTBEAT, MEDIA, MULTIZONE, RECEIVER
+from vibecast._security.auth import build_auth_error, build_auth_response, fetch_crl
+from vibecast._security.certificate import CertificateBundle, CertificateStore
+from vibecast._discovery.mdns import CastAdvertisement
+from vibecast._transport.framing import FramingError, read_message, write_message
+from vibecast._transport.namespace import DEVICE_AUTH, HEARTBEAT, MEDIA, MULTIZONE, RECEIVER
 from vibecast._proto.cast_channel_pb2 import (
     CastMessage,
     DeviceAuthMessage,

@@ -13,10 +13,10 @@ import pytest
 from zeroconf import ServiceStateChange
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 
-from vibecast._discovery import CastAdvertisement, CastServiceTxt
+from vibecast._discovery.mdns import CastAdvertisement, CastServiceTxt
 
 if TYPE_CHECKING:
-    from vibecast._certificate import CertificateBundle
+    from vibecast._security.certificate import CertificateBundle
 
 
 class TestTxtRecords:
@@ -155,10 +155,10 @@ class TestTxtRecords:
 
         with (
             patch(
-                "vibecast._discovery.socket.getaddrinfo",
+                "vibecast._discovery.mdns.socket.getaddrinfo",
                 return_value=getaddrinfo_result,
             ),
-            patch("vibecast._discovery.socket.socket", side_effect=OSError),
+            patch("vibecast._discovery.mdns.socket.socket", side_effect=OSError),
         ):
             ad = CastAdvertisement(
                 friendly_name="Bedroom",
@@ -179,8 +179,8 @@ class TestTxtRecords:
         fake_socket.getsockname.return_value = ("10.0.0.55", 42424)
 
         with (
-            patch("vibecast._discovery.socket.getaddrinfo", return_value=[]),
-            patch("vibecast._discovery.socket.socket", return_value=fake_socket),
+            patch("vibecast._discovery.mdns.socket.getaddrinfo", return_value=[]),
+            patch("vibecast._discovery.mdns.socket.socket", return_value=fake_socket),
         ):
             ad = CastAdvertisement(
                 friendly_name="Bedroom",
@@ -198,8 +198,8 @@ class TestTxtRecords:
     ) -> None:
         """Loopback fallback is used when all address lookups fail."""
         with (
-            patch("vibecast._discovery.socket.getaddrinfo", side_effect=OSError),
-            patch("vibecast._discovery.socket.socket", side_effect=OSError),
+            patch("vibecast._discovery.mdns.socket.getaddrinfo", side_effect=OSError),
+            patch("vibecast._discovery.mdns.socket.socket", side_effect=OSError),
         ):
             ad = CastAdvertisement(
                 friendly_name="Bedroom",
@@ -246,7 +246,7 @@ class TestLifecycle:
             cert_digest=bundle.cert_digest_md5,
         )
 
-        with patch("vibecast._discovery.AsyncZeroconf") as mock_ctor:
+        with patch("vibecast._discovery.mdns.AsyncZeroconf") as mock_ctor:
             mock_zeroconf = AsyncMock()
             mock_zeroconf.async_register_service.return_value = asyncio.create_task(
                 asyncio.sleep(0)
@@ -279,7 +279,7 @@ class TestLifecycle:
             cert_digest=bundle.cert_digest_md5,
         )
 
-        with patch("vibecast._discovery.AsyncZeroconf") as mock_ctor:
+        with patch("vibecast._discovery.mdns.AsyncZeroconf") as mock_ctor:
             mock_zeroconf = AsyncMock()
             mock_zeroconf.async_register_service.return_value = asyncio.create_task(
                 asyncio.sleep(0)
@@ -311,7 +311,7 @@ class TestLifecycle:
             cert_digest=bundle.cert_digest_md5,
         )
 
-        with patch("vibecast._discovery.AsyncZeroconf") as mock_ctor:
+        with patch("vibecast._discovery.mdns.AsyncZeroconf") as mock_ctor:
             first_zeroconf = AsyncMock()
             second_zeroconf = AsyncMock()
             for mock_zeroconf in (first_zeroconf, second_zeroconf):
@@ -348,7 +348,7 @@ class TestLifecycle:
             app_ids={"6313CF39", "0F5096E8"},
         )
 
-        with patch("vibecast._discovery.AsyncZeroconf") as mock_ctor:
+        with patch("vibecast._discovery.mdns.AsyncZeroconf") as mock_ctor:
             mock_zeroconf = AsyncMock()
             mock_zeroconf.async_register_service.return_value = asyncio.create_task(
                 asyncio.sleep(0)
@@ -377,7 +377,7 @@ class TestLifecycle:
             app_ids={"6313CF39", "0F5096E8"},
         )
 
-        with patch("vibecast._discovery.AsyncZeroconf") as mock_ctor:
+        with patch("vibecast._discovery.mdns.AsyncZeroconf") as mock_ctor:
             base_zeroconf = AsyncMock()
             subtype_zeroconf_a = AsyncMock()
             subtype_zeroconf_b = AsyncMock()
@@ -419,7 +419,7 @@ class TestLifecycle:
             cert_digest=bundle.cert_digest_md5,
         )
 
-        with patch("vibecast._discovery.AsyncZeroconf") as mock_ctor:
+        with patch("vibecast._discovery.mdns.AsyncZeroconf") as mock_ctor:
             mock_zeroconf = AsyncMock()
             mock_zeroconf.async_register_service.side_effect = RuntimeError("boom")
             mock_ctor.return_value = mock_zeroconf

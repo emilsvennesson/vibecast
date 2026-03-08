@@ -10,8 +10,8 @@ from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
 
-from vibecast._certificate import CertificateStore
 from vibecast._config import load_config
+from vibecast._security.certificate import CertificateStore
 from vibecast.receiver import CastReceiver
 
 _DEFAULT_DATA_DIR = Path.home() / ".vibecast"

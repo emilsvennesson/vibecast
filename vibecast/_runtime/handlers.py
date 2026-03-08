@@ -6,8 +6,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
-import vibecast._namespace as ns
-from vibecast._device import Device, build_receiver_status
+import vibecast._transport.namespace as ns
 from vibecast._log import get_logger
 from vibecast._models import (
     AppAvailabilityResponse,
@@ -31,15 +30,17 @@ from vibecast._models import (
     connection_message_adapter,
     receiver_request_adapter,
 )
+from vibecast._runtime.receiver_status import build_receiver_status
 from vibecast._util import extract_request_id, parse_json_payload
 from vibecast.provider import LaunchCredentials, Provider
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from vibecast._connection import Connection
-    from vibecast._player_server import PlayerServer
+    from vibecast._playback.player_server import PlayerServer
     from vibecast._proto.cast_channel_pb2 import CastMessage
+    from vibecast._runtime.device import Device
+    from vibecast._transport.connection import Connection
     from vibecast.player import Player
 
 log = get_logger("handlers")

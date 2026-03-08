@@ -1,6 +1,6 @@
 """Tests for Cast namespace URI constants."""
 
-from vibecast import _namespace
+from vibecast._transport import namespace as _namespace
 
 
 def _all_namespace_values() -> list[str]:
