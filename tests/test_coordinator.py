@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, cast, override
 import httpx
 
 from vibecast import _namespace as ns
-from vibecast._coordinator import PlaybackCoordinator
+from vibecast._coordinator import PlaybackCoordinator, _filter_upstream_response_headers
 from vibecast._manifest_proxy import ManifestProxyRequest
 from vibecast._models import (
     LoadRequest,
@@ -241,6 +241,28 @@ def _provider_session(
 
 
 class TestCoordinator:
+    def test_filter_upstream_response_headers_drops_hop_by_hop_values(self) -> None:
+        filtered = _filter_upstream_response_headers(
+            {
+                "Connection": "keep-alive, X-Remove-Me",
+                "Content-Encoding": "gzip",
+                "Content-Length": "123",
+                "Content-Type": "application/dash+xml",
+                "Keep-Alive": "timeout=5",
+                "Proxy-Authenticate": 'Basic realm="manifest"',
+                "Proxy-Authorization": "Basic abc",
+                "Set-Cookie": "sid=123",
+                "TE": "trailers",
+                "Trailer": "Expires",
+                "Transfer-Encoding": "chunked",
+                "Upgrade": "h2c",
+                "X-Remove-Me": "1",
+                "X-Preserved": "ok",
+            }
+        )
+
+        assert filtered == {"X-Preserved": "ok"}
+
     async def test_load_registers_license_proxy_and_notifies_player(self) -> None:
         media = PlaybackMedia(
             session_id="session-1",

@@ -40,6 +40,25 @@ if TYPE_CHECKING:
 
 log = get_logger("player_server")
 
+_HOP_BY_HOP_RESPONSE_HEADERS = {
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+}
+
+_MANIFEST_PROXY_BLOCKED_RESPONSE_HEADERS = {
+    *_HOP_BY_HOP_RESPONSE_HEADERS,
+    "content-encoding",
+    "content-length",
+    "content-type",
+    "set-cookie",
+}
+
 
 class LicenseHandler(Protocol):
     """Session-scoped DRM license proxy callback."""
@@ -526,19 +545,27 @@ def _filter_request_headers(request: web.Request) -> dict[str, str]:
 
 
 def _filter_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
-    blocked = {
-        "connection",
-        "content-encoding",
-        "content-length",
-        "content-type",
-        "transfer-encoding",
-    }
+    blocked = set(_MANIFEST_PROXY_BLOCKED_RESPONSE_HEADERS)
+    blocked.update(_connection_header_tokens(headers))
+
     filtered: dict[str, str] = {}
     for key, value in headers.items():
         if key.lower() in blocked:
             continue
         filtered[key] = value
     return filtered
+
+
+def _connection_header_tokens(headers: Mapping[str, str]) -> set[str]:
+    tokens: set[str] = set()
+    for key, value in headers.items():
+        if key.lower() != "connection":
+            continue
+        for token in value.split(","):
+            normalized = token.strip().lower()
+            if normalized:
+                tokens.add(normalized)
+    return tokens
 
 
 def _resolve_serving_port(runner: web.AppRunner) -> int | None:

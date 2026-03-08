@@ -90,10 +90,21 @@ _HOP_BY_HOP_REQUEST_HEADERS = {
 
 _HOP_BY_HOP_RESPONSE_HEADERS = {
     "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+}
+
+_MANIFEST_PROXY_BLOCKED_RESPONSE_HEADERS = {
+    *_HOP_BY_HOP_RESPONSE_HEADERS,
     "content-encoding",
     "content-length",
     "content-type",
-    "transfer-encoding",
+    "set-cookie",
 }
 
 
@@ -907,12 +918,27 @@ def _filter_upstream_headers(headers: Mapping[str, str]) -> dict[str, str]:
 
 
 def _filter_upstream_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    blocked = set(_MANIFEST_PROXY_BLOCKED_RESPONSE_HEADERS)
+    blocked.update(_connection_header_tokens(headers))
+
     filtered: dict[str, str] = {}
     for key, value in headers.items():
-        if key.lower() in _HOP_BY_HOP_RESPONSE_HEADERS:
+        if key.lower() in blocked:
             continue
         filtered[key] = value
     return filtered
+
+
+def _connection_header_tokens(headers: Mapping[str, str]) -> set[str]:
+    tokens: set[str] = set()
+    for key, value in headers.items():
+        if key.lower() != "connection":
+            continue
+        for token in value.split(","):
+            normalized = token.strip().lower()
+            if normalized:
+                tokens.add(normalized)
+    return tokens
 
 
 __all__ = ["PlaybackCoordinator"]
