@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlencode
 
 from vibecast.player import DrmInfo, DrmSystem
+from vibecast.providers.common.http import cast_default_headers
 from vibecast.providers.svtplay._models import (
     SvtResolveResponse,
     SvtVideoReference,
@@ -80,12 +81,7 @@ class SvtPlayAPI:
         self._client = client
 
     def _default_headers(self) -> dict[str, str]:
-        return {
-            "Accept": "*/*",
-            "Accept-Language": "en-US",
-            "Origin": _ORIGIN,
-            "Referer": _REFERER,
-        }
+        return cast_default_headers(_ORIGIN, _REFERER)
 
     async def _get_json(self, url: str) -> dict[str, Any]:
         response = await self._client.get(url, headers=self._default_headers())

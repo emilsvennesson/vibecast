@@ -11,6 +11,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
 from vibecast.provider import ProviderHttpStatusError
+from vibecast.providers.common.http import cast_default_headers
 from vibecast.providers.primevideo._models import (
     AuthRegisterResponse,
     AuthTokenResponse,
@@ -577,12 +578,7 @@ class PrimeVideoAPI:
         token: str | None,
         content_type: str | None,
     ) -> dict[str, str]:
-        headers = {
-            "Accept": "*/*",
-            "Accept-Language": "en-US",
-            "Origin": _ORIGIN,
-            "Referer": _REFERER,
-        }
+        headers = cast_default_headers(_ORIGIN, _REFERER)
         if content_type is not None:
             headers["Content-Type"] = content_type
         if token:
