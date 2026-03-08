@@ -21,7 +21,10 @@ from vibecast._models import (
     Volume,
 )
 from vibecast._playback.coordinator import PlaybackCoordinator
-from vibecast._playback.headers import filter_upstream_response_headers
+from vibecast._playback.headers import (
+    filter_upstream_headers,
+    filter_upstream_response_headers,
+)
 from vibecast._playback.manifest_proxy import ManifestProxyRequest
 from vibecast._transport import namespace as ns
 from vibecast.player import (
@@ -242,6 +245,26 @@ def _provider_session(
 
 
 class TestCoordinator:
+    def test_filter_upstream_headers_drops_hop_by_hop_values(self) -> None:
+        filtered = filter_upstream_headers(
+            {
+                "Connection": "keep-alive, X-Remove-Me",
+                "Content-Length": "123",
+                "Host": "proxy.example.com",
+                "Keep-Alive": "timeout=5",
+                "Proxy-Authenticate": 'Basic realm="manifest"',
+                "Proxy-Authorization": "Basic abc",
+                "TE": "trailers",
+                "Trailer": "Expires",
+                "Transfer-Encoding": "chunked",
+                "Upgrade": "h2c",
+                "X-Remove-Me": "1",
+                "X-Preserved": "ok",
+            }
+        )
+
+        assert filtered == {"X-Preserved": "ok"}
+
     def test_filter_upstream_response_headers_drops_hop_by_hop_values(self) -> None:
         filtered = filter_upstream_response_headers(
             {

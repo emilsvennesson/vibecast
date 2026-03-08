@@ -12,6 +12,7 @@ HOP_BY_HOP_REQUEST_HEADERS = frozenset(
         "connection",
         "content-length",
         "host",
+        "keep-alive",
         "proxy-authenticate",
         "proxy-authorization",
         "te",
@@ -47,9 +48,12 @@ MANIFEST_PROXY_BLOCKED_RESPONSE_HEADERS = frozenset(
 
 def filter_upstream_headers(headers: Mapping[str, str]) -> dict[str, str]:
     """Drop hop-by-hop request headers before forwarding upstream."""
+    blocked = set(HOP_BY_HOP_REQUEST_HEADERS)
+    blocked.update(connection_header_tokens(headers))
+
     filtered: dict[str, str] = {}
     for key, value in headers.items():
-        if key.lower() in HOP_BY_HOP_REQUEST_HEADERS:
+        if key.lower() in blocked:
             continue
         filtered[key] = value
     return filtered
@@ -69,7 +73,7 @@ def filter_upstream_response_headers(headers: Mapping[str, str]) -> dict[str, st
 
 
 def connection_header_tokens(headers: Mapping[str, str]) -> set[str]:
-    """Extract token list from ``Connection`` response headers."""
+    """Extract token list from ``Connection`` headers."""
     tokens: set[str] = set()
     for key, value in headers.items():
         if key.lower() != "connection":
