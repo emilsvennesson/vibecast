@@ -6,11 +6,8 @@ import base64
 import contextlib
 import hashlib
 import socket
-import ssl
-import tempfile
 import time
 from dataclasses import asdict, dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from aiohttp import web
@@ -19,12 +16,13 @@ from cryptography.x509 import load_der_x509_certificate
 from pydantic import BaseModel, ConfigDict, Field
 
 from vibecast._log import get_logger
+from vibecast._security.tls import build_server_ssl_context, load_cert_chain
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from vibecast._certificate import CertificateBundle
     from vibecast._config import EurekaDeviceCapabilitiesConfig
+    from vibecast._security.certificate import CertificateBundle
 
 log = get_logger("eureka")
 
@@ -189,7 +187,7 @@ class EurekaServer:
 
         self._ip_address = _discover_primary_ipv4(host)
         self._public_key_b64 = _device_public_key_b64(bundle)
-        self._ssl_context = _build_ssl_context(bundle)
+        self._ssl_context = build_server_ssl_context(bundle)
         self._local_authorization_token_hash = _token_hash(identity.ssdp_udn)
         log.debug(
             "eureka identity configured (name=%s model=%s ssdp_udn=%s bind_host=%s ip=%s public_key_b64_len=%d)",
@@ -222,7 +220,7 @@ class EurekaServer:
         )
         self._started_at = time.monotonic()
         self._public_key_b64 = _device_public_key_b64(certificates)
-        self._ssl_context = _build_ssl_context(certificates)
+        self._ssl_context = build_server_ssl_context(certificates)
         ssl_context = self._ssl_context
         log.debug("eureka TLS context initialized")
 
@@ -277,7 +275,7 @@ class EurekaServer:
 
     def update_certificate(self, bundle: CertificateBundle) -> None:
         """Hot-reload certificate material for future HTTPS handshakes."""
-        _load_cert_chain(self._ssl_context, bundle)
+        load_cert_chain(self._ssl_context, bundle)
         self._public_key_b64 = _device_public_key_b64(bundle)
         log.info(
             "eureka TLS certificate rotated (valid=%s -> %s)",
@@ -371,37 +369,6 @@ def _build_app(
     app = web.Application()
     _ = app.router.add_get("/setup/eureka_info", handler)
     return app
-
-
-def _build_ssl_context(bundle: CertificateBundle) -> ssl.SSLContext:
-    log.debug("building eureka SSL context from peer certificate bundle")
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-
-    _load_cert_chain(ctx, bundle)
-    return ctx
-
-
-def _load_cert_chain(ctx: ssl.SSLContext, bundle: CertificateBundle) -> None:
-    """Load certificate chain from *bundle* into an existing SSL context."""
-
-    cert_path: Path | None = None
-    key_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as cert_file:
-            _ = cert_file.write(bundle.peer_cert_pem)
-            cert_path = Path(cert_file.name)
-
-        with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as key_file:
-            _ = key_file.write(bundle.peer_key_pem)
-            key_path = Path(key_file.name)
-
-        ctx.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
-    finally:
-        if cert_path is not None:
-            cert_path.unlink(missing_ok=True)
-        if key_path is not None:
-            key_path.unlink(missing_ok=True)
 
 
 def _resolve_serving_port(runner: web.AppRunner) -> int | None:

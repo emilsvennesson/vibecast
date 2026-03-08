@@ -1,25 +1,23 @@
 """Asyncio TLS server for the Google Cast protocol.
 
 Listens on a TCP port with TLS (self-signed peer certificate) and spawns
-a :class:`~vibecast._connection.Connection` for each accepted sender.
+a :class:`~vibecast._transport.connection.Connection` for each accepted sender.
 """
 
 from __future__ import annotations
 
 import asyncio
-import ssl
-import tempfile
-from pathlib import Path
 from typing import TYPE_CHECKING
 
-from vibecast._connection import Connection
 from vibecast._log import get_logger
+from vibecast._security.tls import build_server_ssl_context, load_cert_chain
+from vibecast._transport.connection import Connection
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from vibecast._certificate import CertificateBundle
     from vibecast._proto.cast_channel_pb2 import CastMessage
+    from vibecast._security.certificate import CertificateBundle
 
 log = get_logger("server")
 
@@ -80,7 +78,7 @@ class CastServer:
         self._on_connection = on_connection
         self._on_disconnect = on_disconnect
 
-        self._ssl_ctx = _build_ssl_context(bundle)
+        self._ssl_ctx = build_server_ssl_context(bundle)
         self._server: asyncio.Server | None = None
         self._tasks: set[asyncio.Task[None]] = set()
         self._connections: set[Connection] = set()
@@ -121,7 +119,7 @@ class CastServer:
 
     def update_certificate(self, bundle: CertificateBundle) -> None:
         """Hot-reload certificate material for future TLS handshakes."""
-        _load_cert_chain(self._ssl_ctx, bundle)
+        load_cert_chain(self._ssl_ctx, bundle)
         self._bundle = bundle
         log.info(
             "cast TLS certificate rotated (valid=%s -> %s)",
@@ -204,46 +202,3 @@ class CastServer:
         self._connections.discard(conn)
         if self._on_disconnect is not None:
             await self._on_disconnect(conn)
-
-
-# ------------------------------------------------------------------
-# SSL helpers
-# ------------------------------------------------------------------
-
-
-def _build_ssl_context(bundle: CertificateBundle) -> ssl.SSLContext:
-    """Create a server-side TLS context from *bundle*.
-
-    The context uses the peer certificate and private key from the bundle.
-    Client certificates are not requested (Cast senders do not present them).
-    Minimum TLS version is 1.2, matching real Chromecast behaviour.
-    """
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-
-    _load_cert_chain(ctx, bundle)
-    return ctx
-
-
-def _load_cert_chain(ctx: ssl.SSLContext, bundle: CertificateBundle) -> None:
-    """Load certificate chain from *bundle* into an existing SSL context."""
-
-    # ssl.SSLContext.load_cert_chain() requires file paths — there is no
-    # in-memory API in the stdlib.  Write PEM bytes to temporary files.
-    cert_path: Path | None = None
-    key_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as cert_f:
-            _ = cert_f.write(bundle.peer_cert_pem)
-            cert_path = Path(cert_f.name)
-
-        with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as key_f:
-            _ = key_f.write(bundle.peer_key_pem)
-            key_path = Path(key_f.name)
-
-        ctx.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
-    finally:
-        if cert_path is not None:
-            cert_path.unlink(missing_ok=True)
-        if key_path is not None:
-            key_path.unlink(missing_ok=True)

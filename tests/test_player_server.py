@@ -8,9 +8,12 @@ from typing import Any, cast
 
 from aiohttp import ClientSession, WSMsgType
 
-from vibecast._manifest_proxy import ManifestProxyRequest, ManifestProxyResponse
 from vibecast._models import PlayerState, StreamType
-from vibecast._player_server import PlayerServer
+from vibecast._playback.manifest_proxy import (
+    ManifestProxyRequest,
+    ManifestProxyResponse,
+)
+from vibecast._playback.player_server import PlayerServer
 from vibecast.player import (
     LicenseRequest,
     LicenseResponse,

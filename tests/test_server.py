@@ -10,17 +10,17 @@ import struct
 from typing import TYPE_CHECKING
 
 from tests.conftest import make_cast_message
-from vibecast import _namespace as ns
 from vibecast._proto.cast_channel_pb2 import (
     AuthChallenge,
     CastMessage,
     DeviceAuthMessage,
 )
-from vibecast._server import CastServer
+from vibecast._transport import namespace as ns
+from vibecast._transport.server import CastServer
 
 if TYPE_CHECKING:
-    from vibecast._certificate import CertificateBundle
-    from vibecast._connection import Connection
+    from vibecast._security.certificate import CertificateBundle
+    from vibecast._transport.connection import Connection
 
 
 # ---------------------------------------------------------------------------

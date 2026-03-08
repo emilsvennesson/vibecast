@@ -2,8 +2,8 @@
 
 # pyright: reportUnsupportedDunderAll=false
 
-from vibecast._certificate import CertificateBundle, CertificateStore
 from vibecast._config import VibecastConfig, load_config
+from vibecast._security.certificate import CertificateBundle, CertificateStore
 from vibecast.player import (
     DefaultPlayer,
     DrmInfo,

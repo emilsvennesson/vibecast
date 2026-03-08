@@ -7,9 +7,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, override
 
 from tests.conftest import make_cast_message
-from vibecast import _namespace as ns
-from vibecast._device import Device, DeviceIdentity
-from vibecast._handlers import PlatformHandler
 from vibecast._models import (
     DeviceInfoResponse,
     LaunchErrorResponse,
@@ -19,6 +16,9 @@ from vibecast._models import (
     SetupResponse,
     StreamType,
 )
+from vibecast._runtime.device import Device, DeviceIdentity
+from vibecast._runtime.handlers import PlatformHandler
+from vibecast._transport import namespace as ns
 from vibecast.player import DefaultPlayer, PlaybackMedia, PlaybackStream
 from vibecast.provider import LaunchCredentials, Provider, ProviderMessageDisposition
 
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
     from httpx import AsyncClient
 
-    from vibecast._connection import Connection
+    from vibecast._transport.connection import Connection
 
 
 class RecordingConnection:

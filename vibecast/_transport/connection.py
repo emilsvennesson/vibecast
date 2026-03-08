@@ -13,9 +13,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-import vibecast._namespace as ns
-from vibecast._auth import build_auth_error, build_auth_response
-from vibecast._framing import FramingError, read_message, write_message
+import vibecast._transport.namespace as ns
 from vibecast._log import get_logger
 from vibecast._proto.cast_channel_pb2 import (
     CastMessage,
@@ -23,11 +21,13 @@ from vibecast._proto.cast_channel_pb2 import (
     HashAlgorithm,
     SignatureAlgorithm,
 )
+from vibecast._security.auth import build_auth_error, build_auth_response
+from vibecast._transport.framing import FramingError, read_message, write_message
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from vibecast._certificate import CertificateBundle
+    from vibecast._security.certificate import CertificateBundle
 
 log = get_logger("connection")
 

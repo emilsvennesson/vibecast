@@ -8,21 +8,18 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
-import vibecast._namespace as ns
+import vibecast._transport.namespace as ns
 from vibecast._config import CastConfig, cast_device_capabilities_header
-from vibecast._coordinator import PlaybackCoordinator
 from vibecast._log import get_logger
 from vibecast._models import (
-    ApplicationStatus,
-    CastNamespace,
     ConnectRequest,
     MediaInvalidRequestResponse,
-    ReceiverStatus,
-    ReceiverStatusResponse,
     Volume,
     connection_message_adapter,
     media_request_adapter,
 )
+from vibecast._playback.coordinator import PlaybackCoordinator
+from vibecast._runtime.receiver_status import build_receiver_status
 from vibecast._util import extract_request_id, parse_json_payload
 from vibecast.provider import (
     LaunchCredentials,
@@ -38,9 +35,9 @@ if TYPE_CHECKING:
 
     from httpx import AsyncClient
 
-    from vibecast._connection import Connection
-    from vibecast._player_server import PlayerServer
+    from vibecast._playback.player_server import PlayerServer
     from vibecast._proto.cast_channel_pb2 import CastMessage
+    from vibecast._transport.connection import Connection
     from vibecast.player import Player
 
 log = get_logger("device")
@@ -619,42 +616,6 @@ class Device:
         return sessions, volume
 
 
-def build_receiver_status(
-    device: Device, request_id: int = 0
-) -> ReceiverStatusResponse:
-    """Build a ``RECEIVER_STATUS`` response from current device state."""
-    sessions, volume = device.snapshot_receiver_state()
-
-    applications: list[ApplicationStatus] = []
-    for session in sessions:
-        transport = device.transports.get(session.transport_id)
-        sender_connected = bool(transport and transport.subscriptions)
-        applications.append(
-            ApplicationStatus(
-                app_id=session.app_id,
-                app_type="WEB",
-                display_name=session.display_name,
-                icon_url=session.icon_url,
-                is_idle_screen=False,
-                launched_from_cloud=False,
-                namespaces=[CastNamespace(name=name) for name in session.namespaces],
-                sender_connected=sender_connected,
-                session_id=session.session_id,
-                status_text=session.status_text,
-                transport_id=session.transport_id,
-                universal_app_id=session.app_id,
-            )
-        )
-
-    status = ReceiverStatus(
-        applications=applications,
-        volume=volume,
-        is_active_input=True,
-        is_stand_by=False,
-    )
-    return ReceiverStatusResponse(request_id=request_id, status=status)
-
-
 __all__ = [
     "AppSession",
     "Device",
@@ -662,5 +623,4 @@ __all__ = [
     "Subscription",
     "Transport",
     "TransportHandler",
-    "build_receiver_status",
 ]

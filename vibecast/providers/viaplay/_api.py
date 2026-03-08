@@ -15,6 +15,7 @@ from uritemplate import expand as uri_expand
 
 from vibecast.player import StreamType
 from vibecast.provider import ProviderHttpStatusError
+from vibecast.providers.common.http import cast_default_headers
 from vibecast.providers.viaplay._models import (
     ViaplayAuthorizedPollResponse,
     ViaplayDeviceAuthResponse,
@@ -148,12 +149,7 @@ class ViaplayAPI:
         return uri_expand(template, var_dict=self._template_vars(extra))
 
     def _default_headers(self) -> dict[str, str]:
-        return {
-            "Accept": "*/*",
-            "Accept-Language": "en-US",
-            "Origin": _ORIGIN,
-            "Referer": _REFERER,
-        }
+        return cast_default_headers(_ORIGIN, _REFERER)
 
     def request_headers(self) -> dict[str, str]:
         """Return default Viaplay headers mimicking a real Chromecast."""

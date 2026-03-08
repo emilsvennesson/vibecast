@@ -6,13 +6,13 @@ from typing import override
 
 import pytest
 
-from vibecast._framing import (
+from vibecast._proto.cast_channel_pb2 import CastMessage
+from vibecast._transport.framing import (
     MAX_MESSAGE_SIZE,
     FramingError,
     read_message,
     write_message,
 )
-from vibecast._proto.cast_channel_pb2 import CastMessage
 
 
 def _make_message(

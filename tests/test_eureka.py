@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING
 import httpx
 
 from vibecast._config import EurekaDeviceCapabilitiesConfig
-from vibecast._eureka import EurekaIdentity, EurekaServer
+from vibecast._discovery.eureka import EurekaIdentity, EurekaServer
 
 if TYPE_CHECKING:
-    from vibecast._certificate import CertificateBundle
+    from vibecast._security.certificate import CertificateBundle
 
 
 class TestEurekaServer:

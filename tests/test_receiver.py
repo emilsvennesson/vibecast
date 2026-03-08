@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any, override
 import pytest
 
 from tests.conftest import make_cast_message
-from vibecast import _namespace as ns
 from vibecast._config import DeviceConfig, NetworkConfig, VibecastConfig
 from vibecast._models import LoadRequest, StreamType
 from vibecast._proto.cast_channel_pb2 import (
@@ -19,6 +18,7 @@ from vibecast._proto.cast_channel_pb2 import (
     CastMessage,
     DeviceAuthMessage,
 )
+from vibecast._transport import namespace as ns
 from vibecast.player import PlaybackMedia, PlaybackStream
 from vibecast.provider import (
     LaunchCredentials,
@@ -31,7 +31,7 @@ from vibecast.receiver import CastReceiver
 if TYPE_CHECKING:
     from ssl import SSLContext
 
-    from vibecast._certificate import CertificateBundle
+    from vibecast._security.certificate import CertificateBundle
 
 
 def _frame(msg: CastMessage) -> bytes:

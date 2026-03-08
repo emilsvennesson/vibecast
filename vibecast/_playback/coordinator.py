@@ -5,17 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-import vibecast._namespace as ns
+import vibecast._transport.namespace as ns
 from vibecast._log import get_logger
-from vibecast._manifest_proxy import (
-    ManifestKind,
-    ManifestProxyRequest,
-    ManifestProxyResponse,
-    default_manifest_content_type,
-    infer_manifest_kind,
-    manifest_route_suffix,
-    normalize_manifest_bytes,
-)
 from vibecast._models import (
     ExtendedStatus,
     IdleReason,
@@ -41,6 +32,20 @@ from vibecast._models import (
     StreamType,
     Volume,
 )
+from vibecast._playback.headers import (
+    HOP_BY_HOP_REQUEST_HEADERS,
+    filter_upstream_headers,
+    filter_upstream_response_headers,
+)
+from vibecast._playback.manifest_proxy import (
+    ManifestKind,
+    ManifestProxyRequest,
+    ManifestProxyResponse,
+    default_manifest_content_type,
+    infer_manifest_kind,
+    manifest_route_suffix,
+    normalize_manifest_bytes,
+)
 from vibecast.player import (
     LicenseRequest,
     LicenseResponse,
@@ -55,10 +60,10 @@ from vibecast.player import (
 from vibecast.provider import MediaResolveFailure, MediaResolveFailureCode
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable
 
-    from vibecast._connection import Connection
-    from vibecast._player_server import PlayerServer
+    from vibecast._playback.player_server import PlayerServer
+    from vibecast._transport.connection import Connection
     from vibecast.provider import Provider, ProviderSession
 
 log = get_logger("coordinator")
@@ -75,37 +80,6 @@ _ACTIVE_COMMANDS = (
 )
 
 _LOADING_PLAYER_STATE = "LOADING"
-
-_HOP_BY_HOP_REQUEST_HEADERS = {
-    "connection",
-    "content-length",
-    "host",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-}
-
-_HOP_BY_HOP_RESPONSE_HEADERS = {
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-}
-
-_MANIFEST_PROXY_BLOCKED_RESPONSE_HEADERS = {
-    *_HOP_BY_HOP_RESPONSE_HEADERS,
-    "content-encoding",
-    "content-length",
-    "content-type",
-    "set-cookie",
-}
 
 
 @dataclass(slots=True, frozen=True)
@@ -385,7 +359,7 @@ class PlaybackCoordinator:
                 content_type="text/plain",
             )
 
-        headers = _filter_upstream_headers(request.headers)
+        headers = filter_upstream_headers(request.headers)
         try:
             response = await self._provider_session.http_client.request(
                 request.method,
@@ -410,7 +384,7 @@ class PlaybackCoordinator:
             or route.content_type
             or default_manifest_content_type(route.kind)
         )
-        response_headers = _filter_upstream_response_headers(response.headers)
+        response_headers = filter_upstream_response_headers(response.headers)
 
         if request.method.upper() == "HEAD":
             return ManifestProxyResponse(
@@ -819,7 +793,7 @@ class PlaybackCoordinator:
         normalized_header_names = {key.lower() for key in headers}
         for key, value in request.headers.items():
             lowered = key.lower()
-            if lowered in _HOP_BY_HOP_REQUEST_HEADERS:
+            if lowered in HOP_BY_HOP_REQUEST_HEADERS:
                 continue
             if lowered not in normalized_header_names:
                 headers[key] = value
@@ -906,39 +880,6 @@ def _build_media_info(media: PlaybackMedia) -> MediaInfo:
         media_category=MediaCategory.VIDEO,
         is_live_media=is_live if is_live else None,
     )
-
-
-def _filter_upstream_headers(headers: Mapping[str, str]) -> dict[str, str]:
-    filtered: dict[str, str] = {}
-    for key, value in headers.items():
-        if key.lower() in _HOP_BY_HOP_REQUEST_HEADERS:
-            continue
-        filtered[key] = value
-    return filtered
-
-
-def _filter_upstream_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
-    blocked = set(_MANIFEST_PROXY_BLOCKED_RESPONSE_HEADERS)
-    blocked.update(_connection_header_tokens(headers))
-
-    filtered: dict[str, str] = {}
-    for key, value in headers.items():
-        if key.lower() in blocked:
-            continue
-        filtered[key] = value
-    return filtered
-
-
-def _connection_header_tokens(headers: Mapping[str, str]) -> set[str]:
-    tokens: set[str] = set()
-    for key, value in headers.items():
-        if key.lower() != "connection":
-            continue
-        for token in value.split(","):
-            normalized = token.strip().lower()
-            if normalized:
-                tokens.add(normalized)
-    return tokens
 
 
 __all__ = ["PlaybackCoordinator"]
