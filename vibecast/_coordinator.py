@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import vibecast._namespace as ns
 from vibecast._log import get_logger
+from vibecast._manifest_proxy import (
+    ManifestKind,
+    ManifestProxyRequest,
+    ManifestProxyResponse,
+    default_manifest_content_type,
+    infer_manifest_kind,
+    manifest_route_suffix,
+    normalize_manifest_bytes,
+)
 from vibecast._models import (
     ExtendedStatus,
     IdleReason,
@@ -46,7 +55,7 @@ from vibecast.player import (
 from vibecast.provider import MediaResolveFailure, MediaResolveFailureCode
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
 
     from vibecast._connection import Connection
     from vibecast._player_server import PlayerServer
@@ -79,6 +88,33 @@ _HOP_BY_HOP_REQUEST_HEADERS = {
     "upgrade",
 }
 
+_HOP_BY_HOP_RESPONSE_HEADERS = {
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+}
+
+_MANIFEST_PROXY_BLOCKED_RESPONSE_HEADERS = {
+    *_HOP_BY_HOP_RESPONSE_HEADERS,
+    "content-encoding",
+    "content-length",
+    "content-type",
+    "set-cookie",
+}
+
+
+@dataclass(slots=True, frozen=True)
+class _ManifestRoute:
+    route_id: str
+    kind: ManifestKind
+    upstream_url: str
+    content_type: str
+
 
 class PlaybackCoordinator:
     """Session-scoped mediator for generic Cast media handling."""
@@ -89,6 +125,7 @@ class PlaybackCoordinator:
         "_current_time",
         "_idle_reason",
         "_license_routes",
+        "_manifest_routes",
         "_media_session_id",
         "_playback_media",
         "_player",
@@ -129,6 +166,7 @@ class PlaybackCoordinator:
         self._send_fn = send_fn
         self._media_session_id = 1
         self._license_routes: dict[str, LicenseRoute] = {}
+        self._manifest_routes: dict[str, _ManifestRoute] = {}
         self._player_state = PlayerState.IDLE
         self._current_time = 0.0
         self._current_media: MediaInfo | None = None
@@ -204,6 +242,7 @@ class PlaybackCoordinator:
                         exc_info=True,
                     )
                 self._clear_media()
+                self._unregister_manifest_handler()
                 self._unregister_license_handler()
                 await self._notify_provider()
             case MediaGetStatusRequest():
@@ -280,6 +319,7 @@ class PlaybackCoordinator:
             )
 
         if state.player_state is PlayerState.IDLE:
+            self._unregister_manifest_handler()
             self._unregister_license_handler()
 
         await self._broadcast_media_status(request_id=0)
@@ -332,6 +372,78 @@ class PlaybackCoordinator:
                 status=502, body=b"provider license resolution failed"
             )
 
+    async def handle_manifest(
+        self,
+        request: ManifestProxyRequest,
+    ) -> ManifestProxyResponse:
+        """Resolve one proxied manifest request with normalization transforms."""
+        route = self._manifest_routes.get(request.route_id)
+        if route is None:
+            return ManifestProxyResponse(
+                status=404,
+                body=b"unknown manifest route",
+                content_type="text/plain",
+            )
+
+        headers = _filter_upstream_headers(request.headers)
+        try:
+            response = await self._provider_session.http_client.request(
+                request.method,
+                route.upstream_url,
+                headers=headers,
+            )
+        except Exception:
+            log.warning(
+                "upstream manifest request failed for session %s route=%s",
+                self.session_id,
+                route.route_id,
+                exc_info=True,
+            )
+            return ManifestProxyResponse(
+                status=502,
+                body=b"manifest request failed",
+                content_type="text/plain",
+            )
+
+        content_type = (
+            response.headers.get("content-type")
+            or route.content_type
+            or default_manifest_content_type(route.kind)
+        )
+        response_headers = _filter_upstream_response_headers(response.headers)
+
+        if request.method.upper() == "HEAD":
+            return ManifestProxyResponse(
+                status=response.status_code,
+                body=b"",
+                content_type=content_type,
+                headers=response_headers,
+            )
+
+        body = response.content
+        if response.status_code < 400:
+            try:
+                body, content_type = normalize_manifest_bytes(
+                    body,
+                    upstream_url=route.upstream_url,
+                    content_type=content_type,
+                    provider_key=self._provider.provider_key(),
+                )
+            except Exception:
+                log.warning(
+                    "manifest normalization failed for session %s route=%s",
+                    self.session_id,
+                    route.route_id,
+                    exc_info=True,
+                )
+
+        return ManifestProxyResponse(
+            status=response.status_code,
+            body=body,
+            content_type=content_type,
+            headers=response_headers,
+        )
+
     async def send_current_status(
         self,
         connection: Connection,
@@ -352,6 +464,7 @@ class PlaybackCoordinator:
                     exc_info=True,
                 )
         self._clear_media()
+        self._unregister_manifest_handler()
         self._unregister_license_handler()
 
     # -- load ----------------------------------------------------------------
@@ -423,6 +536,7 @@ class PlaybackCoordinator:
             )
             return
 
+        media = self._with_manifest_proxy(media)
         media = self._with_license_proxy(media)
 
         # Phase 3: broadcast IDLE + LOADING with fully resolved media info.
@@ -485,6 +599,7 @@ class PlaybackCoordinator:
 
         self._set_idle_state(idle_reason=IdleReason.ERROR)
         self._clear_media()
+        self._unregister_manifest_handler()
         self._unregister_license_handler()
 
         failed = LoadFailedResponse(
@@ -611,6 +726,47 @@ class PlaybackCoordinator:
     def _clear_media(self) -> None:
         self._current_media = None
         self._playback_media = None
+
+    # -- manifest proxy ------------------------------------------------------
+
+    def _with_manifest_proxy(self, media: PlaybackMedia) -> PlaybackMedia:
+        self._unregister_manifest_handler()
+        if self._player_server is None:
+            return media
+
+        rewritten_streams: list[PlaybackStream] = []
+        proxy_url: str | None = None
+
+        for index, stream in enumerate(media.streams):
+            kind = infer_manifest_kind(stream.content_type, stream.url)
+            if kind is ManifestKind.UNKNOWN:
+                rewritten_streams.append(stream)
+                continue
+
+            if proxy_url is None:
+                proxy_url = self._player_server.register_manifest_handler(
+                    self.session_id,
+                    self,
+                )
+
+            route_id = f"m{index}"
+            self._manifest_routes[route_id] = _ManifestRoute(
+                route_id=route_id,
+                kind=kind,
+                upstream_url=stream.url,
+                content_type=stream.content_type,
+            )
+
+            proxied_url = f"{proxy_url}/{route_id}{manifest_route_suffix(kind)}"
+            rewritten_streams.append(replace(stream, url=proxied_url))
+
+        return replace(media, streams=tuple(rewritten_streams))
+
+    def _unregister_manifest_handler(self) -> None:
+        self._manifest_routes.clear()
+        if self._player_server is None:
+            return
+        self._player_server.unregister_manifest_handler(self.session_id)
 
     # -- license proxy -------------------------------------------------------
 
@@ -750,6 +906,39 @@ def _build_media_info(media: PlaybackMedia) -> MediaInfo:
         media_category=MediaCategory.VIDEO,
         is_live_media=is_live if is_live else None,
     )
+
+
+def _filter_upstream_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    filtered: dict[str, str] = {}
+    for key, value in headers.items():
+        if key.lower() in _HOP_BY_HOP_REQUEST_HEADERS:
+            continue
+        filtered[key] = value
+    return filtered
+
+
+def _filter_upstream_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    blocked = set(_MANIFEST_PROXY_BLOCKED_RESPONSE_HEADERS)
+    blocked.update(_connection_header_tokens(headers))
+
+    filtered: dict[str, str] = {}
+    for key, value in headers.items():
+        if key.lower() in blocked:
+            continue
+        filtered[key] = value
+    return filtered
+
+
+def _connection_header_tokens(headers: Mapping[str, str]) -> set[str]:
+    tokens: set[str] = set()
+    for key, value in headers.items():
+        if key.lower() != "connection":
+            continue
+        for token in value.split(","):
+            normalized = token.strip().lower()
+            if normalized:
+                tokens.add(normalized)
+    return tokens
 
 
 __all__ = ["PlaybackCoordinator"]

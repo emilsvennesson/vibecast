@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING, Any, cast, override
 import httpx
 
 from vibecast import _namespace as ns
-from vibecast._coordinator import PlaybackCoordinator
+from vibecast._coordinator import PlaybackCoordinator, _filter_upstream_response_headers
+from vibecast._manifest_proxy import ManifestProxyRequest
 from vibecast._models import (
     LoadRequest,
     MediaInfo,
@@ -188,6 +189,8 @@ class FakePlayerServer:
     def __init__(self) -> None:
         self.register_calls: list[str] = []
         self.unregister_calls: list[str] = []
+        self.manifest_register_calls: list[str] = []
+        self.manifest_unregister_calls: list[str] = []
 
     def register_license_handler(self, session_id: str, handler: object) -> str:
         _ = handler
@@ -196,6 +199,14 @@ class FakePlayerServer:
 
     def unregister_license_handler(self, session_id: str) -> None:
         self.unregister_calls.append(session_id)
+
+    def register_manifest_handler(self, session_id: str, handler: object) -> str:
+        _ = handler
+        self.manifest_register_calls.append(session_id)
+        return f"http://127.0.0.1:8010/manifest/{session_id}"
+
+    def unregister_manifest_handler(self, session_id: str) -> None:
+        self.manifest_unregister_calls.append(session_id)
 
 
 def _provider_session(
@@ -230,6 +241,28 @@ def _provider_session(
 
 
 class TestCoordinator:
+    def test_filter_upstream_response_headers_drops_hop_by_hop_values(self) -> None:
+        filtered = _filter_upstream_response_headers(
+            {
+                "Connection": "keep-alive, X-Remove-Me",
+                "Content-Encoding": "gzip",
+                "Content-Length": "123",
+                "Content-Type": "application/dash+xml",
+                "Keep-Alive": "timeout=5",
+                "Proxy-Authenticate": 'Basic realm="manifest"',
+                "Proxy-Authorization": "Basic abc",
+                "Set-Cookie": "sid=123",
+                "TE": "trailers",
+                "Trailer": "Expires",
+                "Transfer-Encoding": "chunked",
+                "Upgrade": "h2c",
+                "X-Remove-Me": "1",
+                "X-Preserved": "ok",
+            }
+        )
+
+        assert filtered == {"X-Preserved": "ok"}
+
     async def test_load_registers_license_proxy_and_notifies_player(self) -> None:
         media = PlaybackMedia(
             session_id="session-1",
@@ -292,7 +325,12 @@ class TestCoordinator:
         )
 
         assert player_server.register_calls == ["session-1"]
+        assert player_server.manifest_register_calls == ["session-1"]
         assert len(player.load_calls) == 1
+        assert (
+            player.load_calls[0].streams[0].url
+            == "http://127.0.0.1:8010/manifest/session-1/m0.mpd"
+        )
         assert player.load_calls[0].streams[0].drm is not None
         assert (
             player.load_calls[0].streams[0].drm.license_url
@@ -414,6 +452,7 @@ class TestCoordinator:
         assert player.volume_calls == [(0.4, True)]
         assert player.stop_calls == 1
         assert player_server.unregister_calls[-1] == "session-1"
+        assert player_server.manifest_unregister_calls[-1] == "session-1"
         # Media stop now sends a proper IDLE status with idleReason, not an
         # empty array.  The media field is omitted on IDLE.
         stop_status = broadcast[-1][1]["status"]
@@ -635,6 +674,85 @@ class TestCoordinator:
         assert captured_request["body"] == b"challenge"
         assert response.status == 201
         assert response.body == b"upstream-license"
+
+    async def test_manifest_proxy_normalizes_dash_pattern(self) -> None:
+        media = PlaybackMedia(
+            session_id="session-1",
+            streams=(
+                PlaybackStream(
+                    url="https://cdn.example.com/live/manifest.mpd",
+                    content_type="application/dash+xml",
+                ),
+            ),
+            stream_type=StreamType.LIVE,
+        )
+        provider = FakeProvider(media)
+
+        raw_manifest = """<?xml version=\"1.0\"?>
+<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" type=\"dynamic\">
+  <Period>
+    <AdaptationSet mimeType=\"audio/mp4\">
+      <Representation id=\"a1\" codecs=\"mp4a.40.2\">
+        <SegmentTemplate media=\"a_$Number$.m4s\" initialization=\"a_init.mp4\" timescale=\"32000\">
+          <SegmentTimeline>
+            <Pattern t=\"0\" r=\"1\">
+              <S d=\"64512\"/>
+              <S d=\"63488\"/>
+            </Pattern>
+          </SegmentTimeline>
+        </SegmentTemplate>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>
+"""
+
+        async def _handler(request: httpx.Request) -> httpx.Response:
+            if str(request.url) == "https://cdn.example.com/live/manifest.mpd":
+                return httpx.Response(
+                    status_code=200,
+                    content=raw_manifest.encode("utf-8"),
+                    headers={"Content-Type": "application/dash+xml"},
+                    request=request,
+                )
+            return httpx.Response(status_code=404, request=request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+            coordinator = PlaybackCoordinator(
+                session_id="session-1",
+                transport_id="pid-1",
+                provider=provider,
+                provider_session=_provider_session(http_client=client),
+                player=FakePlayer(),
+                player_server=cast("Any", FakePlayerServer()),
+                broadcast_fn=lambda _namespace, _data: _noop_async(),
+                send_fn=lambda _c, _s, _n, _d: _noop_async(),
+                initial_volume=Volume(level=1.0, muted=False),
+            )
+
+            await coordinator.handle_media_message(
+                cast("Any", object()),
+                "sender-1",
+                LoadRequest(
+                    request_id=1,
+                    media=MediaInfo(content_id="x", stream_type=StreamType.LIVE),
+                ),
+            )
+
+            response = await coordinator.handle_manifest(
+                ManifestProxyRequest(
+                    session_id="session-1",
+                    route_id="m0",
+                    method="GET",
+                )
+            )
+
+        normalized = response.body.decode("utf-8")
+        assert response.status == 200
+        assert response.content_type == "application/dash+xml"
+        assert "<Pattern" not in normalized
+        assert normalized.count('<S d="64512"') == 2
+        assert "<BaseURL>https://cdn.example.com/live/</BaseURL>" in normalized
 
     async def test_provider_load_failure_reason_is_passthrough(self) -> None:
         provider = FakeProvider(

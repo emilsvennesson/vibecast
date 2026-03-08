@@ -8,6 +8,7 @@ from typing import Any, cast
 
 from aiohttp import ClientSession, WSMsgType
 
+from vibecast._manifest_proxy import ManifestProxyRequest, ManifestProxyResponse
 from vibecast._models import PlayerState, StreamType
 from vibecast._player_server import PlayerServer
 from vibecast.player import (
@@ -275,5 +276,131 @@ class TestPlayerServer:
             response = await client.post(proxy_url, data=b"challenge")
 
         assert response.status == 500
+
+        await server.stop()
+
+    async def test_manifest_proxy_round_trip(self) -> None:
+        server = PlayerServer(host="127.0.0.1", port=0)
+        await server.start()
+
+        class _Handler:
+            def __init__(self) -> None:
+                self.requests: list[ManifestProxyRequest] = []
+
+            async def handle_manifest(
+                self,
+                request: ManifestProxyRequest,
+            ) -> ManifestProxyResponse:
+                self.requests.append(request)
+                return ManifestProxyResponse(
+                    body=b"#EXTM3U\n",
+                    content_type="application/vnd.apple.mpegurl",
+                    status=200,
+                    headers={"Cache-Control": "no-store"},
+                )
+
+        handler = _Handler()
+        proxy_url = server.register_manifest_handler("session-1", handler)
+
+        async with ClientSession() as client:
+            response = await client.get(f"{proxy_url}/m7.m3u8")
+            body = await response.read()
+
+            assert response.status == 200
+            assert response.content_type == "application/vnd.apple.mpegurl"
+            assert response.headers.get("Cache-Control") == "no-store"
+            assert body == b"#EXTM3U\n"
+            assert len(handler.requests) == 1
+            assert handler.requests[0].session_id == "session-1"
+            assert handler.requests[0].route_id == "m7"
+            assert handler.requests[0].method == "GET"
+
+            missing = await client.get(
+                proxy_url.replace("session-1", "missing") + "/m0.mpd"
+            )
+            assert missing.status == 404
+
+        await server.stop()
+
+    async def test_manifest_proxy_head_request(self) -> None:
+        server = PlayerServer(host="127.0.0.1", port=0)
+        await server.start()
+
+        class _Handler:
+            async def handle_manifest(
+                self,
+                request: ManifestProxyRequest,
+            ) -> ManifestProxyResponse:
+                assert request.method == "HEAD"
+                return ManifestProxyResponse(
+                    body=b"ignored",
+                    content_type="application/dash+xml",
+                    status=200,
+                )
+
+        proxy_url = server.register_manifest_handler("session-1", _Handler())
+
+        async with ClientSession() as client:
+            response = await client.head(f"{proxy_url}/m0.mpd")
+            body = await response.read()
+
+        assert response.status == 200
+        assert response.content_type == "application/dash+xml"
+        assert body == b""
+
+        await server.stop()
+
+    async def test_manifest_proxy_filters_hop_by_hop_response_headers(self) -> None:
+        server = PlayerServer(host="127.0.0.1", port=0)
+        await server.start()
+
+        class _Handler:
+            async def handle_manifest(
+                self,
+                request: ManifestProxyRequest,
+            ) -> ManifestProxyResponse:
+                _ = request
+                return ManifestProxyResponse(
+                    body=b"#EXTM3U\n",
+                    content_type="application/vnd.apple.mpegurl",
+                    status=200,
+                    headers={
+                        "Connection": "keep-alive, X-Remove-Me",
+                        "Content-Encoding": "gzip",
+                        "Content-Length": "999",
+                        "Content-Type": "text/plain",
+                        "Keep-Alive": "timeout=5",
+                        "Proxy-Authenticate": 'Basic realm="manifest"',
+                        "Proxy-Authorization": "Basic abc",
+                        "Set-Cookie": "sid=123",
+                        "TE": "trailers",
+                        "Trailer": "Expires",
+                        "Transfer-Encoding": "chunked",
+                        "Upgrade": "h2c",
+                        "X-Remove-Me": "1",
+                        "X-Preserved": "ok",
+                    },
+                )
+
+        proxy_url = server.register_manifest_handler("session-1", _Handler())
+
+        async with ClientSession() as client:
+            response = await client.get(f"{proxy_url}/m0.m3u8")
+            _ = await response.read()
+
+        assert response.status == 200
+        assert response.content_type == "application/vnd.apple.mpegurl"
+        assert response.headers.get("X-Preserved") == "ok"
+        assert "Connection" not in response.headers
+        assert "Content-Encoding" not in response.headers
+        assert "Keep-Alive" not in response.headers
+        assert "Proxy-Authenticate" not in response.headers
+        assert "Proxy-Authorization" not in response.headers
+        assert "Set-Cookie" not in response.headers
+        assert "TE" not in response.headers
+        assert "Trailer" not in response.headers
+        assert "Transfer-Encoding" not in response.headers
+        assert "Upgrade" not in response.headers
+        assert "X-Remove-Me" not in response.headers
 
         await server.stop()
