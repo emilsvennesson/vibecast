@@ -366,7 +366,7 @@ class TestForwarding:
         on_msg.assert_called_once()
 
     async def test_custom_namespace_forwarded(self, bundle: CertificateBundle) -> None:
-        """Messages on custom (provider) namespaces are forwarded."""
+        """Messages on custom (app) namespaces are forwarded."""
         on_msg = AsyncMock()
         custom = make_cast_message(
             namespace="urn:x-cast:tv.viaplay.chromecast",

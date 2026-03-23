@@ -1,4 +1,13 @@
-"""Player abstractions and universal WebSocket protocol models."""
+"""Player abstractions and universal WebSocket protocol models.
+
+Glossary
+--------
+Player        -- ABC for playback control (play, pause, seek, load).
+PlayerBridge  -- Default Player implementation; an HTTP/WS server that bridges
+                 commands to an external Renderer (see ``_playback.player_bridge``).
+Renderer      -- The external process (browser page or Kodi) that actually
+                 decodes and displays video, connected to PlayerBridge via WebSocket.
+"""
 
 from __future__ import annotations
 

@@ -49,7 +49,7 @@ class ManifestTransformContext:
     kind: ManifestKind
     upstream_url: str
     content_type: str
-    provider_key: str | None = None
+    app_key: str | None = None
 
 
 class ManifestTransformer(Protocol):
@@ -213,7 +213,7 @@ def normalize_manifest_bytes(
     *,
     upstream_url: str,
     content_type: str | None,
-    provider_key: str | None,
+    app_key: str | None,
 ) -> tuple[bytes, str]:
     """Normalize one manifest body and return bytes + content type."""
     kind = infer_manifest_kind(content_type, upstream_url)
@@ -227,7 +227,7 @@ def normalize_manifest_bytes(
         kind=kind,
         upstream_url=upstream_url,
         content_type=resolved_content_type,
-        provider_key=provider_key,
+        app_key=app_key,
     )
 
     for transformer in _TRANSFORMERS:

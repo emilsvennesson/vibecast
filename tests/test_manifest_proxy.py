@@ -55,7 +55,7 @@ def test_normalize_dash_pattern_and_base_url() -> None:
         manifest.encode("utf-8"),
         upstream_url="https://cdn.example.com/live/manifest.mpd?token=abc",
         content_type="application/dash+xml",
-        provider_key="primevideo",
+        app_key="primevideo",
     )
 
     text = normalized.decode("utf-8")
@@ -79,7 +79,7 @@ segment-2.ts
         playlist.encode("utf-8"),
         upstream_url="https://cdn.example.com/hls/master.m3u8",
         content_type="application/vnd.apple.mpegurl",
-        provider_key="test",
+        app_key="test",
     )
 
     text = normalized.decode("utf-8")

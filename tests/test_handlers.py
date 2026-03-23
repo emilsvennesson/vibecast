@@ -19,8 +19,8 @@ from vibecast._models import (
 from vibecast._runtime.device import Device, DeviceIdentity
 from vibecast._runtime.handlers import PlatformHandler
 from vibecast._transport import namespace as ns
+from vibecast.app import AppMessageDisposition, AppProvider, LaunchCredentials
 from vibecast.player import DefaultPlayer, PlaybackMedia, PlaybackStream
-from vibecast.provider import LaunchCredentials, Provider, ProviderMessageDisposition
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -46,8 +46,8 @@ class RecordingConnection:
         self.sent.append((source_id, dest_id, namespace, data))
 
 
-class FakeProvider(Provider):
-    """Minimal provider used for LAUNCH/STOP tests."""
+class FakeApp(AppProvider):
+    """Minimal app used for LAUNCH/STOP tests."""
 
     @override
     def app_ids(self) -> frozenset[str]:
@@ -58,7 +58,7 @@ class FakeProvider(Provider):
         return "Viaplay"
 
     @override
-    def provider_key(self) -> str:
+    def app_key(self) -> str:
         return "fake"
 
     @override
@@ -73,11 +73,11 @@ class FakeProvider(Provider):
     @override
     async def on_message(
         self, session: Any, namespace: str, data: dict[str, Any]
-    ) -> ProviderMessageDisposition:
+    ) -> AppMessageDisposition:
         _ = session
         _ = namespace
         _ = data
-        return ProviderMessageDisposition.HANDLED
+        return AppMessageDisposition.HANDLED
 
     @override
     async def resolve_media(
@@ -103,7 +103,7 @@ def _as_connection(connection: RecordingConnection) -> Connection:
     return cast("Connection", cast("object", connection))
 
 
-def _build_device(provider_lookup: Callable[[str], Provider | None]) -> Device:
+def _build_device(app_lookup: Callable[[str], AppProvider | None]) -> Device:
     device = Device(
         DeviceIdentity(
             friendly_name="Living Room",
@@ -117,8 +117,8 @@ def _build_device(provider_lookup: Callable[[str], Provider | None]) -> Device:
     platform = PlatformHandler(
         device,
         player=DefaultPlayer(),
-        player_server=None,
-        provider_lookup=provider_lookup,
+        player_bridge=None,
+        app_lookup=app_lookup,
     )
     device.register_transport("receiver-0", platform)
     return device
@@ -189,16 +189,16 @@ class TestPlatformNamespaces:
         assert response.status.volume.step_interval == 0.05
 
     async def test_get_status_includes_active_session(self) -> None:
-        provider = FakeProvider()
+        fake_app = FakeApp()
         device = _build_device(
-            lambda app_id: provider if app_id == "6313CF39" else None
+            lambda app_id: fake_app if app_id == "6313CF39" else None
         )
         _ = device.start_session(
             "6313CF39",
-            provider,
+            fake_app,
             LaunchCredentials(),
             player=DefaultPlayer(),
-            player_server=None,
+            player_bridge=None,
         )
         connection = RecordingConnection()
 
@@ -239,10 +239,8 @@ class TestPlatformNamespaces:
         assert data["availability"]["CC1AD845"] == "APP_AVAILABLE"
 
     async def test_launch_creates_session_and_broadcasts_status(self) -> None:
-        provider = FakeProvider()
-        device = _build_device(
-            lambda app_id: provider if app_id == "6313CF39" else None
-        )
+        app = FakeApp()
+        device = _build_device(lambda app_id: app if app_id == "6313CF39" else None)
         connection = RecordingConnection()
         await _connect_sender(device, connection)
 
@@ -267,10 +265,10 @@ class TestPlatformNamespaces:
         assert len(response.status.applications) == 1
 
     async def test_launch_replaces_existing_session(self) -> None:
-        provider = FakeProvider()
+        app = FakeApp()
 
-        def lookup(app_id: str) -> Provider | None:
-            return provider if app_id in ("6313CF39", "95370A1C") else None
+        def lookup(app_id: str) -> AppProvider | None:
+            return app if app_id in ("6313CF39", "95370A1C") else None
 
         device = _build_device(lookup)
         connection = RecordingConnection()
@@ -337,10 +335,8 @@ class TestPlatformNamespaces:
         assert response.reason == "Application not available"
 
     async def test_stop_removes_session_and_broadcasts_status(self) -> None:
-        provider = FakeProvider()
-        device = _build_device(
-            lambda app_id: provider if app_id == "6313CF39" else None
-        )
+        app = FakeApp()
+        device = _build_device(lambda app_id: app if app_id == "6313CF39" else None)
         connection = RecordingConnection()
         await _connect_sender(device, connection)
 

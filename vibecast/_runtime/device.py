@@ -1,4 +1,10 @@
-"""Device hub and transport registry for Cast message routing."""
+"""Device hub and transport registry for Cast message routing.
+
+``Device`` is the internal routing hub: it owns transports, subscriptions, and
+sessions.  It does **not** manage networking or lifecycle — that is the job of
+``CastReceiver`` (see ``vibecast.receiver``), which wires Device to the TLS
+listener, mDNS advertisement, and PlayerBridge.
+"""
 
 from __future__ import annotations
 
@@ -21,11 +27,11 @@ from vibecast._models import (
 from vibecast._playback.coordinator import PlaybackCoordinator
 from vibecast._runtime.receiver_status import build_receiver_status
 from vibecast._util import extract_request_id, parse_json_payload
-from vibecast.provider import (
+from vibecast.app import (
+    AppContext,
+    AppMessageDisposition,
+    AppProvider,
     LaunchCredentials,
-    Provider,
-    ProviderMessageDisposition,
-    ProviderSession,
     ReceiverContext,
 )
 
@@ -35,7 +41,7 @@ if TYPE_CHECKING:
 
     from httpx import AsyncClient
 
-    from vibecast._playback.player_server import PlayerServer
+    from vibecast._playback.player_bridge import PlayerBridge
     from vibecast._proto.cast_channel_pb2 import CastMessage
     from vibecast._transport.connection import Connection
     from vibecast.player import Player
@@ -94,7 +100,7 @@ class AppSession(TransportHandler):
     display_name: str
     session_id: str
     transport_id: str
-    provider: Provider
+    app: AppProvider
     receiver: ReceiverContext
     credentials: LaunchCredentials
     namespaces: tuple[str, ...]
@@ -103,20 +109,20 @@ class AppSession(TransportHandler):
     status_text: str = ""
 
     async def on_launch(self, connection: Connection, sender_id: str) -> None:
-        """Invoke provider launch callback."""
+        """Invoke app launch callback."""
         context = self._build_context(connection=connection, sender_id=sender_id)
-        await self.provider.on_launch(context, self.credentials)
+        await self.app.on_launch(context, self.credentials)
 
     async def on_stop(self) -> None:
-        """Invoke provider stop callback."""
+        """Invoke app stop callback."""
         if self.coordinator is not None:
             await self.coordinator.close()
         context = self._build_context(connection=None, sender_id=None)
-        await self.provider.on_stop(context)
+        await self.app.on_stop(context)
 
     @override
     async def handle_message(self, connection: Connection, msg: CastMessage) -> None:
-        """Route app-transport messages to the provider callbacks."""
+        """Route app-transport messages to the app callbacks."""
         payload = parse_json_payload(msg)
         if payload is None:
             return
@@ -132,26 +138,26 @@ class AppSession(TransportHandler):
             return
 
         if msg.namespace in self.namespaces and msg.namespace != ns.MEDIA:
-            disposition = await self.provider.on_message(
+            disposition = await self.app.on_message(
                 context,
                 msg.namespace,
                 payload,
             )
-            if disposition != ProviderMessageDisposition.HANDLED:
+            if disposition != AppMessageDisposition.HANDLED:
                 raw_type = payload.get("type")
                 if isinstance(raw_type, str):
                     log.debug(
-                        "session %s provider %s left message unhandled namespace=%s type=%s",
+                        "session %s app %s left message unhandled namespace=%s type=%s",
                         self.session_id,
-                        self.provider.provider_key(),
+                        self.app.app_key(),
                         msg.namespace,
                         raw_type,
                     )
                 else:
                     log.debug(
-                        "session %s provider %s left message unhandled namespace=%s",
+                        "session %s app %s left message unhandled namespace=%s",
                         self.session_id,
-                        self.provider.provider_key(),
+                        self.app.app_key(),
                         msg.namespace,
                     )
             return
@@ -179,7 +185,7 @@ class AppSession(TransportHandler):
             if self.coordinator is not None:
                 await self.coordinator.send_current_status(connection, sender_id)
             context = self._build_context(connection=connection, sender_id=sender_id)
-            await self.provider.on_sender_connected(context, sender_id)
+            await self.app.on_sender_connected(context, sender_id)
             return
 
         _ = self.device.remove_subscription(connection, sender_id)
@@ -228,7 +234,7 @@ class AppSession(TransportHandler):
         *,
         connection: Connection | None,
         sender_id: str | None,
-    ) -> ProviderSession:
+    ) -> AppContext:
         async def send_custom(namespace: str, data: dict[str, Any]) -> None:
             if connection is None or sender_id is None:
                 await self.device.broadcast(
@@ -252,7 +258,7 @@ class AppSession(TransportHandler):
                 data=data,
             )
 
-        return ProviderSession(
+        return AppContext(
             session_id=self.session_id,
             transport_id=self.transport_id,
             app_id=self.app_id,
@@ -262,8 +268,8 @@ class AppSession(TransportHandler):
             broadcast_custom=broadcast_custom,
         )
 
-    def create_provider_session(self) -> ProviderSession:
-        """Build a provider session context for internal service callbacks."""
+    def create_app_context(self) -> AppContext:
+        """Build an app context for internal service callbacks."""
         return self._build_context(connection=None, sender_id=None)
 
 
@@ -273,10 +279,10 @@ class Device:
     __slots__ = (
         "_data_dir",
         "_get_http_client",
-        "_receiver_cast_device_capabilities",
-        "_receiver_display_height",
-        "_receiver_display_width",
-        "_receiver_user_agent",
+        "_cast_device_capabilities",
+        "_display_height",
+        "_display_width",
+        "_user_agent",
         "_subscriptions",
         "config",
         "sessions",
@@ -293,18 +299,18 @@ class Device:
         volume_level: float = 1.0,
         volume_muted: bool = False,
         volume_step_interval: float = 0.05,
-        receiver_user_agent: str = _DEFAULT_CAST_CONFIG.user_agent,
-        receiver_cast_device_capabilities: str = _DEFAULT_CAST_DEVICE_CAPABILITIES,
-        receiver_display_width: int = 1920,
-        receiver_display_height: int = 1080,
+        user_agent: str = _DEFAULT_CAST_CONFIG.user_agent,
+        cast_device_capabilities: str = _DEFAULT_CAST_DEVICE_CAPABILITIES,
+        display_width: int = 1920,
+        display_height: int = 1080,
     ) -> None:
         self.config = config
         self._get_http_client = get_http_client
         self._data_dir = data_dir
-        self._receiver_user_agent = receiver_user_agent
-        self._receiver_cast_device_capabilities = receiver_cast_device_capabilities
-        self._receiver_display_width = receiver_display_width
-        self._receiver_display_height = receiver_display_height
+        self._user_agent = user_agent
+        self._cast_device_capabilities = cast_device_capabilities
+        self._display_width = display_width
+        self._display_height = display_height
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self.transports: dict[str, Transport] = {}
         self.sessions: dict[str, AppSession] = {}
@@ -475,48 +481,48 @@ class Device:
     def start_session(
         self,
         app_id: str,
-        provider: Provider,
+        app: AppProvider,
         credentials: LaunchCredentials,
         *,
         player: Player,
-        player_server: PlayerServer | None,
+        player_bridge: PlayerBridge | None,
     ) -> AppSession:
         """Create and register an app session transport."""
         session_id = str(uuid4())
         transport_id = session_id
 
-        provider_namespaces = sorted(
-            namespace for namespace in provider.namespaces() if namespace != ns.MEDIA
+        app_namespaces = sorted(
+            namespace for namespace in app.namespaces() if namespace != ns.MEDIA
         )
-        provider_namespaces.append(ns.MEDIA)
+        app_namespaces.append(ns.MEDIA)
 
-        provider_data_dir = self._data_dir / "providers" / provider.provider_key()
-        provider_data_dir.mkdir(parents=True, exist_ok=True)
+        app_data_dir = self._data_dir / "apps" / app.app_key()
+        app_data_dir.mkdir(parents=True, exist_ok=True)
 
         session = AppSession(
             device=self,
             app_id=app_id,
-            display_name=provider.display_name(),
+            display_name=app.display_name(),
             session_id=session_id,
             transport_id=transport_id,
-            provider=provider,
+            app=app,
             receiver=ReceiverContext(
                 friendly_name=self.config.friendly_name,
                 device_model=self.config.device_model,
                 device_id=self.config.device_id,
-                data_dir=provider_data_dir,
-                user_agent=self._receiver_user_agent,
-                cast_device_capabilities=self._receiver_cast_device_capabilities,
-                display_width=self._receiver_display_width,
-                display_height=self._receiver_display_height,
+                data_dir=app_data_dir,
+                user_agent=self._user_agent,
+                cast_device_capabilities=self._cast_device_capabilities,
+                display_width=self._display_width,
+                display_height=self._display_height,
             ),
             credentials=credentials,
-            namespaces=tuple(provider_namespaces),
-            icon_url=provider.icon_url(),
-            status_text=provider.display_name(),
+            namespaces=tuple(app_namespaces),
+            icon_url=app.icon_url(),
+            status_text=app.display_name(),
         )
 
-        provider_session = session.create_provider_session()
+        app_context = session.create_app_context()
 
         async def broadcast_fn(namespace: str, data: dict[str, Any]) -> None:
             await self.broadcast(
@@ -542,10 +548,10 @@ class Device:
         session.coordinator = PlaybackCoordinator(
             session_id=session_id,
             transport_id=transport_id,
-            provider=provider,
-            provider_session=provider_session,
+            app=app,
+            app_context=app_context,
             player=player,
-            player_server=player_server,
+            player_bridge=player_bridge,
             broadcast_fn=broadcast_fn,
             send_fn=send_fn,
             initial_volume=self.volume,
@@ -558,8 +564,8 @@ class Device:
     async def stop_session(self, session_id: str) -> AppSession | None:
         """Stop a running app session.
 
-        Invokes the provider ``on_stop`` callback *before* unregistering the
-        transport so the provider can still send/broadcast during teardown.
+        Invokes the app ``on_stop`` callback *before* unregistering the
+        transport so the app can still send/broadcast during teardown.
         """
         session = self.sessions.pop(session_id, None)
         if session is None:
@@ -567,9 +573,7 @@ class Device:
         try:
             await session.on_stop()
         except Exception:
-            log.warning(
-                "provider on_stop failed for session %s", session_id, exc_info=True
-            )
+            log.warning("app on_stop failed for session %s", session_id, exc_info=True)
         self.unregister_transport(session.transport_id)
         return session
 

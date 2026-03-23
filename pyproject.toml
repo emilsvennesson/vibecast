@@ -14,10 +14,10 @@ dependencies = [
     "uritemplate>=4.1",
 ]
 
-[project.entry-points."vibecast.providers"]
-primevideo = "vibecast.providers.primevideo._provider:PrimeVideoProvider"
-svtplay = "vibecast.providers.svtplay._provider:SvtPlayProvider"
-viaplay = "vibecast.providers.viaplay._provider:ViaplayProvider"
+[project.entry-points."vibecast.apps"]
+primevideo = "vibecast.apps.primevideo:PrimeVideo"
+svtplay = "vibecast.apps.svtplay:SvtPlay"
+viaplay = "vibecast.apps.viaplay:Viaplay"
 
 [dependency-groups]
 dev = [
@@ -119,7 +119,7 @@ venv = ".venv"
 
 
 executionEnvironments = [
-  { root = "vibecast/providers/viaplay/tests", reportUnknownMemberType = "none", extraPaths = ["."] },
+  { root = "vibecast/apps/viaplay/tests", reportUnknownMemberType = "none", extraPaths = ["."] },
   { root = "tests", extraPaths = ["."] },
   { root = "." },
 ]

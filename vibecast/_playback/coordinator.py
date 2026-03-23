@@ -1,4 +1,4 @@
-"""Per-session playback coordinator mediating sender, provider, and player."""
+"""Per-session playback coordinator mediating sender, app, and player."""
 
 from __future__ import annotations
 
@@ -46,6 +46,7 @@ from vibecast._playback.manifest_proxy import (
     manifest_route_suffix,
     normalize_manifest_bytes,
 )
+from vibecast.app import MediaResolveFailure, MediaResolveFailureCode
 from vibecast.player import (
     LicenseRequest,
     LicenseResponse,
@@ -57,14 +58,13 @@ from vibecast.player import (
     Player,
     PlayerContext,
 )
-from vibecast.provider import MediaResolveFailure, MediaResolveFailureCode
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from vibecast._playback.player_server import PlayerServer
+    from vibecast._playback.player_bridge import PlayerBridge
     from vibecast._transport.connection import Connection
-    from vibecast.provider import Provider, ProviderSession
+    from vibecast.app import AppContext, AppProvider
 
 log = get_logger("coordinator")
 
@@ -104,10 +104,10 @@ class PlaybackCoordinator:
         "_playback_media",
         "_player",
         "_player_context",
-        "_player_server",
+        "_player_bridge",
         "_player_state",
-        "_provider",
-        "_provider_session",
+        "_app",
+        "_app_context",
         "_send_fn",
         "_volume",
         "session_id",
@@ -119,10 +119,10 @@ class PlaybackCoordinator:
         *,
         session_id: str,
         transport_id: str,
-        provider: Provider,
-        provider_session: ProviderSession,
+        app: AppProvider,
+        app_context: AppContext,
         player: Player,
-        player_server: PlayerServer | None,
+        player_bridge: PlayerBridge | None,
         broadcast_fn: Callable[[str, dict[str, Any]], Awaitable[None]],
         send_fn: Callable[
             [Connection, str, str, dict[str, Any]],
@@ -132,10 +132,10 @@ class PlaybackCoordinator:
     ) -> None:
         self.session_id = session_id
         self.transport_id = transport_id
-        self._provider = provider
-        self._provider_session = provider_session
+        self._app = app
+        self._app_context = app_context
         self._player = player
-        self._player_server = player_server
+        self._player_bridge = player_bridge
         self._broadcast_fn = broadcast_fn
         self._send_fn = send_fn
         self._media_session_id = 1
@@ -175,7 +175,7 @@ class PlaybackCoordinator:
                         self.session_id,
                         exc_info=True,
                     )
-                await self._notify_provider()
+                await self._notify_app()
             case PauseRequest():
                 self._player_state = PlayerState.PAUSED
                 self._idle_reason = None
@@ -188,7 +188,7 @@ class PlaybackCoordinator:
                         self.session_id,
                         exc_info=True,
                     )
-                await self._notify_provider()
+                await self._notify_app()
             case SeekRequest():
                 self._current_time = message.current_time
                 self._idle_reason = None
@@ -203,7 +203,7 @@ class PlaybackCoordinator:
                         self.session_id,
                         exc_info=True,
                     )
-                await self._notify_provider()
+                await self._notify_app()
             case MediaStopRequest():
                 self._set_idle_state(idle_reason=IdleReason.CANCELLED)
                 await self._broadcast_media_status(message.request_id)
@@ -218,7 +218,7 @@ class PlaybackCoordinator:
                 self._clear_media()
                 self._unregister_manifest_handler()
                 self._unregister_license_handler()
-                await self._notify_provider()
+                await self._notify_app()
             case MediaGetStatusRequest():
                 await self._send_media_status_to_sender(
                     connection,
@@ -241,7 +241,7 @@ class PlaybackCoordinator:
                         self.session_id,
                         exc_info=True,
                     )
-                await self._notify_provider()
+                await self._notify_app()
             case QueueGetItemIdsRequest():
                 item_ids = (
                     [self._media_session_id]
@@ -289,7 +289,7 @@ class PlaybackCoordinator:
             self._unregister_license_handler()
 
         await self._broadcast_media_status(request_id=0)
-        await self._notify_provider()
+        await self._notify_app()
 
     async def on_error_report(self, error: PlaybackError) -> None:
         """Handle a player error report and translate it to IDLE/ERROR."""
@@ -312,7 +312,7 @@ class PlaybackCoordinator:
         )
 
     async def handle_license(self, request: LicenseRequest) -> LicenseResponse:
-        """Resolve one proxied DRM license request through provider/forwarder."""
+        """Resolve one proxied DRM license request through app/forwarder."""
         route_id = request.route_id
         if route_id is None:
             return LicenseResponse(status=400, body=b"missing license route")
@@ -322,21 +322,19 @@ class PlaybackCoordinator:
             return LicenseResponse(status=404, body=b"unknown license route")
 
         try:
-            return await self._provider.resolve_license(
-                self._provider_session,
+            return await self._app.resolve_license(
+                self._app_context,
                 request,
                 route,
                 self._forward_license_request,
             )
         except Exception:
             log.warning(
-                "provider failed to resolve license for session %s",
+                "app failed to resolve license for session %s",
                 self.session_id,
                 exc_info=True,
             )
-            return LicenseResponse(
-                status=502, body=b"provider license resolution failed"
-            )
+            return LicenseResponse(status=502, body=b"app license resolution failed")
 
     async def handle_manifest(
         self,
@@ -353,7 +351,7 @@ class PlaybackCoordinator:
 
         headers = filter_upstream_headers(request.headers)
         try:
-            response = await self._provider_session.http_client.request(
+            response = await self._app_context.http_client.request(
                 request.method,
                 route.upstream_url,
                 headers=headers,
@@ -393,7 +391,7 @@ class PlaybackCoordinator:
                     body,
                     upstream_url=route.upstream_url,
                     content_type=content_type,
-                    provider_key=self._provider.provider_key(),
+                    app_key=self._app.app_key(),
                 )
             except Exception:
                 log.warning(
@@ -452,11 +450,9 @@ class PlaybackCoordinator:
         self._current_time = 0.0
         await self._broadcast_loading_status(request.request_id, loading_media)
 
-        # Phase 2: resolve media through the provider.
+        # Phase 2: resolve media through the app.
         try:
-            resolved = await self._provider.resolve_media(
-                self._provider_session, request
-            )
+            resolved = await self._app.resolve_media(self._app_context, request)
         except Exception:
             await self._fail_load(
                 connection,
@@ -464,12 +460,12 @@ class PlaybackCoordinator:
                 request_id=request.request_id,
                 failure=MediaResolveFailure(
                     code=MediaResolveFailureCode.INTERNAL_ERROR,
-                    detail_code="PROVIDER_EXCEPTION",
-                    message="provider threw during resolve_media",
+                    detail_code="APP_EXCEPTION",
+                    message="app threw during resolve_media",
                 ),
             )
             log.warning(
-                "provider failed to resolve media for session %s",
+                "app failed to resolve media for session %s",
                 self.session_id,
                 exc_info=True,
             )
@@ -496,8 +492,8 @@ class PlaybackCoordinator:
                 request_id=request.request_id,
                 failure=MediaResolveFailure(
                     code=MediaResolveFailureCode.INTERNAL_ERROR,
-                    detail_code="INVALID_PROVIDER_MEDIA",
-                    message="provider returned no playable streams",
+                    detail_code="INVALID_APP_MEDIA",
+                    message="app returned no playable streams",
                 ),
             )
             return
@@ -535,7 +531,7 @@ class PlaybackCoordinator:
             )
             return
 
-        await self._notify_provider()
+        await self._notify_app()
 
     async def _fail_load(
         self,
@@ -579,7 +575,7 @@ class PlaybackCoordinator:
             failed.model_dump(exclude_none=True),
         )
         await self._broadcast_media_status(request_id)
-        await self._notify_provider()
+        await self._notify_app()
 
     async def _broadcast_loading_status(
         self,
@@ -660,12 +656,12 @@ class PlaybackCoordinator:
             repeat_mode=RepeatMode.REPEAT_OFF if is_active else None,
         )
 
-    # -- provider notification -----------------------------------------------
+    # -- app notification -----------------------------------------------------
 
-    async def _notify_provider(self) -> None:
+    async def _notify_app(self) -> None:
         try:
-            await self._provider.on_playback_update(
-                self._provider_session,
+            await self._app.on_playback_update(
+                self._app_context,
                 PlaybackState(
                     player_state=self._player_state,
                     current_time=self._current_time,
@@ -677,7 +673,7 @@ class PlaybackCoordinator:
             )
         except Exception:
             log.warning(
-                "provider playback update failed for session %s",
+                "app playback update failed for session %s",
                 self.session_id,
                 exc_info=True,
             )
@@ -697,7 +693,7 @@ class PlaybackCoordinator:
 
     def _with_manifest_proxy(self, media: PlaybackMedia) -> PlaybackMedia:
         self._unregister_manifest_handler()
-        if self._player_server is None:
+        if self._player_bridge is None:
             return media
 
         rewritten_streams: list[PlaybackStream] = []
@@ -710,7 +706,7 @@ class PlaybackCoordinator:
                 continue
 
             if proxy_url is None:
-                proxy_url = self._player_server.register_manifest_handler(
+                proxy_url = self._player_bridge.register_manifest_handler(
                     self.session_id,
                     self,
                 )
@@ -730,21 +726,21 @@ class PlaybackCoordinator:
 
     def _unregister_manifest_handler(self) -> None:
         self._manifest_routes.clear()
-        if self._player_server is None:
+        if self._player_bridge is None:
             return
-        self._player_server.unregister_manifest_handler(self.session_id)
+        self._player_bridge.unregister_manifest_handler(self.session_id)
 
     # -- license proxy -------------------------------------------------------
 
     def _with_license_proxy(self, media: PlaybackMedia) -> PlaybackMedia:
         self._unregister_license_handler()
-        if self._player_server is None:
+        if self._player_bridge is None:
             return media
 
         if not any(stream.drm is not None for stream in media.streams):
             return media
 
-        proxy_url = self._player_server.register_license_handler(self.session_id, self)
+        proxy_url = self._player_bridge.register_license_handler(self.session_id, self)
         rewritten_streams: list[PlaybackStream] = []
         for index, stream in enumerate(media.streams):
             drm = stream.drm
@@ -772,9 +768,9 @@ class PlaybackCoordinator:
 
     def _unregister_license_handler(self) -> None:
         self._license_routes.clear()
-        if self._player_server is None:
+        if self._player_bridge is None:
             return
-        self._player_server.unregister_license_handler(self.session_id)
+        self._player_bridge.unregister_license_handler(self.session_id)
 
     async def _forward_license_request(
         self,
@@ -794,7 +790,7 @@ class PlaybackCoordinator:
         if request.content_type:
             headers["Content-Type"] = request.content_type
 
-        response = await self._provider_session.http_client.post(
+        response = await self._app_context.http_client.post(
             route.upstream_url,
             content=request.body,
             headers=headers,
@@ -830,7 +826,7 @@ def _build_loading_media_info(request: LoadRequest) -> MediaInfo:
     """Build a minimal ``MediaInfo`` from the original LOAD request.
 
     Used for the initial LOADING extended-status broadcast before the
-    provider has resolved the actual stream.
+    app has resolved the actual stream.
     """
     return MediaInfo(
         content_id=request.media.content_id,
@@ -843,7 +839,7 @@ def _build_loading_media_info(request: LoadRequest) -> MediaInfo:
 
 
 def _build_media_info(media: PlaybackMedia) -> MediaInfo:
-    """Build a fully resolved ``MediaInfo`` from provider-resolved media."""
+    """Build a fully resolved ``MediaInfo`` from app-resolved media."""
     if not media.streams:
         msg = "playback media contains no streams"
         raise RuntimeError(msg)

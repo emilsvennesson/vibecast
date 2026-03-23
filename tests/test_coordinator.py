@@ -27,6 +27,16 @@ from vibecast._playback.headers import (
 )
 from vibecast._playback.manifest_proxy import ManifestProxyRequest
 from vibecast._transport import namespace as ns
+from vibecast.app import (
+    AppContext,
+    AppMessageDisposition,
+    AppProvider,
+    LaunchCredentials,
+    MediaResolveFailure,
+    MediaResolveFailureCode,
+    MediaResolveResult,
+    ReceiverContext,
+)
 from vibecast.player import (
     DrmInfo,
     DrmSystem,
@@ -39,22 +49,12 @@ from vibecast.player import (
     Player,
     PlayerContext,
 )
-from vibecast.provider import (
-    LaunchCredentials,
-    MediaResolveFailure,
-    MediaResolveFailureCode,
-    MediaResolveResult,
-    Provider,
-    ProviderMessageDisposition,
-    ProviderSession,
-    ReceiverContext,
-)
 
 if TYPE_CHECKING:
     from httpx import AsyncClient
 
 
-class FakeProvider(Provider):
+class FakeApp(AppProvider):
     def __init__(
         self,
         media: MediaResolveResult,
@@ -77,11 +77,11 @@ class FakeProvider(Provider):
 
     @override
     def display_name(self) -> str:
-        return "Provider"
+        return "FakeApp"
 
     @override
-    def provider_key(self) -> str:
-        return "test_provider"
+    def app_key(self) -> str:
+        return "test_app"
 
     @override
     def namespaces(self) -> frozenset[str]:
@@ -90,7 +90,7 @@ class FakeProvider(Provider):
     @override
     async def on_launch(
         self,
-        session: ProviderSession,
+        session: AppContext,
         credentials: LaunchCredentials,
     ) -> None:
         _ = session
@@ -99,19 +99,19 @@ class FakeProvider(Provider):
     @override
     async def on_message(
         self,
-        session: ProviderSession,
+        session: AppContext,
         namespace: str,
         data: dict[str, Any],
-    ) -> ProviderMessageDisposition:
+    ) -> AppMessageDisposition:
         _ = session
         _ = namespace
         _ = data
-        return ProviderMessageDisposition.HANDLED
+        return AppMessageDisposition.HANDLED
 
     @override
     async def resolve_media(
         self,
-        session: ProviderSession,
+        session: AppContext,
         load_request: LoadRequest,
     ) -> MediaResolveResult:
         _ = session
@@ -124,7 +124,7 @@ class FakeProvider(Provider):
     @override
     async def on_playback_update(
         self,
-        session: ProviderSession,
+        session: AppContext,
         state: PlaybackState,
     ) -> None:
         _ = session
@@ -133,7 +133,7 @@ class FakeProvider(Provider):
     @override
     async def resolve_license(
         self,
-        session: ProviderSession,
+        session: AppContext,
         request: LicenseRequest,
         route: LicenseRoute,
         forward: Any,
@@ -189,7 +189,7 @@ class FakePlayer(Player):
         self.volume_calls.append((level, muted))
 
 
-class FakePlayerServer:
+class FakePlayerBridge:
     def __init__(self) -> None:
         self.register_calls: list[str] = []
         self.unregister_calls: list[str] = []
@@ -213,11 +213,11 @@ class FakePlayerServer:
         self.manifest_unregister_calls.append(session_id)
 
 
-def _provider_session(
+def _app_context(
     session_id: str = "session-1",
     *,
     http_client: AsyncClient | None = None,
-) -> ProviderSession:
+) -> AppContext:
     async def _send_custom(namespace: str, data: dict[str, Any]) -> None:
         _ = namespace
         _ = data
@@ -226,7 +226,7 @@ def _provider_session(
         _ = namespace
         _ = data
 
-    return ProviderSession(
+    return AppContext(
         session_id=session_id,
         transport_id="pid-1",
         app_id="APP",
@@ -237,7 +237,7 @@ def _provider_session(
             friendly_name="Living Room",
             device_model="Chromecast",
             device_id="device-1",
-            data_dir=Path("/tmp/vibecast-tests/providers/fake"),
+            data_dir=Path("/tmp/vibecast-tests/apps/fake"),
         ),
         send_custom=_send_custom,
         broadcast_custom=_broadcast_custom,
@@ -303,9 +303,9 @@ class TestCoordinator:
             stream_type=StreamType.BUFFERED,
             start_time=5.0,
         )
-        provider = FakeProvider(media)
+        app = FakeApp(media)
         player = FakePlayer()
-        player_server = FakePlayerServer()
+        player_bridge = FakePlayerBridge()
 
         sent: list[tuple[str, str, dict[str, Any]]] = []
         broadcast: list[tuple[str, dict[str, Any]]] = []
@@ -325,10 +325,10 @@ class TestCoordinator:
         coordinator = PlaybackCoordinator(
             session_id="session-1",
             transport_id="pid-1",
-            provider=provider,
-            provider_session=_provider_session(),
+            app=app,
+            app_context=_app_context(),
             player=player,
-            player_server=cast("Any", player_server),
+            player_bridge=cast("Any", player_bridge),
             broadcast_fn=_broadcast_fn,
             send_fn=_send_fn,
             initial_volume=Volume(level=1.0, muted=False),
@@ -348,8 +348,8 @@ class TestCoordinator:
             ),
         )
 
-        assert player_server.register_calls == ["session-1"]
-        assert player_server.manifest_register_calls == ["session-1"]
+        assert player_bridge.register_calls == ["session-1"]
+        assert player_bridge.manifest_register_calls == ["session-1"]
         assert len(player.load_calls) == 1
         assert (
             player.load_calls[0].streams[0].url
@@ -384,12 +384,12 @@ class TestCoordinator:
         assert p2["status"][0]["playerState"] == "BUFFERING"
         assert p2["status"][0]["currentTime"] == 5.0
 
-        assert provider.playback_updates[-1].player_state is PlayerState.BUFFERING
+        assert app.playback_updates[-1].player_state is PlayerState.BUFFERING
 
         _ = sent
 
     async def test_play_pause_seek_stop_and_volume(self) -> None:
-        provider = FakeProvider(
+        app = FakeApp(
             PlaybackMedia(
                 session_id="session-1",
                 streams=(
@@ -402,7 +402,7 @@ class TestCoordinator:
             )
         )
         player = FakePlayer()
-        player_server = FakePlayerServer()
+        player_bridge = FakePlayerBridge()
         sent: list[tuple[str, str, dict[str, Any]]] = []
         broadcast: list[tuple[str, dict[str, Any]]] = []
 
@@ -421,10 +421,10 @@ class TestCoordinator:
         coordinator = PlaybackCoordinator(
             session_id="session-1",
             transport_id="pid-1",
-            provider=provider,
-            provider_session=_provider_session(),
+            app=app,
+            app_context=_app_context(),
             player=player,
-            player_server=cast("Any", player_server),
+            player_bridge=cast("Any", player_bridge),
             broadcast_fn=_broadcast_fn,
             send_fn=_send_fn,
             initial_volume=Volume(level=1.0, muted=False),
@@ -475,8 +475,8 @@ class TestCoordinator:
         assert player.seek_calls == [44.0]
         assert player.volume_calls == [(0.4, True)]
         assert player.stop_calls == 1
-        assert player_server.unregister_calls[-1] == "session-1"
-        assert player_server.manifest_unregister_calls[-1] == "session-1"
+        assert player_bridge.unregister_calls[-1] == "session-1"
+        assert player_bridge.manifest_unregister_calls[-1] == "session-1"
         # Media stop now sends a proper IDLE status with idleReason, not an
         # empty array.  The media field is omitted on IDLE.
         stop_status = broadcast[-1][1]["status"]
@@ -494,7 +494,7 @@ class TestCoordinator:
         assert sent[-1][2]["itemIds"] == []
 
     async def test_state_report_updates_status_and_provider(self) -> None:
-        provider = FakeProvider(
+        app = FakeApp(
             PlaybackMedia(
                 session_id="session-1",
                 streams=(
@@ -526,10 +526,10 @@ class TestCoordinator:
         coordinator = PlaybackCoordinator(
             session_id="session-1",
             transport_id="pid-1",
-            provider=provider,
-            provider_session=_provider_session(),
+            app=app,
+            app_context=_app_context(),
             player=player,
-            player_server=None,
+            player_bridge=None,
             broadcast_fn=_broadcast_fn,
             send_fn=_send_fn,
             initial_volume=Volume(level=1.0, muted=False),
@@ -558,10 +558,10 @@ class TestCoordinator:
         assert payload["requestId"] == 0
         assert payload["status"][0]["playerState"] == "PLAYING"
         assert payload["status"][0]["currentTime"] == 20.0
-        assert provider.playback_updates[-1].player_state is PlayerState.PLAYING
+        assert app.playback_updates[-1].player_state is PlayerState.PLAYING
 
     async def test_send_current_status_and_license_delegation(self) -> None:
-        provider = FakeProvider(
+        app = FakeApp(
             PlaybackMedia(
                 session_id="session-1",
                 streams=(
@@ -578,7 +578,7 @@ class TestCoordinator:
             )
         )
         player = FakePlayer()
-        player_server = FakePlayerServer()
+        player_bridge = FakePlayerBridge()
         sent: list[tuple[str, str, dict[str, Any]]] = []
 
         async def _send_fn(
@@ -597,10 +597,10 @@ class TestCoordinator:
         coordinator = PlaybackCoordinator(
             session_id="session-1",
             transport_id="pid-1",
-            provider=provider,
-            provider_session=_provider_session(),
+            app=app,
+            app_context=_app_context(),
             player=player,
-            player_server=cast("Any", player_server),
+            player_bridge=cast("Any", player_bridge),
             broadcast_fn=_broadcast_fn,
             send_fn=_send_fn,
             initial_volume=Volume(level=1.0, muted=False),
@@ -625,8 +625,8 @@ class TestCoordinator:
             LicenseRequest(session_id="session-1", route_id="r0", body=b"challenge")
         )
         assert response.body == b"license-response"
-        assert provider.license_requests[-1].body == b"challenge"
-        assert provider.license_routes[-1].upstream_url == "https://drm.example.com"
+        assert app.license_requests[-1].body == b"challenge"
+        assert app.license_routes[-1].upstream_url == "https://drm.example.com"
 
     async def test_license_forwarder_posts_to_upstream(self) -> None:
         media = PlaybackMedia(
@@ -644,7 +644,7 @@ class TestCoordinator:
             ),
             stream_type=StreamType.BUFFERED,
         )
-        provider = FakeProvider(media, use_forwarder=True)
+        app = FakeApp(media, use_forwarder=True)
 
         captured_request: dict[str, Any] = {}
 
@@ -664,10 +664,10 @@ class TestCoordinator:
             coordinator = PlaybackCoordinator(
                 session_id="session-1",
                 transport_id="pid-1",
-                provider=provider,
-                provider_session=_provider_session(http_client=client),
+                app=app,
+                app_context=_app_context(http_client=client),
                 player=FakePlayer(),
-                player_server=cast("Any", FakePlayerServer()),
+                player_bridge=cast("Any", FakePlayerBridge()),
                 broadcast_fn=lambda _namespace, _data: _noop_async(),
                 send_fn=lambda _c, _s, _n, _d: _noop_async(),
                 initial_volume=Volume(level=1.0, muted=False),
@@ -710,7 +710,7 @@ class TestCoordinator:
             ),
             stream_type=StreamType.LIVE,
         )
-        provider = FakeProvider(media)
+        app = FakeApp(media)
 
         raw_manifest = """<?xml version=\"1.0\"?>
 <MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" type=\"dynamic\">
@@ -745,10 +745,10 @@ class TestCoordinator:
             coordinator = PlaybackCoordinator(
                 session_id="session-1",
                 transport_id="pid-1",
-                provider=provider,
-                provider_session=_provider_session(http_client=client),
+                app=app,
+                app_context=_app_context(http_client=client),
                 player=FakePlayer(),
-                player_server=cast("Any", FakePlayerServer()),
+                player_bridge=cast("Any", FakePlayerBridge()),
                 broadcast_fn=lambda _namespace, _data: _noop_async(),
                 send_fn=lambda _c, _s, _n, _d: _noop_async(),
                 initial_volume=Volume(level=1.0, muted=False),
@@ -778,12 +778,10 @@ class TestCoordinator:
         assert normalized.count('<S d="64512"') == 2
         assert "<BaseURL>https://cdn.example.com/live/</BaseURL>" in normalized
 
-    async def test_provider_load_failure_reason_is_passthrough(self) -> None:
-        provider = FakeProvider(
-            MediaResolveFailure(code=MediaResolveFailureCode.AUTH_REQUIRED)
-        )
+    async def test_app_load_failure_reason_is_passthrough(self) -> None:
+        app = FakeApp(MediaResolveFailure(code=MediaResolveFailureCode.AUTH_REQUIRED))
         player = FakePlayer()
-        player_server = FakePlayerServer()
+        player_bridge = FakePlayerBridge()
         sent: list[tuple[str, str, dict[str, Any]]] = []
         broadcast: list[tuple[str, dict[str, Any]]] = []
 
@@ -802,10 +800,10 @@ class TestCoordinator:
         coordinator = PlaybackCoordinator(
             session_id="session-1",
             transport_id="pid-1",
-            provider=provider,
-            provider_session=_provider_session(),
+            app=app,
+            app_context=_app_context(),
             player=player,
-            player_server=cast("Any", player_server),
+            player_bridge=cast("Any", player_bridge),
             broadcast_fn=_broadcast_fn,
             send_fn=_send_fn,
             initial_volume=Volume(level=1.0, muted=False),
@@ -824,16 +822,16 @@ class TestCoordinator:
         assert sent[-1][1] == ns.MEDIA
         assert sent[-1][2]["type"] == "LOAD_FAILED"
         assert sent[-1][2]["reason"] == MediaResolveFailureCode.AUTH_REQUIRED
-        assert player_server.unregister_calls[-1] == "session-1"
+        assert player_bridge.unregister_calls[-1] == "session-1"
         assert broadcast[-1][1]["status"][0]["playerState"] == "IDLE"
         assert broadcast[-1][1]["status"][0]["idleReason"] == "ERROR"
 
-    async def test_provider_load_exception_maps_to_internal_reason(self) -> None:
-        provider = FakeProvider(
+    async def test_app_load_exception_maps_to_internal_reason(self) -> None:
+        app = FakeApp(
             MediaResolveFailure(code=MediaResolveFailureCode.CONTENT_UNAVAILABLE),
             raise_on_resolve=True,
         )
-        player_server = FakePlayerServer()
+        player_bridge = FakePlayerBridge()
         sent: list[tuple[str, str, dict[str, Any]]] = []
 
         async def _send_fn(
@@ -848,10 +846,10 @@ class TestCoordinator:
         coordinator = PlaybackCoordinator(
             session_id="session-1",
             transport_id="pid-1",
-            provider=provider,
-            provider_session=_provider_session(),
+            app=app,
+            app_context=_app_context(),
             player=FakePlayer(),
-            player_server=cast("Any", player_server),
+            player_bridge=cast("Any", player_bridge),
             broadcast_fn=lambda _namespace, _data: _noop_async(),
             send_fn=_send_fn,
             initial_volume=Volume(level=1.0, muted=False),
@@ -868,7 +866,7 @@ class TestCoordinator:
 
         assert sent[-1][2]["type"] == "LOAD_FAILED"
         assert sent[-1][2]["reason"] == MediaResolveFailureCode.INTERNAL_ERROR
-        assert player_server.unregister_calls[-1] == "session-1"
+        assert player_bridge.unregister_calls[-1] == "session-1"
 
     async def test_failed_second_load_clears_stale_license_routes(self) -> None:
         first_media = PlaybackMedia(
@@ -885,16 +883,16 @@ class TestCoordinator:
             ),
             stream_type=StreamType.BUFFERED,
         )
-        provider = FakeProvider(first_media)
-        player_server = FakePlayerServer()
+        app = FakeApp(first_media)
+        player_bridge = FakePlayerBridge()
 
         coordinator = PlaybackCoordinator(
             session_id="session-1",
             transport_id="pid-1",
-            provider=provider,
-            provider_session=_provider_session(),
+            app=app,
+            app_context=_app_context(),
             player=FakePlayer(),
-            player_server=cast("Any", player_server),
+            player_bridge=cast("Any", player_bridge),
             broadcast_fn=lambda _namespace, _data: _noop_async(),
             send_fn=lambda _c, _s, _n, _d: _noop_async(),
             initial_volume=Volume(level=1.0, muted=False),
@@ -908,9 +906,9 @@ class TestCoordinator:
                 media=MediaInfo(content_id="x", stream_type=StreamType.BUFFERED),
             ),
         )
-        assert player_server.register_calls == ["session-1"]
+        assert player_bridge.register_calls == ["session-1"]
 
-        provider._media = MediaResolveFailure(  # noqa: SLF001
+        app._media = MediaResolveFailure(  # noqa: SLF001
             code=MediaResolveFailureCode.CONTENT_UNAVAILABLE
         )
         await coordinator.handle_media_message(
@@ -943,15 +941,15 @@ class TestCoordinator:
             ),
             stream_type=StreamType.BUFFERED,
         )
-        provider = FakeProvider(media, raise_on_license=True)
+        app = FakeApp(media, raise_on_license=True)
 
         coordinator = PlaybackCoordinator(
             session_id="session-1",
             transport_id="pid-1",
-            provider=provider,
-            provider_session=_provider_session(),
+            app=app,
+            app_context=_app_context(),
             player=FakePlayer(),
-            player_server=cast("Any", FakePlayerServer()),
+            player_bridge=cast("Any", FakePlayerBridge()),
             broadcast_fn=lambda _namespace, _data: _noop_async(),
             send_fn=lambda _c, _s, _n, _d: _noop_async(),
             initial_volume=Volume(level=1.0, muted=False),
@@ -971,7 +969,7 @@ class TestCoordinator:
         )
 
         assert response.status == 502
-        assert response.body == b"provider license resolution failed"
+        assert response.body == b"app license resolution failed"
 
 
 async def _noop_async() -> None:

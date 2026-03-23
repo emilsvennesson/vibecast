@@ -15,7 +15,7 @@ _COOKIE_FILE_NAME = "receiver_cookies.lwp"
 
 
 class ReceiverHTTPClient:
-    """Owns the shared HTTP client used by the receiver and providers."""
+    """Owns the shared HTTP client used by the receiver and apps."""
 
     __slots__ = ("_client", "_cookie_jar", "_closed")
 
@@ -29,7 +29,7 @@ class ReceiverHTTPClient:
     ) -> None:
         data_dir.mkdir(parents=True, exist_ok=True)
 
-        # TODO: Split cookie storage per provider instead of sharing one global jar.
+        # TODO: Split cookie storage per app instead of sharing one global jar.
         cookie_path = data_dir / _COOKIE_FILE_NAME
         self._cookie_jar = LWPCookieJar(filename=str(cookie_path))
         _load_cookie_jar(self._cookie_jar)
