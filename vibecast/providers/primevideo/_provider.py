@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast, override
 from urllib.parse import parse_qsl, urlsplit
@@ -46,7 +45,9 @@ from vibecast.providers.primevideo._models import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-log = logging.getLogger("vibecast.primevideo")
+from vibecast._log import get_logger
+
+log = get_logger("primevideo")
 
 _NS_PRIME = "urn:x-cast:com.amazon.primevideo.cast"
 _DEFAULT_MARKETPLACE_ID = "A3K6Y4MI8GDYMT"

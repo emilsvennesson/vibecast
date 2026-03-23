@@ -114,6 +114,11 @@ class Volume(CastModel):
     control_type: str | None = None
     step_interval: float | None = None
 
+    def apply_set_fields(self, update: Volume) -> None:
+        """Copy only the explicitly-set fields from *update* into this volume."""
+        for field in update.model_fields_set:
+            setattr(self, field, getattr(update, field))
+
 
 class CastNamespace(CastModel):
     """A namespace entry in an application status block.

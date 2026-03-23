@@ -226,15 +226,7 @@ class PlaybackCoordinator:
                     message.request_id,
                 )
             case MediaSetVolumeRequest():
-                fields_set = message.volume.model_fields_set
-                if "level" in fields_set:
-                    self._volume.level = message.volume.level
-                if "muted" in fields_set:
-                    self._volume.muted = message.volume.muted
-                if "control_type" in fields_set:
-                    self._volume.control_type = message.volume.control_type
-                if "step_interval" in fields_set:
-                    self._volume.step_interval = message.volume.step_interval
+                self._volume.apply_set_fields(message.volume)
 
                 await self._broadcast_media_status(message.request_id)
                 try:
