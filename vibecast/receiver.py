@@ -13,13 +13,13 @@ from vibecast._discovery.eureka import EurekaIdentity, EurekaServer
 from vibecast._discovery.mdns import CastAdvertisement
 from vibecast._http import ReceiverHTTPClient
 from vibecast._log import get_logger
-from vibecast._playback.player_server import PlayerServer
+from vibecast._playback.player_bridge import PlayerBridge
 from vibecast._runtime.device import Device, DeviceIdentity
 from vibecast._runtime.handlers import PlatformHandler
 from vibecast._security.auth import fetch_crl
 from vibecast._security.certificate import CertificateBundle, CertificateStore
 from vibecast._transport.server import CastServer
-from vibecast.provider import Provider, ProviderRegistry, discover_providers
+from vibecast.app import AppProvider, AppRegistry, discover_apps
 
 if TYPE_CHECKING:
     from vibecast._proto.cast_channel_pb2 import CastMessage
@@ -46,20 +46,20 @@ class CastReceiver:
         "_device_id",
         "_eureka_server",
         "_http",
-        "_player_server",
+        "_player_bridge",
         "_server",
         "_started",
         "_stop_event",
         "config",
         "device",
-        "providers",
+        "apps",
     )
 
     def __init__(
         self,
         config: VibecastConfig,
         certificates: CertificateStore | CertificateBundle,
-        providers: list[Provider] | None = None,
+        apps: list[AppProvider] | None = None,
         *,
         device_id: str | None = None,
         data_dir: Path = _DEFAULT_DATA_DIR,
@@ -88,11 +88,11 @@ class CastReceiver:
             cast_capabilities=cast_capabilities,
         )
 
-        provider_instances = discover_providers() if providers is None else providers
-        for provider in provider_instances:
-            provider_config = config.providers.get(provider.provider_key(), {})
-            provider.configure(provider_config)
-        self.providers = ProviderRegistry(provider_instances)
+        app_instances = discover_apps() if apps is None else apps
+        for app in app_instances:
+            app_config = config.apps.get(app.app_key(), {})
+            app.configure(app_config)
+        self.apps = AppRegistry(app_instances)
 
         self.device = Device(
             DeviceIdentity(
@@ -105,13 +105,13 @@ class CastReceiver:
             volume_level=config.volume.level,
             volume_muted=config.volume.muted,
             volume_step_interval=config.volume.step_interval,
-            receiver_user_agent=config.cast.user_agent,
-            receiver_cast_device_capabilities=cast_capabilities,
-            receiver_display_width=config.device.display_width,
-            receiver_display_height=config.device.display_height,
+            user_agent=config.cast.user_agent,
+            cast_device_capabilities=cast_capabilities,
+            display_width=config.device.display_width,
+            display_height=config.device.display_height,
         )
 
-        self._player_server = PlayerServer(
+        self._player_bridge = PlayerBridge(
             host=config.network.bind_host,
             port=config.network.player_port,
         )
@@ -138,9 +138,9 @@ class CastReceiver:
             "receiver-0",
             PlatformHandler(
                 self.device,
-                player=self._player_server,
-                player_server=self._player_server,
-                provider_lookup=self.providers.get,
+                player=self._player_bridge,
+                player_bridge=self._player_bridge,
+                app_lookup=self.apps.get,
             ),
         )
 
@@ -166,8 +166,8 @@ class CastReceiver:
         if self._started:
             return
 
-        enabled_providers = self.providers.all_providers()
-        log.info("enabled providers: %s", _format_provider_summary(enabled_providers))
+        enabled_apps = self.apps.all_apps()
+        log.info("enabled apps: %s", _format_app_summary(enabled_apps))
 
         if self._http.client.is_closed:
             cast_capabilities = cast_device_capabilities_header(
@@ -198,24 +198,24 @@ class CastReceiver:
             log.info("using CRL from manifest (%d bytes)", len(crl))
         self._server.crl = crl
 
-        await self._player_server.start()
+        await self._player_bridge.start()
         try:
             await self._server.start()
         except Exception:
-            await self._player_server.stop()
+            await self._player_bridge.stop()
             raise
 
         try:
             await self._eureka_server.start(certificates=self._certificates)
         except Exception:
             await self._server.stop()
-            await self._player_server.stop()
+            await self._player_bridge.stop()
             raise
 
         port = self._server.serving_port
         if port is None:
             await self._eureka_server.stop()
-            await self._player_server.stop()
+            await self._player_bridge.stop()
             await self._server.stop()
             msg = "server did not expose serving port"
             raise RuntimeError(msg)
@@ -228,13 +228,13 @@ class CastReceiver:
             device_id=device_id,
             port=port,
             cert_digest=self._certificates.cert_digest_md5,
-            app_ids=_collect_discovery_app_ids(enabled_providers),
+            app_ids=_collect_discovery_app_ids(enabled_apps),
         )
         try:
             await advertisement.start()
         except Exception:
             await self._eureka_server.stop()
-            await self._player_server.stop()
+            await self._player_bridge.stop()
             await self._server.stop()
             raise
 
@@ -259,7 +259,7 @@ class CastReceiver:
         if not self._started:
             await self._stop_certificate_rotation()
             await self._eureka_server.stop()
-            await self._player_server.stop()
+            await self._player_bridge.stop()
             await self._http.close()
             return
         self._stop_event.set()
@@ -276,7 +276,7 @@ class CastReceiver:
         finally:
             await self._server.stop()
             await self._eureka_server.stop()
-            await self._player_server.stop()
+            await self._player_bridge.stop()
             await self._http.close()
             self._started = False
             log.info("cast receiver stopped")
@@ -346,21 +346,21 @@ class CastReceiver:
             await task
 
 
-def _format_provider_summary(providers: list[Provider]) -> str:
-    if not providers:
+def _format_app_summary(apps: list[AppProvider]) -> str:
+    if not apps:
         return "none"
 
     entries: list[str] = []
-    for provider in sorted(providers, key=lambda item: item.display_name().lower()):
-        app_ids = ",".join(sorted(provider.app_ids()))
-        entries.append(f"{provider.display_name()} (appIds={app_ids})")
+    for app in sorted(apps, key=lambda item: item.display_name().lower()):
+        app_ids = ",".join(sorted(app.app_ids()))
+        entries.append(f"{app.display_name()} (appIds={app_ids})")
     return "; ".join(entries)
 
 
-def _collect_discovery_app_ids(providers: list[Provider]) -> frozenset[str]:
+def _collect_discovery_app_ids(apps: list[AppProvider]) -> frozenset[str]:
     app_ids: set[str] = set(_DISCOVERY_BASE_APP_IDS)
-    for provider in providers:
-        app_ids.update(provider.app_ids())
+    for app in apps:
+        app_ids.update(app.app_ids())
     return frozenset(app_ids)
 
 

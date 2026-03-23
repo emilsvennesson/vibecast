@@ -19,13 +19,13 @@ from vibecast._proto.cast_channel_pb2 import (
     DeviceAuthMessage,
 )
 from vibecast._transport import namespace as ns
-from vibecast.player import PlaybackMedia, PlaybackStream
-from vibecast.provider import (
+from vibecast.app import (
+    AppContext,
+    AppMessageDisposition,
+    AppProvider,
     LaunchCredentials,
-    Provider,
-    ProviderMessageDisposition,
-    ProviderSession,
 )
+from vibecast.player import PlaybackMedia, PlaybackStream
 from vibecast.receiver import CastReceiver
 
 if TYPE_CHECKING:
@@ -102,7 +102,7 @@ class DummyEurekaServer:
         self.started = False
 
 
-class DummyProvider(Provider):
+class DummyApp(AppProvider):
     def __init__(self) -> None:
         self.launch_calls: list[LaunchCredentials] = []
         self.custom_messages: list[tuple[str, dict[str, Any]]] = []
@@ -122,7 +122,7 @@ class DummyProvider(Provider):
         return frozenset({"urn:x-cast:com.example.dummy"})
 
     @override
-    def provider_key(self) -> str:
+    def app_key(self) -> str:
         return "dummy"
 
     @override
@@ -132,7 +132,7 @@ class DummyProvider(Provider):
     @override
     async def on_launch(
         self,
-        session: ProviderSession,
+        session: AppContext,
         credentials: LaunchCredentials,
     ) -> None:
         _ = session
@@ -141,18 +141,18 @@ class DummyProvider(Provider):
     @override
     async def on_message(
         self,
-        session: ProviderSession,
+        session: AppContext,
         namespace: str,
         data: dict[str, Any],
-    ) -> ProviderMessageDisposition:
+    ) -> AppMessageDisposition:
         _ = session
         self.custom_messages.append((namespace, data))
-        return ProviderMessageDisposition.HANDLED
+        return AppMessageDisposition.HANDLED
 
     @override
     async def resolve_media(
         self,
-        session: ProviderSession,
+        session: AppContext,
         load_request: LoadRequest,
     ) -> PlaybackMedia:
         _ = load_request
@@ -168,7 +168,7 @@ class DummyProvider(Provider):
         )
 
     @override
-    async def on_stop(self, session: ProviderSession) -> None:
+    async def on_stop(self, session: AppContext) -> None:
         _ = session
         self.stop_calls += 1
 
@@ -204,7 +204,7 @@ def _receiver_config(
 class TestReceiverConfig:
     def test_defaults(self, bundle: CertificateBundle) -> None:
         config = _receiver_config()
-        receiver = CastReceiver(config=config, certificates=bundle, providers=[])
+        receiver = CastReceiver(config=config, certificates=bundle, apps=[])
 
         assert config.device.model == "Chromecast"
         assert config.network.bind_host == "0.0.0.0"
@@ -218,35 +218,35 @@ class TestConstruction:
         monkeypatch: Any,
         bundle: CertificateBundle,
     ) -> None:
-        def fail_discovery() -> list[Provider]:
-            msg = "discover_providers should not run"
+        def fail_discovery() -> list[AppProvider]:
+            msg = "discover_apps should not run"
             raise AssertionError(msg)
 
-        monkeypatch.setattr("vibecast.receiver.discover_providers", fail_discovery)
-        provider = DummyProvider()
+        monkeypatch.setattr("vibecast.receiver.discover_apps", fail_discovery)
+        app = DummyApp()
 
         receiver = CastReceiver(
             config=_receiver_config(),
             certificates=bundle,
-            providers=[provider],
+            apps=[app],
         )
 
-        assert receiver.providers.get("DUMMYAPP") is provider
-        assert provider.configure_calls == [{}]
+        assert receiver.apps.get("DUMMYAPP") is app
+        assert app.configure_calls == [{}]
 
-    def test_provider_receives_config_section(self, bundle: CertificateBundle) -> None:
-        provider = DummyProvider()
+    def test_app_receives_config_section(self, bundle: CertificateBundle) -> None:
+        app = DummyApp()
         receiver = CastReceiver(
             config=replace(
                 _receiver_config(),
-                providers={"dummy": {"country": "se"}},
+                apps={"dummy": {"country": "se"}},
             ),
             certificates=bundle,
-            providers=[provider],
+            apps=[app],
         )
 
-        assert receiver.providers.get("DUMMYAPP") is provider
-        assert provider.configure_calls == [{"country": "se"}]
+        assert receiver.apps.get("DUMMYAPP") is app
+        assert app.configure_calls == [{"country": "se"}]
 
 
 class TestIntegration:
@@ -260,7 +260,7 @@ class TestIntegration:
         receiver = CastReceiver(
             config=_receiver_config(bind_host="127.0.0.1", player_port=0),
             certificates=bundle,
-            providers=[],
+            apps=[],
         )
         await receiver.start()
         port = receiver.serving_port
@@ -320,7 +320,7 @@ class TestIntegration:
         receiver = CastReceiver(
             config=_receiver_config(bind_host="127.0.0.1", player_port=0),
             certificates=bundle,
-            providers=[],
+            apps=[],
         )
 
         task = asyncio.create_task(receiver.run_forever())
@@ -342,11 +342,11 @@ class TestIntegration:
         ssl_client_context: SSLContext,
     ) -> None:
         _patch_runtime(monkeypatch)
-        provider = DummyProvider()
+        app = DummyApp()
         receiver = CastReceiver(
             config=_receiver_config(bind_host="127.0.0.1", player_port=0),
             certificates=bundle,
-            providers=[provider],
+            apps=[app],
         )
         await receiver.start()
         port = receiver.serving_port
@@ -385,8 +385,8 @@ class TestIntegration:
         assert len(applications) == 1
         assert applications[0]["appId"] == "DUMMYAPP"
         transport_id = applications[0]["transportId"]
-        assert provider.launch_calls[0].credentials == "token"
-        assert provider.launch_calls[0].credentials_type == "bearer"
+        assert app.launch_calls[0].credentials == "token"
+        assert app.launch_calls[0].credentials_type == "bearer"
 
         writer.write(
             _frame(
@@ -411,11 +411,11 @@ class TestIntegration:
         await writer.drain()
 
         for _ in range(50):
-            if provider.custom_messages:
+            if app.custom_messages:
                 break
             await asyncio.sleep(0.01)
 
-        assert provider.custom_messages == [
+        assert app.custom_messages == [
             ("urn:x-cast:com.example.dummy", {"type": "HELLO"})
         ]
 
@@ -427,11 +427,11 @@ class TestIntegration:
                 break
             await asyncio.sleep(0.01)
 
-        assert provider.stop_calls == 0
+        assert app.stop_calls == 0
         assert len(receiver.device.session_ids()) == 1
 
         await receiver.stop()
-        assert provider.stop_calls == 1
+        assert app.stop_calls == 1
 
 
 class TestStartupLogging:
@@ -445,7 +445,7 @@ class TestStartupLogging:
         receiver = CastReceiver(
             config=_receiver_config(bind_host="127.0.0.1", player_port=0),
             certificates=bundle,
-            providers=[DummyProvider()],
+            apps=[DummyApp()],
         )
         caplog.set_level("INFO", logger="vibecast.receiver")
 
@@ -454,6 +454,6 @@ class TestStartupLogging:
 
         assert any(
             record.name == "vibecast.receiver"
-            and record.getMessage() == "enabled providers: Dummy (appIds=DUMMYAPP)"
+            and record.getMessage() == "enabled apps: Dummy (appIds=DUMMYAPP)"
             for record in caplog.records
         )

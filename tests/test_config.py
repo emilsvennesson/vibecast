@@ -24,7 +24,7 @@ def test_load_config_generates_default_file(tmp_path: Path) -> None:
     content = config_path.read_text(encoding="utf-8")
     assert "# vibecast configuration" in content
     assert "[device]" in content
-    assert "[providers.primevideo]" in content
+    assert "[apps.primevideo]" in content
 
     assert config.device.friendly_name == "vibecast"
     assert config.device.certs == "certs.json"
@@ -43,7 +43,7 @@ certs = "/tmp/certs.json"
 [network]
 player_port = 19010
 
-[providers.viaplay]
+[apps.viaplay]
 country_code = "no"
 """.strip(),
         encoding="utf-8",
@@ -56,7 +56,7 @@ country_code = "no"
     assert config.device.model == "Chromecast"
     assert config.network.player_port == 19010
     assert config.network.bind_host == "0.0.0.0"
-    assert config.providers["viaplay"]["country_code"] == "no"
+    assert config.apps["viaplay"]["country_code"] == "no"
 
 
 def test_load_config_validates_field_types(tmp_path: Path) -> None:

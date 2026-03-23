@@ -4,7 +4,7 @@
 
 It accepts TLS CastV2 connections from real senders (Chrome/iOS/Android),
 handles device auth + platform namespaces, and routes app-specific behavior to
-providers (built-in providers: Viaplay and SVT Play).
+apps (bundled: Viaplay, SVT Play, and Prime Video).
 
 ## Current capabilities
 
@@ -23,9 +23,9 @@ providers (built-in providers: Viaplay and SVT Play).
   - `urn:x-cast:com.google.cast.receiver.discovery`
   - `urn:x-cast:com.google.cast.multizone`
   - `urn:x-cast:com.google.cast.setup`
-- Provider API with app launch/session callbacks
-- Playback coordinator handling generic media namespace flows for providers
-- Persistent receiver state under `--data-dir` (stable device ID, provider data)
+- App provider API with app launch/session callbacks
+- Playback coordinator handling generic media namespace flows for apps
+- Persistent receiver state under `--data-dir` (stable device ID, app data)
 - mDNS advertisement (`_googlecast._tcp.local`)
 
 ## Requirements
@@ -33,7 +33,7 @@ providers (built-in providers: Viaplay and SVT Play).
 - Python `3.12+`
 - [`uv`](https://docs.astral.sh/uv/)
 - Cast certificate manifest JSON (see below)
-- Optional: `mitmproxy` (for provider protocol capture script)
+- Optional: `mitmproxy` (for app protocol capture script)
 
 ## Install
 
@@ -41,7 +41,7 @@ providers (built-in providers: Viaplay and SVT Play).
 uv sync
 ```
 
-For local development, install editable so provider entry points resolve in the
+For local development, install editable so app entry points resolve in the
 active environment:
 
 ```bash
@@ -157,16 +157,17 @@ dns-sd -B _googlecast._tcp local
 - server listening host/port
 - registered mDNS service and advertised addresses
 
-## Providers
+## Apps
 
-Provider discovery uses Python entry points under `vibecast.providers`.
+App discovery uses Python entry points under `vibecast.apps`.
 
-Built-in providers in this repo:
+Built-in apps in this repo:
 
-- `SvtPlayProvider` (`appId` `95370A1C`)
-- `ViaplayProvider` (`appId` `6313CF39`, `2DB7CC49`)
+- `SvtPlay` (`appId` `95370A1C`)
+- `Viaplay` (`appId` `6313CF39`, `2DB7CC49`)
+- `PrimeVideo` (`appId` `17608BC8`)
 
-## Capturing new provider protocols (optional)
+## Capturing new app protocols (optional)
 
 Use `scripts/capture_provider.py` to proxy Cast traffic between a real sender
 and a real Cast receiver while writing a structured JSONL capture.
@@ -190,9 +191,9 @@ Sanity-check discovery:
 
 ```bash
 uv run python - <<'PY'
-from vibecast.provider import discover_providers
-providers = discover_providers()
-print([type(p).__name__ for p in providers])
+from vibecast.app import discover_apps
+apps = discover_apps()
+print([type(a).__name__ for a in apps])
 PY
 ```
 
@@ -230,7 +231,7 @@ For iOS senders especially, ensure:
 
 ### `LAUNCH_ERROR: Application not available`
 
-Provider for that app ID is not registered/discovered. Verify entry points and
+App for that app ID is not registered/discovered. Verify entry points and
 active environment (`uv pip install -e .`, then re-check discovery).
 
 ### iPhone cannot discover receiver

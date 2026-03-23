@@ -32,12 +32,12 @@ from vibecast._models import (
 )
 from vibecast._runtime.receiver_status import build_receiver_status
 from vibecast._util import extract_request_id, parse_json_payload
-from vibecast.provider import LaunchCredentials, Provider
+from vibecast.app import AppProvider, LaunchCredentials
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from vibecast._playback.player_server import PlayerServer
+    from vibecast._playback.player_bridge import PlayerBridge
     from vibecast._proto.cast_channel_pb2 import CastMessage
     from vibecast._runtime.device import Device
     from vibecast._transport.connection import Connection
@@ -46,26 +46,26 @@ if TYPE_CHECKING:
 log = get_logger("handlers")
 
 
-def _no_provider(_app_id: str) -> Provider | None:
+def _no_app(_app_id: str) -> AppProvider | None:
     return None
 
 
 class PlatformHandler:
     """Handles platform namespaces addressed to ``receiver-0``."""
 
-    __slots__ = ("_device", "_player", "_player_server", "_provider_lookup")
+    __slots__ = ("_app_lookup", "_device", "_player", "_player_bridge")
 
     def __init__(
         self,
         device: Device,
         player: Player,
-        player_server: PlayerServer | None,
-        provider_lookup: Callable[[str], Provider | None] | None = None,
+        player_bridge: PlayerBridge | None,
+        app_lookup: Callable[[str], AppProvider | None] | None = None,
     ) -> None:
         self._device = device
         self._player = player
-        self._player_server = player_server
-        self._provider_lookup = provider_lookup or _no_provider
+        self._player_bridge = player_bridge
+        self._app_lookup = app_lookup or _no_app
 
     async def handle_message(self, connection: Connection, msg: CastMessage) -> None:
         """Dispatch a transport message by namespace."""
@@ -173,8 +173,8 @@ class PlatformHandler:
         msg: CastMessage,
         request: LaunchRequest,
     ) -> None:
-        provider = self._provider_lookup(request.app_id)
-        if provider is None:
+        app = self._app_lookup(request.app_id)
+        if app is None:
             response = LaunchErrorResponse(
                 request_id=request.request_id,
                 reason="Application not available",
@@ -195,10 +195,10 @@ class PlatformHandler:
         credentials = _extract_launch_credentials(request)
         session = self._device.start_session(
             request.app_id,
-            provider,
+            app,
             credentials,
             player=self._player,
-            player_server=self._player_server,
+            player_bridge=self._player_bridge,
         )
         try:
             await session.on_launch(connection, msg.source_id)
@@ -215,7 +215,7 @@ class PlatformHandler:
                 namespace=ns.RECEIVER,
                 data=response.model_dump(exclude_none=True),
             )
-            log.warning("provider launch callback failed", exc_info=True)
+            log.warning("app launch callback failed", exc_info=True)
             return
 
         status = build_receiver_status(self._device, request.request_id)

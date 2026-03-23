@@ -41,7 +41,7 @@ country_code = "US"
 # Can be overridden with the --certs CLI flag.
 certs = "certs.json"
 # Display resolution of the output device.
-# Used by providers for adaptive stream selection.
+# Used by apps for adaptive stream selection.
 display_width = 1920
 display_height = 1080
 
@@ -77,7 +77,7 @@ wifi_supported = false
 bind_host = "0.0.0.0"
 # Port for the player HTTP/WebSocket bridge server.
 player_port = 8010
-# Default HTTP client timeout in seconds (used for provider API calls, CRL fetch).
+# Default HTTP client timeout in seconds (used for app API calls, CRL fetch).
 http_timeout = 15.0
 # Interval in seconds between certificate rotation checks.
 cert_rotation_poll = 60.0
@@ -94,11 +94,11 @@ step_interval = 0.05
 # Cast firmware build version and revision reported in eureka_info.
 build_version = "446070"
 build_revision = "3.72.446070"
-# User-Agent string sent by providers to streaming APIs.
-# Must mimic a real Chromecast for provider APIs to accept requests.
+# User-Agent string sent by apps to streaming APIs.
+# Must mimic a real Chromecast for streaming APIs to accept requests.
 user_agent = "Mozilla/5.0 (Linux; Android 11.0; Build/RQ1A.210105.003) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.0 Safari/537.36 CrKey/1.56.500000 DeviceType/AndroidTV"
 
-# HTTP header capabilities sent by providers to streaming service APIs.
+# HTTP header capabilities sent by apps to streaming service APIs.
 # Separate from [device.capabilities] which is for eureka/mDNS discovery.
 [cast.device_capabilities]
 display_supported = true
@@ -106,7 +106,7 @@ hi_res_audio_supported = false
 remote_control_input_supported = true
 touch_input_supported = false
 
-[providers.primevideo]
+[apps.primevideo]
 # Amazon marketplace ID. Determines regional API endpoint behavior.
 marketplace_id = "A3K6Y4MI8GDYMT"
 # Locale for Prime Video API requests.
@@ -204,7 +204,7 @@ class VibecastConfig:
     network: NetworkConfig = field(default_factory=NetworkConfig)
     volume: VolumeConfig = field(default_factory=VolumeConfig)
     cast: CastConfig = field(default_factory=CastConfig)
-    providers: dict[str, dict[str, Any]] = field(default_factory=dict)
+    apps: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def load_config(data_dir: Path) -> VibecastConfig:
@@ -242,7 +242,7 @@ def _write_default_config(path: Path) -> None:
 def _parse_config(*, raw: Mapping[str, Any], config_path: Path) -> VibecastConfig:
     _validate_unknown_keys(
         raw,
-        {"device", "network", "volume", "cast", "providers"},
+        {"device", "network", "volume", "cast", "apps"},
         path="config",
         config_path=config_path,
     )
@@ -251,20 +251,20 @@ def _parse_config(*, raw: Mapping[str, Any], config_path: Path) -> VibecastConfi
     network_section = _table(raw, "network", path="config", config_path=config_path)
     volume_section = _table(raw, "volume", path="config", config_path=config_path)
     cast_section = _table(raw, "cast", path="config", config_path=config_path)
-    providers_section = _table(raw, "providers", path="config", config_path=config_path)
+    apps_section = _table(raw, "apps", path="config", config_path=config_path)
 
     device = _parse_device_config(device_section, config_path=config_path)
     network = _parse_network_config(network_section, config_path=config_path)
     volume = _parse_volume_config(volume_section, config_path=config_path)
     cast_config = _parse_cast_config(cast_section, config_path=config_path)
-    providers = _parse_provider_tables(providers_section, config_path=config_path)
+    apps = _parse_app_tables(apps_section, config_path=config_path)
 
     return VibecastConfig(
         device=device,
         network=network,
         volume=volume,
         cast=cast_config,
-        providers=providers,
+        apps=apps,
     )
 
 
@@ -745,19 +745,19 @@ def _parse_cast_device_capabilities(
     )
 
 
-def _parse_provider_tables(
+def _parse_app_tables(
     values: Mapping[str, Any],
     *,
     config_path: Path,
 ) -> dict[str, dict[str, Any]]:
-    providers: dict[str, dict[str, Any]] = {}
+    apps: dict[str, dict[str, Any]] = {}
     for key, value in values.items():
         if not isinstance(value, dict):
-            location = f"providers.{key}"
+            location = f"apps.{key}"
             msg = f"{config_path}: {location} must be a table"
             raise TypeError(msg)
-        providers[key] = dict(cast("dict[str, Any]", value))
-    return providers
+        apps[key] = dict(cast("dict[str, Any]", value))
+    return apps
 
 
 def _table(

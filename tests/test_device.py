@@ -12,8 +12,8 @@ from vibecast._models import LoadRequest, StreamType
 from vibecast._runtime.device import Device, DeviceIdentity
 from vibecast._runtime.receiver_status import build_receiver_status
 from vibecast._transport import namespace as ns
+from vibecast.app import AppMessageDisposition, AppProvider, LaunchCredentials
 from vibecast.player import DefaultPlayer, PlaybackMedia, PlaybackStream
-from vibecast.provider import LaunchCredentials, Provider, ProviderMessageDisposition
 
 if TYPE_CHECKING:
     from httpx import AsyncClient
@@ -64,15 +64,15 @@ class RecordingHandler:
         self.calls.append((connection, msg))
 
 
-class FakeProvider(Provider):
-    """Minimal provider implementation used by session tests."""
+class FakeApp(AppProvider):
+    """Minimal app implementation used by session tests."""
 
     def __init__(
         self,
         display_name: str,
         namespaces: frozenset[str],
         *,
-        message_disposition: ProviderMessageDisposition = ProviderMessageDisposition.HANDLED,
+        message_disposition: AppMessageDisposition = AppMessageDisposition.HANDLED,
     ) -> None:
         self._display_name = display_name
         self._namespaces = namespaces
@@ -88,7 +88,7 @@ class FakeProvider(Provider):
         return self._display_name
 
     @override
-    def provider_key(self) -> str:
+    def app_key(self) -> str:
         return "fake"
 
     @override
@@ -103,7 +103,7 @@ class FakeProvider(Provider):
     @override
     async def on_message(
         self, session: Any, namespace: str, data: dict[str, Any]
-    ) -> ProviderMessageDisposition:
+    ) -> AppMessageDisposition:
         _ = session
         _ = namespace
         _ = data
@@ -261,20 +261,20 @@ class TestRouting:
 class TestSessionLifecycle:
     def test_session_receiver_context_uses_receiver_managed_data_dir(self) -> None:
         device = _build_device()
-        provider = FakeProvider(display_name="Viaplay", namespaces=frozenset())
+        app = FakeApp(display_name="Viaplay", namespaces=frozenset())
 
         # New coordinator pipeline always wires a player.
         session = device.start_session(
             "6313CF39",
-            provider,
+            app,
             LaunchCredentials(),
             player=_build_player(),
-            player_server=None,
+            player_bridge=None,
         )
         assert session.receiver.friendly_name == "Living Room"
         assert session.receiver.device_model == "Chromecast"
         assert session.receiver.device_id == "device-1234"
-        assert session.receiver.data_dir == Path("/tmp/vibecast-tests/providers/fake")
+        assert session.receiver.data_dir == Path("/tmp/vibecast-tests/apps/fake")
         assert session.receiver.data_dir.exists()
         assert "CrKey/1.56.500000" in session.receiver.user_agent
         assert "display_supported" in session.receiver.cast_device_capabilities
@@ -283,19 +283,19 @@ class TestSessionLifecycle:
 
     async def test_start_and_stop_session(self) -> None:
         device = _build_device()
-        provider = FakeProvider(
+        app = FakeApp(
             display_name="Viaplay",
             namespaces=frozenset({"urn:x-cast:tv.viaplay.chromecast"}),
         )
 
         session = device.start_session(
             app_id="6313CF39",
-            provider=provider,
+            app=app,
             credentials=LaunchCredentials(
                 credentials="token", credentials_type="bearer"
             ),
             player=_build_player(),
-            player_server=None,
+            player_bridge=None,
         )
 
         assert session.session_id in device.sessions
@@ -310,27 +310,27 @@ class TestSessionLifecycle:
 
     def test_transport_id_equals_session_id(self) -> None:
         device = _build_device()
-        provider = FakeProvider(display_name="App", namespaces=frozenset())
+        app = FakeApp(display_name="App", namespaces=frozenset())
 
         session = device.start_session(
             "app-1",
-            provider,
+            app,
             LaunchCredentials(),
             player=_build_player(),
-            player_server=None,
+            player_bridge=None,
         )
 
         assert session.transport_id == session.session_id
 
     async def test_stop_orphaned_session_when_last_subscription_removed(self) -> None:
         device = _build_device()
-        provider = FakeProvider(display_name="Viaplay", namespaces=frozenset())
+        app = FakeApp(display_name="Viaplay", namespaces=frozenset())
         session = device.start_session(
             "6313CF39",
-            provider,
+            app,
             LaunchCredentials(),
             player=_build_player(),
-            player_server=None,
+            player_bridge=None,
         )
 
         conn = _as_connection(RecordingConnection())
@@ -343,17 +343,17 @@ class TestSessionLifecycle:
 
         assert stopped == [session.session_id]
         assert session.session_id not in device.sessions
-        assert provider.stop_calls == 1
+        assert app.stop_calls == 1
 
     async def test_keeps_session_when_other_subscribers_remain(self) -> None:
         device = _build_device()
-        provider = FakeProvider(display_name="Viaplay", namespaces=frozenset())
+        app = FakeApp(display_name="Viaplay", namespaces=frozenset())
         session = device.start_session(
             "6313CF39",
-            provider,
+            app,
             LaunchCredentials(),
             player=_build_player(),
-            player_server=None,
+            player_bridge=None,
         )
 
         conn1 = _as_connection(RecordingConnection())
@@ -366,17 +366,17 @@ class TestSessionLifecycle:
 
         assert stopped == []
         assert session.session_id in device.sessions
-        assert provider.stop_calls == 0
+        assert app.stop_calls == 0
 
     def test_receiver_status_sender_connected_tracks_subscriptions(self) -> None:
         device = _build_device()
-        provider = FakeProvider(display_name="Viaplay", namespaces=frozenset())
+        app = FakeApp(display_name="Viaplay", namespaces=frozenset())
         session = device.start_session(
             "6313CF39",
-            provider,
+            app,
             LaunchCredentials(),
             player=_build_player(),
-            player_server=None,
+            player_bridge=None,
         )
 
         status = build_receiver_status(device)
@@ -390,19 +390,19 @@ class TestSessionLifecycle:
         app = status.status.applications[0]
         assert app.sender_connected is True
 
-    async def test_logs_unhandled_provider_message(self, caplog: Any) -> None:
+    async def test_logs_unhandled_app_message(self, caplog: Any) -> None:
         device = _build_device()
-        provider = FakeProvider(
+        app = FakeApp(
             display_name="Viaplay",
             namespaces=frozenset({"urn:x-cast:tv.viaplay.chromecast"}),
-            message_disposition=ProviderMessageDisposition.UNHANDLED,
+            message_disposition=AppMessageDisposition.UNHANDLED,
         )
         session = device.start_session(
             "6313CF39",
-            provider,
+            app,
             LaunchCredentials(),
             player=_build_player(),
-            player_server=None,
+            player_bridge=None,
         )
         conn = _as_connection(RecordingConnection())
 

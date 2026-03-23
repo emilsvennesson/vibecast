@@ -10,13 +10,13 @@ all checks.
 **vibecast** is a Python asyncio library implementing a Google Cast (CastV2)
 receiver. It accepts TLS connections from iOS/Android/Chrome Cast senders,
 performs device authentication, handles the Cast platform protocol, and delegates
-app-specific behavior to modular **providers** (bundled: Viaplay, SVT Play).
+app-specific behavior to modular **apps** (bundled: Viaplay, SVT Play, Prime Video).
 
 Media control uses a mediator architecture:
 
 - `PlaybackCoordinator` (per app session) owns canonical playback state
 - `Player` ABC is the internal playback interface
-- `PlayerServer` is the default `Player` implementation exposing:
+- `PlayerBridge` is the default `Player` implementation exposing:
   - `GET /` and `GET /index.html` (embedded web player)
   - `GET /player.js` (embedded player script)
   - WebSocket `GET /player` for commands/state reports
@@ -95,13 +95,13 @@ Each namespace defines a sub-protocol. Platform namespaces (handled by
 | `urn:x-cast:com.google.cast.multizone`          | Multi-room status                             |
 | `urn:x-cast:com.google.cast.setup`              | Device setup (eureka_info)                    |
 
-Provider-specific namespaces (handled by app sessions):
+App-specific namespaces (handled by app sessions):
 
-| Namespace                          | Provider |
-| ---------------------------------- | -------- |
-| `urn:x-cast:tv.viaplay.chromecast` | Viaplay  |
+| Namespace                          | App     |
+| ---------------------------------- | ------- |
+| `urn:x-cast:tv.viaplay.chromecast` | Viaplay |
 
-SVT Play uses only the standard media namespace (no custom provider namespace).
+SVT Play uses only the standard media namespace (no custom app namespace).
 
 ### Connection Lifecycle
 
@@ -145,12 +145,12 @@ SVT Play uses only the standard media namespace (no custom provider namespace).
    Sender -> CONNECT to transport "pid-1"
 
 7. APP-SPECIFIC COMMUNICATION
-   Messages routed to provider session by destination transport_id
+   Messages routed to app session by destination transport_id
    Media namespace handled by PlaybackCoordinator:
    LOAD/PLAY/PAUSE/SEEK/STOP/SET_VOLUME -> MEDIA_STATUS responses
-   Coordinator invokes Provider.resolve_media(), Player callbacks,
-   and Provider.on_playback_update() as state changes
-   Custom namespaces: provider-specific messages
+   Coordinator invokes AppProvider.resolve_media(), Player callbacks,
+   and AppProvider.on_playback_update() as state changes
+   Custom namespaces: app-specific messages
 
 8. TEARDOWN
    Sender -> { "type": "STOP", "requestId": N, "sessionId": "..." }
@@ -276,7 +276,7 @@ At least one of `sig_sha1` or `sig` must be present.
 }
 ```
 
-### Viaplay Provider Protocol
+### Viaplay App Protocol
 
 Viaplay uses a custom namespace `urn:x-cast:tv.viaplay.chromecast` alongside the
 standard media namespace.
@@ -310,26 +310,26 @@ Viaplay API headers must mimic a real Chromecast:
 
 ## Architecture & Design Decisions
 
-### Playback Mediation: Coordinator + Player Server
+### Playback Mediation: Coordinator + PlayerBridge
 
-The receiver always starts an internal player bridge server (`PlayerServer`) in
+The receiver always starts an internal player bridge server (`PlayerBridge`) in
 parallel with the Cast TLS server.
 
 - `CastReceiver` owns both servers (`:8009` Cast, `:8010` player by default)
 - `Device.start_session()` creates a `PlaybackCoordinator` for each app session
 - `AppSession` routes media namespace requests to its coordinator
 - Coordinator owns canonical `MEDIA_STATUS` state and broadcasts updates
-- Coordinator invokes provider hooks:
+- Coordinator invokes app hooks:
   - `resolve_media(session, load_request) -> PlaybackMedia`
   - `on_playback_update(session, state)`
   - `resolve_license(session, request) -> LicenseResponse`
 
-`PlayerServer` behavior:
+`PlayerBridge` behavior:
 
 - Primary WS client reports (`state` / `error`) update coordinator state
 - Observer WS clients receive commands but their reports are ignored
 - New WS clients are auto-synced (`load` + seek + play/pause) from snapshots
-- License POSTs are delegated per session via coordinator -> provider
+- License POSTs are delegated per session via coordinator -> app
 
 Session lifecycle behavior:
 
@@ -379,18 +379,19 @@ receiver_request_adapter: TypeAdapter[ReceiverRequest] = TypeAdapter(ReceiverReq
 **Serialization**: `model.model_dump(exclude_none=True)` — uses camelCase keys
 by default thanks to `serialize_by_alias=True`.
 
-### Providers: Entry Points
+### Apps: Entry Points
 
-Providers implement the `Provider` ABC and register via Python entry points:
+Apps implement the `AppProvider` ABC and register via Python entry points:
 
 ```toml
 # pyproject.toml
-[project.entry-points."vibecast.providers"]
-svtplay = "vibecast.providers.svtplay._provider:SvtPlayProvider"
-viaplay = "vibecast.providers.viaplay._provider:ViaplayProvider"
+[project.entry-points."vibecast.apps"]
+svtplay = "vibecast.apps.svtplay:SvtPlay"
+viaplay = "vibecast.apps.viaplay:Viaplay"
+primevideo = "vibecast.apps.primevideo:PrimeVideo"
 ```
 
-Discovery: `importlib.metadata.entry_points(group="vibecast.providers")`
+Discovery: `importlib.metadata.entry_points(group="vibecast.apps")`
 
 ### Certificate Handling
 
@@ -400,17 +401,17 @@ certs in their wire formats (DER for auth response, PEM for TLS context).
 ### Package Layout Convention
 
 - `vibecast/` — library root
-- Public modules: `receiver.py`, `provider/`, `player/`, `__init__.py`
+- Public modules: `receiver.py`, `app/`, `player/`, `__init__.py`
 - Domain packages (private):
   - `_transport/` — TLS connection, framing, namespace constants, server
   - `_security/` — TLS context, certificates, device auth
   - `_discovery/` — mDNS advertisement, Eureka HTTP server
   - `_runtime/` — Device hub, AppSession, PlatformHandler, receiver status
-  - `_playback/` — PlaybackCoordinator, PlayerServer, manifest proxy, headers
+  - `_playback/` — PlaybackCoordinator, PlayerBridge, manifest proxy, headers
   - `_config/` — TOML config loading, dataclasses
   - `_models/` — Pydantic Cast protocol message models
   - `_proto/` — protobuf definitions and generated code
-- `vibecast/providers/` — bundled provider implementations
+- `vibecast/apps/` — bundled app implementations
 
 ## Tooling & Quality Checks
 
@@ -488,16 +489,16 @@ uv run python scripts/compile_proto.py
 Generated files (`_pb2.py`, `.pyi`) are committed to the repo so library
 consumers don't need protoc installed.
 
-### Provider Capture Utility
+### App Capture Utility
 
-For reverse-engineering new providers, use:
+For reverse-engineering new apps, use:
 
 ```bash
 uv run python scripts/capture_provider.py --manifest manifest.json --upstream <ip>
 ```
 
 This runs a Cast proxy and logs traffic to JSONL. Add `--enable-mitm` to also
-capture provider HTTP traffic via mitmproxy WireGuard mode.
+capture app HTTP traffic via mitmproxy WireGuard mode.
 
 ## Dependencies
 
@@ -507,9 +508,9 @@ capture provider HTTP traffic via mitmproxy WireGuard mode.
 | `protobuf`     | `>=5.0`     | CastMessage wire format                    |
 | `zeroconf`     | `>=0.140`   | mDNS service advertisement                 |
 | `cryptography` | `>=44.0`    | PEM/DER parsing, cert digest               |
-| `httpx`        | `>=0.28`    | Async HTTP client (provider APIs)          |
+| `httpx`        | `>=0.28`    | Async HTTP client (app APIs)               |
 | `aiohttp`      | `>=3.11`    | Player bridge server (WebSocket + HTTP)    |
-| `uritemplate`  | `>=4.1`     | URI-template expansion for provider APIs   |
+| `uritemplate`  | `>=4.1`     | URI-template expansion for app APIs        |
 
 Dev dependencies:
 | Package | Purpose |
