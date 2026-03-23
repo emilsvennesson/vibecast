@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -28,7 +27,9 @@ if TYPE_CHECKING:
 
     from httpx import AsyncClient
 
-log = logging.getLogger("vibecast.primevideo.api")
+from vibecast._log import get_logger
+
+log = get_logger("primevideo.api")
 
 _ORIGIN = "https://cloudfront.xp-assets.aiv-cdn.net"
 _REFERER = "https://cloudfront.xp-assets.aiv-cdn.net/"

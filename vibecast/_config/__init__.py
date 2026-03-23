@@ -1,7 +1,6 @@
 """TOML-backed runtime configuration for vibecast."""
 
-from vibecast._config.loader import cast_device_capabilities_header, load_config
-from vibecast._config.models import (
+from vibecast._config.loader import (
     CastConfig,
     CastDeviceCapabilitiesConfig,
     DeviceConfig,
@@ -9,6 +8,8 @@ from vibecast._config.models import (
     NetworkConfig,
     VibecastConfig,
     VolumeConfig,
+    cast_device_capabilities_header,
+    load_config,
 )
 
 __all__ = [

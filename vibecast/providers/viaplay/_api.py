@@ -7,7 +7,6 @@ authorization) and stream resolution. Uses the receiver-managed
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -26,7 +25,9 @@ from vibecast.providers.viaplay._models import (
 if TYPE_CHECKING:
     from httpx import AsyncClient
 
-log = logging.getLogger("vibecast.viaplay.api")
+from vibecast._log import get_logger
+
+log = get_logger("viaplay.api")
 
 # ---------------------------------------------------------------------------
 # Constants

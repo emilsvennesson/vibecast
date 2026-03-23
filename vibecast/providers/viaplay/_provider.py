@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, override
 
@@ -54,7 +53,9 @@ from vibecast.providers.viaplay._models import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-log = logging.getLogger("vibecast.viaplay")
+from vibecast._log import get_logger
+
+log = get_logger("viaplay")
 
 _NS_VIAPLAY = "urn:x-cast:tv.viaplay.chromecast"
 
@@ -527,6 +528,7 @@ class ViaplayProvider(StatefulProvider[_ViaplayState]):
             await self._send_session_ok(session, state)
         except Exception:
             log.exception("complete device auth failed")
+            state.auth_event.set()
 
     async def _send_session_ok(
         self,
