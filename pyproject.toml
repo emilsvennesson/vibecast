@@ -95,9 +95,6 @@ ignore = ["E501"]
 [tool.deptry]
 extend_exclude = ["scripts", ".*/tests/", "kodi"]
 
-[tool.deptry.per_rule_ignores]
-# These dependencies are used in later issues; added now per project plan.
-DEP002 = ["zeroconf"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

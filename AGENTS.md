@@ -400,11 +400,16 @@ certs in their wire formats (DER for auth response, PEM for TLS context).
 ### Package Layout Convention
 
 - `vibecast/` — library root
-- Public modules: `receiver.py`, `provider.py`, `player.py`, `__init__.py`
-- Private modules: prefixed with `_` (e.g. `_server.py`, `_connection.py`)
-- Playback internals: `_coordinator.py`, `_player_server.py`
-- `_models/` — Pydantic message models subpackage
-- `_proto/` — protobuf definitions and generated code
+- Public modules: `receiver.py`, `provider/`, `player/`, `__init__.py`
+- Domain packages (private):
+  - `_transport/` — TLS connection, framing, namespace constants, server
+  - `_security/` — TLS context, certificates, device auth
+  - `_discovery/` — mDNS advertisement, Eureka HTTP server
+  - `_runtime/` — Device hub, AppSession, PlatformHandler, receiver status
+  - `_playback/` — PlaybackCoordinator, PlayerServer, manifest proxy, headers
+  - `_config/` — TOML config loading, dataclasses
+  - `_models/` — Pydantic Cast protocol message models
+  - `_proto/` — protobuf definitions and generated code
 - `vibecast/providers/` — bundled provider implementations
 
 ## Tooling & Quality Checks

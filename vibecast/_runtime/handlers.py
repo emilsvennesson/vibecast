@@ -310,15 +310,7 @@ class PlatformHandler:
 
 def _update_volume(device: Device, request: SetVolumeRequest) -> None:
     """Apply SET_VOLUME updates without overwriting omitted fields."""
-    fields_set = request.volume.model_fields_set
-    if "level" in fields_set:
-        device.volume.level = request.volume.level
-    if "muted" in fields_set:
-        device.volume.muted = request.volume.muted
-    if "control_type" in fields_set:
-        device.volume.control_type = request.volume.control_type
-    if "step_interval" in fields_set:
-        device.volume.step_interval = request.volume.step_interval
+    device.volume.apply_set_fields(request.volume)
 
 
 def _extract_launch_credentials(request: LaunchRequest) -> LaunchCredentials:
