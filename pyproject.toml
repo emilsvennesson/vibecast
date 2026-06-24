@@ -23,6 +23,7 @@ viaplay = "vibecast.apps.viaplay:Viaplay"
 dev = [
     "basedpyright>=1.38.1",
     "deptry>=0.24.0",
+    "frida==16.7.19",
     "grpcio-tools>=1.70",
     "Kodistubs>=21.0.0",
     "pytest>=8.0",
