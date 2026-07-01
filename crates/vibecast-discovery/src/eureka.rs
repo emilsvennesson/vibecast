@@ -21,7 +21,11 @@ use vibecast_security::CertificateBundle;
 use crate::error::DiscoveryError;
 
 /// Device capability flags advertised in eureka `device_info.capabilities`.
-#[derive(Debug, Clone, Serialize)]
+///
+/// Also deserialized directly from the `[device.capabilities]` config table
+/// (missing keys fall back to the Chromecast-like defaults).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 #[allow(missing_docs)]
 pub struct DeviceCapabilities {
     pub audio_hdr_supported: bool,

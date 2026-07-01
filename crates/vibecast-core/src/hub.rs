@@ -86,6 +86,14 @@ pub struct HubConfig {
     pub data_dir: PathBuf,
     /// Initial receiver volume.
     pub volume: Volume,
+    /// User-Agent placed in each app session's `ReceiverContext`.
+    pub user_agent: String,
+    /// `CAST-DEVICE-CAPABILITIES` header value for app sessions.
+    pub cast_device_capabilities: String,
+    /// Output display width for app sessions.
+    pub display_width: u32,
+    /// Output display height for app sessions.
+    pub display_height: u32,
 }
 
 /// The device hub actor.
@@ -97,6 +105,10 @@ pub struct DeviceHub {
     http: reqwest::Client,
     data_dir: PathBuf,
     volume: Volume,
+    user_agent: String,
+    cast_device_capabilities: String,
+    display_width: u32,
+    display_height: u32,
     connections: HashMap<u64, ConnectionHandle>,
     /// `(connection, sender)` -> transport id.
     subscriptions: HashMap<(u64, String), String>,
@@ -120,6 +132,10 @@ impl DeviceHub {
             http: config.http,
             data_dir: config.data_dir,
             volume: config.volume,
+            user_agent: config.user_agent,
+            cast_device_capabilities: config.cast_device_capabilities,
+            display_width: config.display_width,
+            display_height: config.display_height,
             connections: HashMap::new(),
             subscriptions: HashMap::new(),
             sessions: HashMap::new(),
@@ -293,10 +309,10 @@ impl DeviceHub {
                 device_model: self.identity.device_model.clone(),
                 device_id: self.identity.device_id.clone(),
                 data_dir,
-                user_agent: String::new(),
-                cast_device_capabilities: String::new(),
-                display_width: 1920,
-                display_height: 1080,
+                user_agent: self.user_agent.clone(),
+                cast_device_capabilities: self.cast_device_capabilities.clone(),
+                display_width: self.display_width,
+                display_height: self.display_height,
             },
         };
 

@@ -183,6 +183,10 @@ async fn setup() -> Harness {
         http: reqwest::Client::new(),
         data_dir: std::env::temp_dir().join("vibecast-core-tests"),
         volume: attenuation_volume(),
+        user_agent: String::new(),
+        cast_device_capabilities: String::new(),
+        display_width: 1920,
+        display_height: 1080,
     });
     let hub_tx = hub.sender();
     {
