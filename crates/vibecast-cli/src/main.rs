@@ -32,10 +32,6 @@ use vibecast_security::{server_config, CertResolver, CertificateStore};
 
 use crate::config::Config;
 
-const CAST_PORT: u16 = 8009;
-const EUREKA_HTTPS_PORT: u16 = 8443;
-const EUREKA_HTTP_PORT: u16 = 8008;
-
 /// Cast app ids advertised by every receiver (default media / backdrop apps).
 const BASE_APP_IDS: &[&str] = &["CC1AD845", "0F5096E8"];
 
@@ -67,6 +63,10 @@ struct Args {
     /// Override the configured bind host.
     #[arg(long)]
     bind_host: Option<String>,
+
+    /// Override the CastV2 TLS port (standard 8009); advertised over mDNS.
+    #[arg(long)]
+    cast_port: Option<u16>,
 
     /// Stable device id (default: a random UUID).
     #[arg(long)]
@@ -114,6 +114,9 @@ async fn run(args: Args) -> anyhow::Result<()> {
         .bind_host
         .clone()
         .unwrap_or_else(|| config.network.bind_host.clone());
+    let cast_port = args.cast_port.unwrap_or(config.network.cast_port);
+    let eureka_http_port = config.network.eureka_http_port;
+    let eureka_https_port = config.network.eureka_https_port;
     let device_id = match &args.device_id {
         Some(id) => id.clone(),
         None => load_or_create_device_id(&data_dir),
@@ -200,9 +203,9 @@ async fn run(args: Args) -> anyhow::Result<()> {
     spawn_server_forward(events_rx, hub_tx.clone());
     tokio::spawn(hub.run());
 
-    let cast_listener = TcpListener::bind((bind_host.as_str(), CAST_PORT))
+    let cast_listener = TcpListener::bind((bind_host.as_str(), cast_port))
         .await
-        .with_context(|| format!("binding cast port {CAST_PORT}"))?;
+        .with_context(|| format!("binding cast port {cast_port}"))?;
     {
         let cast_server = cast_server.clone();
         tokio::spawn(async move {
@@ -222,9 +225,9 @@ async fn run(args: Args) -> anyhow::Result<()> {
     );
     {
         let eureka = eureka.clone();
-        let listener = TcpListener::bind((bind_host.as_str(), EUREKA_HTTP_PORT))
+        let listener = TcpListener::bind((bind_host.as_str(), eureka_http_port))
             .await
-            .with_context(|| format!("binding eureka http port {EUREKA_HTTP_PORT}"))?;
+            .with_context(|| format!("binding eureka http port {eureka_http_port}"))?;
         tokio::spawn(async move {
             if let Err(error) = eureka.serve_http(listener).await {
                 tracing::error!(%error, "eureka http stopped");
@@ -233,8 +236,8 @@ async fn run(args: Args) -> anyhow::Result<()> {
     }
     {
         let eureka = eureka.clone();
-        let listener = std::net::TcpListener::bind((bind_host.as_str(), EUREKA_HTTPS_PORT))
-            .with_context(|| format!("binding eureka https port {EUREKA_HTTPS_PORT}"))?;
+        let listener = std::net::TcpListener::bind((bind_host.as_str(), eureka_https_port))
+            .with_context(|| format!("binding eureka https port {eureka_https_port}"))?;
         listener
             .set_nonblocking(true)
             .context("eureka https nonblocking")?;
@@ -250,7 +253,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         &friendly_name,
         &model,
         &device_id,
-        CAST_PORT,
+        cast_port,
         &bundle.cert_digest_md5(),
         discovery_app_ids,
     );
@@ -273,7 +276,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
     tracing::info!(
         name = %friendly_name,
         ip = %local_ip,
-        cast_port = CAST_PORT,
+        cast_port,
         player = format_args!("http://{local_ip}:{player_port}/"),
         "vibecast receiver started"
     );

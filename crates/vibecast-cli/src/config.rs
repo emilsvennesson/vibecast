@@ -81,8 +81,15 @@ impl Default for DeviceConfig {
 pub struct NetworkConfig {
     /// Host/interface to bind all listeners to.
     pub bind_host: String,
+    /// CastV2 TLS port advertised over mDNS (standard is 8009; change to avoid
+    /// clashing with a platform Cast receiver).
+    pub cast_port: u16,
     /// Player bridge port.
     pub player_port: u16,
+    /// Eureka discovery HTTP port.
+    pub eureka_http_port: u16,
+    /// Eureka discovery HTTPS port.
+    pub eureka_https_port: u16,
     /// HTTP client timeout (seconds).
     pub http_timeout: f64,
     /// Certificate-rotation poll interval (seconds).
@@ -93,7 +100,10 @@ impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
             bind_host: "0.0.0.0".into(),
+            cast_port: 8009,
             player_port: 8010,
+            eureka_http_port: 8008,
+            eureka_https_port: 8443,
             http_timeout: 15.0,
             cert_rotation_poll: 60.0,
         }
