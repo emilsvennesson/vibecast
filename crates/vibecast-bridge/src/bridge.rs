@@ -128,6 +128,13 @@ impl BridgeActor {
             out,
         };
         self.assign_primary(&mut conn);
+        tracing::info!(
+            conn_id = id,
+            role = ?role,
+            is_primary = conn.is_primary,
+            total = self.connections.len() + 1,
+            "renderer connected"
+        );
         self.connections.push(conn);
         self.sync(id).await;
     }
@@ -153,11 +160,18 @@ impl BridgeActor {
     }
 
     fn unregister(&mut self, id: u64) {
+        let was_primary = self.primary == Some(id);
         self.connections.retain(|c| c.id != id);
-        if self.primary == Some(id) {
+        if was_primary {
             self.primary = None;
             self.promote_primary();
         }
+        tracing::info!(
+            conn_id = id,
+            was_primary,
+            remaining = self.connections.len(),
+            "renderer disconnected"
+        );
     }
 
     fn promote_primary(&mut self) {
@@ -192,10 +206,30 @@ impl BridgeActor {
             snapshot.duration = *duration;
             snapshot.idle_reason = *idle_reason;
         }
+        tracing::debug!(conn_id = id, session_id = %session_id, report = ?report, "forwarding primary report");
         let _ = self.reports_tx.send(report).await;
     }
 
     async fn command(&mut self, command: PlayerCommand) {
+        match &command {
+            PlayerCommand::Load { session_id, media } => {
+                tracing::info!(
+                    session_id = %session_id,
+                    streams = media.streams.len(),
+                    first_url = %media.streams.first().map(|s| s.url.as_str()).unwrap_or(""),
+                    "dispatching load to renderers"
+                );
+            }
+            PlayerCommand::Stop { session_id } => {
+                tracing::info!(session_id = %session_id, "dispatching stop to renderers");
+            }
+            PlayerCommand::Play { session_id }
+            | PlayerCommand::Pause { session_id }
+            | PlayerCommand::Seek { session_id, .. }
+            | PlayerCommand::Volume { session_id, .. } => {
+                tracing::debug!(session_id = %session_id, cmd = ?command, "dispatching player command");
+            }
+        }
         self.update_snapshot(&command);
         let text = match serde_json::to_string(&command) {
             Ok(text) => text,
@@ -627,8 +661,16 @@ async fn manifest_handler(
                 .status(response.status)
                 .header(CONTENT_TYPE, response.content_type);
             for (name, value) in filter_upstream_response_headers(&response.headers) {
+                // Drop upstream caching directives; the proxy URL is reused
+                // across stream switches (only the query version changes), so a
+                // cached manifest would stall playback on the previous stream.
+                let lowered = name.to_ascii_lowercase();
+                if lowered == "cache-control" || lowered == "expires" || lowered == "etag" {
+                    continue;
+                }
                 builder = builder.header(name, value);
             }
+            builder = builder.header("cache-control", "no-store, max-age=0");
             let body = if is_head { Vec::new() } else { response.body };
             builder
                 .body(Body::from(body))
@@ -1035,9 +1077,11 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(content_type(&headers), "application/vnd.apple.mpegurl");
+        // The proxy forces no-store regardless of upstream directives so that
+        // stream switches (which reuse the proxy URL) always re-fetch.
         assert_eq!(
             headers.get("Cache-Control").and_then(|v| v.to_str().ok()),
-            Some("no-store")
+            Some("no-store, max-age=0")
         );
         assert_eq!(body, b"#EXTM3U\n");
         {

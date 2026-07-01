@@ -75,6 +75,11 @@ impl AppSession for SvtSession {
         if svt_id.is_empty() {
             return Err(MediaResolveError::invalid_request("INVALID_CONTENT_ID"));
         }
+        tracing::info!(
+            session_id = %ctx.session_id,
+            svt_id = %svt_id,
+            "resolving svt stream"
+        );
 
         let resolved = self
             .api
@@ -102,6 +107,13 @@ impl AppSession for SvtSession {
                 "NO_RESOLVED_STREAMS",
             ));
         }
+        tracing::info!(
+            session_id = %ctx.session_id,
+            svt_id = %svt_id,
+            streams = streams.len(),
+            first_url = %streams.first().map(|s| s.url.as_str()).unwrap_or(""),
+            "svt stream resolved"
+        );
 
         let metadata = media.metadata.as_ref();
         Ok(PlaybackMedia {

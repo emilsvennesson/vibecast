@@ -321,7 +321,13 @@ impl DeviceHub {
     }
 
     async fn handle_launch(&mut self, conn_id: u64, source: &str, request: LaunchRequest) {
+        tracing::info!(
+            app_id = %request.app_id,
+            request_id = request.request_id,
+            "LAUNCH request"
+        );
         let Some(provider) = self.registry.get(&request.app_id) else {
+            tracing::warn!(app_id = %request.app_id, "LAUNCH_ERROR: app not registered");
             let response =
                 LaunchErrorResponse::new(request.request_id, "Application not available");
             self.send_to(conn_id, RECEIVER_0, source, ns::RECEIVER, &response)
@@ -370,9 +376,17 @@ impl DeviceHub {
             )
             .await
         {
-            Ok(session) => Arc::from(session),
+            Ok(session) => {
+                tracing::info!(
+                    app_id = %request.app_id,
+                    app_key = %app_key,
+                    session_id = %session_id,
+                    "app launched"
+                );
+                Arc::from(session)
+            }
             Err(error) => {
-                tracing::warn!(%error, "app launch failed");
+                tracing::warn!(%error, app_id = %request.app_id, "app launch failed");
                 let response =
                     LaunchErrorResponse::new(request.request_id, "Application launch failed");
                 self.send_to(conn_id, RECEIVER_0, source, ns::RECEIVER, &response)
@@ -411,6 +425,7 @@ impl DeviceHub {
         let Some(session) = self.sessions.remove(session_id) else {
             return;
         };
+        tracing::info!(session_id = %session_id, app_key = %session.app_key, "stopping session");
         if session.coordinator.playback_media.is_some() {
             self.renderer
                 .send(PlayerCommand::Stop {
@@ -542,6 +557,7 @@ impl DeviceHub {
         match request {
             MediaRequest::Load(load) => self.media_load(conn_id, transport, source, load).await,
             MediaRequest::Play(r) => {
+                tracing::debug!(session_id = %transport, request_id = r.request_id, "PLAY");
                 self.transition(transport, r.request_id, |c| {
                     c.player_state = PlayerState::Playing;
                     c.idle_reason = None;
@@ -555,6 +571,7 @@ impl DeviceHub {
                 self.notify_app(transport).await;
             }
             MediaRequest::Pause(r) => {
+                tracing::debug!(session_id = %transport, request_id = r.request_id, "PAUSE");
                 self.transition(transport, r.request_id, |c| {
                     c.player_state = PlayerState::Paused;
                     c.idle_reason = None;
@@ -569,6 +586,7 @@ impl DeviceHub {
             }
             MediaRequest::Seek(r) => {
                 let position = r.current_time;
+                tracing::debug!(session_id = %transport, request_id = r.request_id, position, "SEEK");
                 self.transition(transport, r.request_id, |c| {
                     c.current_time = position;
                     c.idle_reason = None;
@@ -583,6 +601,7 @@ impl DeviceHub {
                 self.notify_app(transport).await;
             }
             MediaRequest::Stop(r) => {
+                tracing::debug!(session_id = %transport, request_id = r.request_id, "STOP");
                 self.transition(transport, r.request_id, |c| {
                     c.set_idle(Some(IdleReason::Cancelled));
                 })
@@ -678,6 +697,13 @@ impl DeviceHub {
         source: &str,
         load: Box<LoadRequest>,
     ) {
+        tracing::info!(
+            session_id = %transport,
+            request_id = load.request_id,
+            content_id = %load.media.content_id,
+            stream_type = ?load.media.stream_type,
+            "LOAD"
+        );
         // Phase 1: broadcast IDLE + LOADING with the request's media info.
         let response = match self.sessions.get_mut(transport) {
             Some(session) => {
@@ -728,6 +754,7 @@ impl DeviceHub {
             result,
         } = resolved;
         if !self.sessions.contains_key(&session_id) {
+            tracing::debug!(session_id = %session_id, "media resolved for stopped session; dropping");
             return; // session stopped while resolving
         }
 
@@ -752,7 +779,21 @@ impl DeviceHub {
             .get(&session_id)
             .map(|s| s.app_key.clone())
             .unwrap_or_default();
-        let media = self.attach_proxies(&session_id, &app_key, media);
+        let media_session_id = self
+            .sessions
+            .get(&session_id)
+            .map(|s| s.coordinator.media_session_id)
+            .unwrap_or(0);
+        let media = self.attach_proxies(&session_id, &app_key, media_session_id, media);
+
+        tracing::info!(
+            session_id = %session_id,
+            request_id,
+            streams = media.streams.len(),
+            stream_type = ?media.stream_type,
+            first_url = %media.streams.first().map(|s| s.url.as_str()).unwrap_or(""),
+            "media resolved"
+        );
 
         // Phase 3 + 4: broadcast resolved LOADING, then BUFFERING, then load.
         let (loading, buffering) = match self.sessions.get_mut(&session_id) {
@@ -786,6 +827,7 @@ impl DeviceHub {
         &self,
         session_id: &str,
         app_key: &str,
+        media_session_id: i64,
         mut media: PlaybackMedia,
     ) -> PlaybackMedia {
         let (manifest_routes, license_routes) = collect_routes(&media);
@@ -812,6 +854,7 @@ impl DeviceHub {
             &mut media,
             manifest_base.as_deref(),
             license_base.as_deref(),
+            media_session_id,
         );
         media
     }
@@ -865,6 +908,14 @@ impl DeviceHub {
                 idle_reason,
                 ..
             } => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    state = ?player_state,
+                    current_time,
+                    ?duration,
+                    ?idle_reason,
+                    "player report"
+                );
                 self.apply_state(
                     &session_id,
                     player_state,

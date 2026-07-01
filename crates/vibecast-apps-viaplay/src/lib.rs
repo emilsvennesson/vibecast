@@ -71,7 +71,7 @@ impl AppProvider for Viaplay {
         ctx: &AppContext,
         credentials: LaunchCredentials,
     ) -> Result<Box<dyn AppSession>, LaunchError> {
-        let (auth_tx, _) = watch::channel(false);
+        let (auth_tx, auth_rx) = watch::channel(false);
         Ok(Box::new(ViaplaySession {
             api: ViaplayApi::new(
                 ctx.http.clone(),
@@ -84,6 +84,7 @@ impl AppProvider for Viaplay {
                 ..Default::default()
             })),
             auth_tx,
+            _auth_rx: auth_rx,
             cancel: Mutex::new(CancellationToken::new()),
             auth_timeout: Duration::from_secs(30),
         }))
@@ -135,6 +136,12 @@ struct ViaplaySession {
     api: ViaplayApi,
     state: Arc<Mutex<ViaplayState>>,
     auth_tx: watch::Sender<bool>,
+    /// Kept alive so `auth_tx.send(...)` always stores its value. Without a
+    /// live receiver, `watch::Sender::send` returns `Err` and does *not* update
+    /// the stored value — so a later `subscribe()` would see the stale initial
+    /// value (`false`) even after auth succeeded, causing `resolve_media` to
+    /// wait the full timeout every load.
+    _auth_rx: watch::Receiver<bool>,
     cancel: Mutex<CancellationToken>,
     /// How long `resolve_media` waits for authentication before failing.
     auth_timeout: Duration,
@@ -148,10 +155,38 @@ impl AppSession for ViaplaySession {
         request: &LoadRequest,
     ) -> Result<PlaybackMedia, MediaResolveError> {
         // Wait (bounded) for authentication to complete before resolving.
-        {
+        // `state.authenticated` is the source of truth; the watch channel is
+        // only the wake-up signal.
+        let auth_started = tokio::time::Instant::now();
+        let already_authed = self.state.lock().await.authenticated;
+        if !already_authed {
             let mut rx = self.auth_tx.subscribe();
-            let _ = tokio::time::timeout(self.auth_timeout, rx.wait_for(|v| *v)).await;
+            tracing::debug!(
+                session_id = %ctx.session_id,
+                "resolve_media waiting for auth (up to {:?})",
+                self.auth_timeout
+            );
+            let wait = tokio::time::timeout(self.auth_timeout, async {
+                let _ = rx.wait_for(|v| *v).await;
+            });
+            match wait.await {
+                Ok(_) => {}
+                Err(_) => {
+                    tracing::warn!(
+                        session_id = %ctx.session_id,
+                        timeout_secs = self.auth_timeout.as_secs(),
+                        "resolve_media auth wait timed out"
+                    );
+                }
+            }
         }
+        let authenticated = self.state.lock().await.authenticated;
+        tracing::info!(
+            session_id = %ctx.session_id,
+            authenticated,
+            waited_ms = auth_started.elapsed().as_millis() as u64,
+            "auth gate passed"
+        );
 
         let custom_data = request
             .custom_data
@@ -200,6 +235,11 @@ impl AppSession for ViaplaySession {
         if play_url.is_empty() {
             return Err(MediaResolveError::invalid_request("NO_PLAY_URL"));
         }
+        tracing::info!(
+            session_id = %ctx.session_id,
+            play_url = %play_url,
+            "fetching viaplay stream"
+        );
 
         let stream_info = self
             .api
@@ -247,6 +287,16 @@ impl AppSession for ViaplaySession {
         }
 
         self.state.lock().await.stream_type = resolved_stream_type;
+
+        tracing::info!(
+            session_id = %ctx.session_id,
+            stream_url = %stream_info.url,
+            stream_type = ?resolved_stream_type,
+            duration = ?duration,
+            has_drm = stream_info.drm_license_url.is_some(),
+            fallbacks = stream_info.fallback_urls.len(),
+            "viaplay stream resolved"
+        );
 
         Ok(PlaybackMedia {
             session_id: ctx.session_id.clone(),
@@ -596,14 +646,17 @@ async fn mark_authenticated(
     first_name: &str,
     last_name: &str,
 ) {
-    let mut guard = state.lock().await;
-    guard.authenticated = true;
-    let name = format!("{first_name} {last_name}").trim().to_string();
-    if !name.is_empty() {
-        guard.user_display_name = name;
-    }
-    drop(guard);
+    let user_id = {
+        let mut guard = state.lock().await;
+        guard.authenticated = true;
+        let name = format!("{first_name} {last_name}").trim().to_string();
+        if !name.is_empty() {
+            guard.user_display_name = name;
+        }
+        guard.user_id.clone()
+    };
     let _ = auth_tx.send(true);
+    tracing::info!(user_id = %user_id, "authenticated");
 }
 
 async fn send_session_ok(state: &Arc<Mutex<ViaplayState>>, ctx: &AppContext) {
@@ -829,7 +882,7 @@ mod tests {
         let config = ViaplayApiConfig {
             device_code_fallback: format!("{}/api/device/code", server.uri()),
         };
-        let (auth_tx, _) = watch::channel(authenticated);
+        let (auth_tx, auth_rx) = watch::channel(authenticated);
         ViaplaySession {
             api: ViaplayApi::with_config(
                 reqwest::Client::new(),
@@ -844,6 +897,7 @@ mod tests {
                 ..Default::default()
             })),
             auth_tx,
+            _auth_rx: auth_rx,
             cancel: Mutex::new(CancellationToken::new()),
             auth_timeout: Duration::from_millis(50),
         }

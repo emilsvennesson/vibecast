@@ -191,6 +191,7 @@ async fn dispatch(
 
     match message.namespace.as_str() {
         ns::DEVICE_AUTH => {
+            tracing::debug!(peer = %handle.peer, "device auth challenge");
             let Some(payload) = device_auth_response(&message, auth) else {
                 return true;
             };
@@ -219,13 +220,23 @@ async fn dispatch(
             }
             true
         }
-        _ => events
-            .send(ServerEvent::Message {
-                handle: handle.clone(),
-                message,
-            })
-            .await
-            .is_ok(),
+        _ => {
+            tracing::debug!(
+                peer = %handle.peer,
+                ns = %message.namespace,
+                src = %message.source_id,
+                dst = %message.destination_id,
+                r#type = %message_type(&message),
+                "message"
+            );
+            events
+                .send(ServerEvent::Message {
+                    handle: handle.clone(),
+                    message,
+                })
+                .await
+                .is_ok()
+        }
     }
 }
 
@@ -274,4 +285,26 @@ fn is_ping(message: &CastMessage) -> bool {
             .payload_utf8
             .as_deref()
             .is_some_and(|payload| payload.contains("\"PING\""))
+}
+
+/// Extract the JSON `"type"` field from a STRING payload, for concise logging.
+/// Falls back to `"?"` for binary payloads or non-objects.
+fn message_type(message: &CastMessage) -> String {
+    let Some(text) = message.payload_utf8.as_deref() else {
+        return "<binary>".to_string();
+    };
+    // Fast path: regex-free scan for `"type":"..."` / `"type": "..."`.
+    let key = r#""type""#;
+    let Some(start) = text.find(key) else {
+        return "<no-type>".to_string();
+    };
+    let rest = &text[start + key.len()..];
+    // Skip whitespace and a colon.
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix(':').unwrap_or(rest).trim_start();
+    let rest = rest.strip_prefix('"').unwrap_or(rest);
+    match rest.find('"') {
+        Some(end) => rest[..end].to_string(),
+        None => "<malformed>".to_string(),
+    }
 }

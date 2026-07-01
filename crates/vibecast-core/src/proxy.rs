@@ -82,8 +82,11 @@ impl LicenseHandler for SessionProxy {
             return Ok(error_license(404, "unknown license route"));
         };
 
+        let req_bytes = request.body.len();
+        let upstream_url = route.upstream_url.clone();
+        let system = route.system;
         let sdk_request = LicenseRequest {
-            session_id: request.session_id,
+            session_id: request.session_id.clone(),
             body: request.body,
             content_type: request.content_type,
             route_id: Some(route_id.clone()),
@@ -91,17 +94,45 @@ impl LicenseHandler for SessionProxy {
         };
         let sdk_route = SdkLicenseRoute {
             route_id,
-            system: route.system,
-            upstream_url: route.upstream_url.clone(),
+            system,
+            upstream_url: upstream_url.clone(),
             headers: route.headers.clone(),
         };
         let forwarder = DefaultLicenseForwarder {
             http: self.ctx.http.clone(),
         };
+        tracing::info!(
+            session_id = %request.session_id,
+            req_bytes,
+            ?system,
+            upstream = %upstream_url,
+            "license request forwarding"
+        );
+        let started = tokio::time::Instant::now();
         let response = self
             .app
             .resolve_license(&self.ctx, sdk_request, sdk_route, &forwarder)
             .await;
+        match &response {
+            LicenseResponse { status, body, .. } if *status >= 200 && *status < 300 => {
+                tracing::info!(
+                    session_id = %request.session_id,
+                    status = *status,
+                    resp_bytes = body.len(),
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "license response"
+                );
+            }
+            LicenseResponse { status, body, .. } => {
+                tracing::warn!(
+                    session_id = %request.session_id,
+                    status = *status,
+                    resp_bytes = body.len(),
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "license response non-2xx"
+                );
+            }
+        }
         Ok(WireLicenseResponse {
             body: response.body,
             content_type: response.content_type,
@@ -326,16 +357,27 @@ pub(crate) fn collect_routes(
 }
 
 /// Rewrite stream URLs to point at the bridge proxy routes.
+///
+/// `media_session_id` is appended to each manifest proxy URL as a cache-buster
+/// (`?v=...`). Without it, two LOADs against the same session produce identical
+/// proxy URLs (`/manifest/{session}/m0.mpd`), and renderers (browser Shaka,
+/// Kodi InputStream) serve the first stream's cached manifest for every
+/// subsequent stream switch. Bumping the version per load makes each load a
+/// distinct resource so the manifest is always re-fetched.
 pub(crate) fn rewrite_streams(
     media: &mut PlaybackMedia,
     manifest_base: Option<&str>,
     license_base: Option<&str>,
+    media_session_id: i64,
 ) {
     for (index, stream) in media.streams.iter_mut().enumerate() {
         let kind = infer_manifest_kind(Some(&stream.content_type), &stream.url);
         if kind != ManifestKind::Unknown {
             if let Some(base) = manifest_base {
-                stream.url = format!("{base}/m{index}{}", manifest_route_suffix(kind));
+                stream.url = format!(
+                    "{base}/m{index}{}?v={media_session_id}",
+                    manifest_route_suffix(kind)
+                );
             }
         }
         if let Some(drm) = &mut stream.drm {

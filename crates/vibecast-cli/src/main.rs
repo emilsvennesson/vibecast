@@ -146,6 +146,13 @@ async fn run(args: Args) -> anyhow::Result<()> {
             discovery_app_ids.push((*app_id).to_string());
         }
     }
+    tracing::info!(
+        apps = ?providers
+            .iter()
+            .map(|p| (p.app_key(), p.display_name(), p.app_ids()))
+            .collect::<Vec<_>>(),
+        "registered app providers"
+    );
     let known_app_keys: HashSet<&str> = providers.iter().map(|p| p.app_key()).collect();
     for app_key in config.apps.keys() {
         if !known_app_keys.contains(app_key.as_str()) {
