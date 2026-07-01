@@ -1,0 +1,30 @@
+[package]
+name = "vibecast-cli"
+description = "vibecast receiver command-line binary"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "vibecast"
+path = "src/main.rs"
+
+[dependencies]
+vibecast-cast = { path = "../vibecast-cast" }
+vibecast-security = { path = "../vibecast-security" }
+vibecast-discovery = { path = "../vibecast-discovery" }
+vibecast-bridge = { path = "../vibecast-bridge" }
+vibecast-core = { path = "../vibecast-core" }
+vibecast-sdk = { path = "../vibecast-sdk" }
+vibecast-messages = { path = "../vibecast-messages" }
+vibecast-apps-svtplay = { path = "../vibecast-apps-svtplay" }
+
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "signal"] }
+clap = { workspace = true }
+anyhow = { workspace = true }
+reqwest = { workspace = true }
+rustls = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
