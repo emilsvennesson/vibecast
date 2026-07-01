@@ -8,6 +8,7 @@ members = [
     "crates/vibecast-cast",
     "crates/vibecast-discovery",
     "crates/vibecast-messages",
+    "crates/vibecast-bridge",
     "crates/vibecast-core",
 ]
 
@@ -42,6 +43,13 @@ hex = "0.4"
 mdns-sd = "0.20"
 axum = "0.8"
 axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+
+# Player bridge: manifest normalization (mutable XML tree) + URL resolution
+xot = "0.31"
+url = "2"
+
+# Object-safe async trait methods for the renderer/handler/app SDK traits
+async-trait = "0.1"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

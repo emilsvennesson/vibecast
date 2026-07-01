@@ -4,6 +4,17 @@ version = 2
 # Fail on any known advisory. The pure-Rust `rsa` crate (RUSTSEC-2023-0071,
 # Marvin timing attack) is deliberately NOT a dependency — we sign via aws-lc-rs.
 yanked = "deny"
+ignore = [
+    # proc-macro-error (unmaintained; NOT a vulnerability) is pulled in only at
+    # BUILD TIME as a transitive proc-macro dep of the `xot` XML tree library
+    # (xot -> genawaiter -> genawaiter-proc-macro -> proc-macro-error). It is
+    # never linked into the shipped receiver binary and has no upstream fix.
+    # xot is the mutable-DOM crate we use for DASH manifest normalization; the
+    # only alternative is a hand-rolled streaming rewrite that trades this
+    # build-time advisory for substantially more parser code. Revisit if xot
+    # drops genawaiter or a maintained generator crate replaces it.
+    "RUSTSEC-2024-0370",
+]
 
 [bans]
 multiple-versions = "warn"
