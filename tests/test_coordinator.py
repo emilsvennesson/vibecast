@@ -35,6 +35,8 @@ from vibecast.app import (
     MediaResolveFailure,
     MediaResolveFailureCode,
     MediaResolveResult,
+    PlaybackProxy,
+    PlaybackProxyPolicy,
     ReceiverContext,
 )
 from vibecast.player import (
@@ -54,6 +56,11 @@ if TYPE_CHECKING:
     from httpx import AsyncClient
 
 
+_MANIFEST_PROXY_POLICY = PlaybackProxyPolicy(
+    enabled=frozenset({PlaybackProxy.MANIFEST})
+)
+
+
 class FakeApp(AppProvider):
     def __init__(
         self,
@@ -62,11 +69,13 @@ class FakeApp(AppProvider):
         use_forwarder: bool = False,
         raise_on_resolve: bool = False,
         raise_on_license: bool = False,
+        playback_proxy_policy: PlaybackProxyPolicy | None = None,
     ) -> None:
         self._media = media
         self._use_forwarder = use_forwarder
         self._raise_on_resolve = raise_on_resolve
         self._raise_on_license = raise_on_license
+        self._playback_proxy_policy = playback_proxy_policy or PlaybackProxyPolicy()
         self.playback_updates: list[PlaybackState] = []
         self.license_requests: list[LicenseRequest] = []
         self.license_routes: list[LicenseRoute] = []
@@ -86,6 +95,10 @@ class FakeApp(AppProvider):
     @override
     def namespaces(self) -> frozenset[str]:
         return frozenset({"urn:x-cast:test"})
+
+    @override
+    def playback_proxy_policy(self) -> PlaybackProxyPolicy:
+        return self._playback_proxy_policy
 
     @override
     async def on_launch(
@@ -287,7 +300,9 @@ class TestCoordinator:
 
         assert filtered == {"X-Preserved": "ok"}
 
-    async def test_load_registers_license_proxy_and_notifies_player(self) -> None:
+    async def test_load_registers_manifest_and_license_proxy_for_opted_in_app(
+        self,
+    ) -> None:
         media = PlaybackMedia(
             session_id="session-1",
             streams=(
@@ -303,7 +318,7 @@ class TestCoordinator:
             stream_type=StreamType.BUFFERED,
             start_time=5.0,
         )
-        app = FakeApp(media)
+        app = FakeApp(media, playback_proxy_policy=_MANIFEST_PROXY_POLICY)
         player = FakePlayer()
         player_bridge = FakePlayerBridge()
 
@@ -387,6 +402,113 @@ class TestCoordinator:
         assert app.playback_updates[-1].player_state is PlayerState.BUFFERING
 
         _ = sent
+
+    async def test_default_proxy_policy_bypasses_manifest_proxy_but_keeps_license_proxy(
+        self,
+    ) -> None:
+        media = PlaybackMedia(
+            session_id="session-1",
+            streams=(
+                PlaybackStream(
+                    url="https://live.streaming.a2d.tv/asset/21106126.isml/widevine.mpd",
+                    content_type="application/dash+xml",
+                    drm=DrmInfo(
+                        system=DrmSystem.WIDEVINE,
+                        license_url="https://lic.drmtoday.com/license-proxy-widevine/cenc/",
+                    ),
+                ),
+            ),
+            stream_type=StreamType.LIVE,
+        )
+        app = FakeApp(media)
+        player = FakePlayer()
+        player_bridge = FakePlayerBridge()
+
+        coordinator = PlaybackCoordinator(
+            session_id="session-1",
+            transport_id="pid-1",
+            app=app,
+            app_context=_app_context(),
+            player=player,
+            player_bridge=cast("Any", player_bridge),
+            broadcast_fn=lambda _namespace, _data: _noop_async(),
+            send_fn=lambda _c, _s, _n, _d: _noop_async(),
+            initial_volume=Volume(level=1.0, muted=False),
+        )
+
+        await coordinator.handle_media_message(
+            cast("Any", object()),
+            "sender-1",
+            LoadRequest(
+                request_id=1,
+                media=MediaInfo(content_id="x", stream_type=StreamType.LIVE),
+            ),
+        )
+
+        assert player_bridge.manifest_register_calls == []
+        assert player_bridge.register_calls == ["session-1"]
+        assert len(player.load_calls) == 1
+        stream = player.load_calls[0].streams[0]
+        assert (
+            stream.url
+            == "https://live.streaming.a2d.tv/asset/21106126.isml/widevine.mpd"
+        )
+        assert stream.drm is not None
+        assert (
+            stream.drm.license_url == "http://127.0.0.1:8010/license/session-1?route=r0"
+        )
+
+    async def test_manifest_proxy_policy_does_not_disable_license_proxy(self) -> None:
+        media = PlaybackMedia(
+            session_id="session-1",
+            streams=(
+                PlaybackStream(
+                    url="https://cdn.example.com/manifest.mpd",
+                    content_type="application/dash+xml",
+                    drm=DrmInfo(
+                        system=DrmSystem.WIDEVINE,
+                        license_url="https://drm.example.com",
+                        headers={"X-Auth": "token"},
+                    ),
+                ),
+            ),
+            stream_type=StreamType.BUFFERED,
+        )
+        app = FakeApp(media, playback_proxy_policy=_MANIFEST_PROXY_POLICY)
+        player = FakePlayer()
+        player_bridge = FakePlayerBridge()
+
+        coordinator = PlaybackCoordinator(
+            session_id="session-1",
+            transport_id="pid-1",
+            app=app,
+            app_context=_app_context(),
+            player=player,
+            player_bridge=cast("Any", player_bridge),
+            broadcast_fn=lambda _namespace, _data: _noop_async(),
+            send_fn=lambda _c, _s, _n, _d: _noop_async(),
+            initial_volume=Volume(level=1.0, muted=False),
+        )
+
+        await coordinator.handle_media_message(
+            cast("Any", object()),
+            "sender-1",
+            LoadRequest(
+                request_id=1,
+                media=MediaInfo(content_id="x", stream_type=StreamType.BUFFERED),
+            ),
+        )
+
+        assert player_bridge.register_calls == ["session-1"]
+        assert player_bridge.manifest_register_calls == ["session-1"]
+        assert len(player.load_calls) == 1
+        stream = player.load_calls[0].streams[0]
+        assert stream.url == "http://127.0.0.1:8010/manifest/session-1/m0.mpd"
+        assert stream.drm == DrmInfo(
+            system=DrmSystem.WIDEVINE,
+            license_url="http://127.0.0.1:8010/license/session-1?route=r0",
+            headers={},
+        )
 
     async def test_play_pause_seek_stop_and_volume(self) -> None:
         app = FakeApp(
@@ -710,7 +832,7 @@ class TestCoordinator:
             ),
             stream_type=StreamType.LIVE,
         )
-        app = FakeApp(media)
+        app = FakeApp(media, playback_proxy_policy=_MANIFEST_PROXY_POLICY)
 
         raw_manifest = """<?xml version=\"1.0\"?>
 <MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" type=\"dynamic\">

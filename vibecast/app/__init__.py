@@ -64,6 +64,26 @@ class LaunchCredentials:
     credentials_type: str | None = None
 
 
+class PlaybackProxy(StrEnum):
+    """Playback proxy stages an app can opt into."""
+
+    MANIFEST = "manifest"
+
+
+_DEFAULT_PLAYBACK_PROXIES: frozenset[PlaybackProxy] = frozenset()
+
+
+@dataclass(slots=True, frozen=True)
+class PlaybackProxyPolicy:
+    """Playback proxy stages enabled for an app."""
+
+    enabled: frozenset[PlaybackProxy] = _DEFAULT_PLAYBACK_PROXIES
+
+    def enables(self, proxy: PlaybackProxy) -> bool:
+        """Return whether a proxy stage is enabled."""
+        return proxy in self.enabled
+
+
 class MediaResolveFailureCode(StrEnum):
     """Canonical app media-resolution failure reasons."""
 
@@ -320,6 +340,10 @@ class AppProvider(ABC):
 
         _ = config
 
+    def playback_proxy_policy(self) -> PlaybackProxyPolicy:
+        """Return playback proxy stages this app wants the coordinator to use."""
+        return PlaybackProxyPolicy()
+
     @abstractmethod
     async def on_launch(
         self,
@@ -535,6 +559,8 @@ __all__ = [
     "AppHttpStatusError",
     "MediaInfo",
     "MediaMetadata",
+    "PlaybackProxy",
+    "PlaybackProxyPolicy",
     "AppMessageDisposition",
     "AppProvider",
     "AppSessionStateError",
