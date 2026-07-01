@@ -20,6 +20,7 @@ vibecast-sdk = { path = "../vibecast-sdk" }
 vibecast-messages = { path = "../vibecast-messages" }
 vibecast-apps-svtplay = { path = "../vibecast-apps-svtplay" }
 vibecast-apps-tv4play = { path = "../vibecast-apps-tv4play" }
+vibecast-apps-viaplay = { path = "../vibecast-apps-viaplay" }
 
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "signal", "time", "sync"] }
 clap = { workspace = true }

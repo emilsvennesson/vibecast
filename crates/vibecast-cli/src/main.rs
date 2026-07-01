@@ -22,6 +22,7 @@ use tracing_subscriber::EnvFilter;
 
 use vibecast_apps_svtplay::SvtPlay;
 use vibecast_apps_tv4play::Tv4Play;
+use vibecast_apps_viaplay::Viaplay;
 use vibecast_bridge::PlayerBridge;
 use vibecast_cast::{AuthMaterial, CastServer, ServerEvent};
 use vibecast_core::{AppRegistry, DeviceHub, DeviceIdentity, HubConfig, HubEvent};
@@ -79,7 +80,11 @@ struct Args {
 
 /// The compiled-in app providers. Adding an app appends one line here.
 fn apps() -> Vec<Arc<dyn AppProvider>> {
-    vec![Arc::new(SvtPlay::new()), Arc::new(Tv4Play::new())]
+    vec![
+        Arc::new(SvtPlay::new()),
+        Arc::new(Tv4Play::new()),
+        Arc::new(Viaplay::new()),
+    ]
 }
 
 #[tokio::main]
@@ -417,6 +422,7 @@ fn build_http_client(config: &Config) -> anyhow::Result<reqwest::Client> {
     reqwest::Client::builder()
         .user_agent(&config.cast.user_agent)
         .default_headers(headers)
+        .cookie_store(true)
         .timeout(Duration::from_secs_f64(config.network.http_timeout))
         .build()
         .context("building reqwest client")

@@ -12,6 +12,7 @@ members = [
     "crates/vibecast-sdk",
     "crates/vibecast-apps-svtplay",
     "crates/vibecast-apps-tv4play",
+    "crates/vibecast-apps-viaplay",
     "crates/vibecast-core",
     "crates/vibecast-cli",
 ]
@@ -61,7 +62,7 @@ serde_json = "1"
 base64 = "0.22"
 
 # HTTP client for app API calls, CRL, and license/manifest proxy fetches
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip", "cookies"] }
 uuid = { version = "1", features = ["v4"] }
 
 # Async stream/sink combinators (sink feature enables SinkExt + Framed::split)
