@@ -9,6 +9,8 @@ members = [
     "crates/vibecast-discovery",
     "crates/vibecast-messages",
     "crates/vibecast-bridge",
+    "crates/vibecast-sdk",
+    "crates/vibecast-apps-svtplay",
     "crates/vibecast-core",
 ]
 
@@ -56,8 +58,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 
+# HTTP client for app API calls, CRL, and license/manifest proxy fetches
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip"] }
+uuid = { version = "1", features = ["v4"] }
+
 # Async stream/sink combinators (sink feature enables SinkExt + Framed::split)
 futures-util = { version = "0.3", features = ["sink"] }
+
+# Regex for app manifest license-URL extraction
+regex = "1"
 
 # Errors / logging
 thiserror = "2"

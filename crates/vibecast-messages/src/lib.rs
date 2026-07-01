@@ -10,6 +10,7 @@
 pub mod common;
 pub mod connection;
 pub mod discovery;
+pub mod media;
 pub mod multizone;
 pub mod receiver;
 pub mod setup;
@@ -25,6 +26,12 @@ pub use common::{
 };
 pub use connection::{CloseRequest, ConnectRequest, ConnectionMessage, SenderInfo};
 pub use discovery::{DeviceInfoResponse, GetDeviceInfoRequest};
+pub use media::{
+    media_command, ExtendedStatus, LoadFailedResponse, LoadRequest, MediaGetStatusRequest,
+    MediaInvalidRequestResponse, MediaRequest, MediaSetVolumeRequest, MediaStatus,
+    MediaStatusResponse, MediaStopRequest, PauseRequest, PlayRequest, QueueGetItemIdsRequest,
+    QueueItemIdsResponse, QueueLoadRequest, RepeatMode, SeekRequest,
+};
 pub use multizone::{MultizoneGetStatusRequest, MultizoneStatus, MultizoneStatusResponse};
 pub use receiver::{
     AppAvailabilityResponse, GetAppAvailabilityRequest, GetStatusRequest, InvalidRequestResponse,

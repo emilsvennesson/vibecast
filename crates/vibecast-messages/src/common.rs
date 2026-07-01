@@ -257,4 +257,10 @@ pub struct MediaInfo {
     /// Media category.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_category: Option<MediaCategory>,
+    /// Absolute start time for live content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_absolute_time: Option<f64>,
+    /// Whether this is live media.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_live_media: Option<bool>,
 }
