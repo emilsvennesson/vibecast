@@ -199,6 +199,7 @@ class Tv4Play(StatefulAppProvider[_Tv4SessionState]):
             load_request=load_request,
             resolved=resolved,
             custom_data=custom_data,
+            asset_id=asset_id,
         )
 
         state.current_asset_id = asset_id
@@ -320,6 +321,7 @@ def _playback_media_from_resolved(
     load_request: LoadRequest,
     resolved: Tv4ResolvedMedia,
     custom_data: dict[str, Any],
+    asset_id: str,
 ) -> PlaybackMedia:
     playback = resolved.playback
     item = playback.playback_item
@@ -360,7 +362,7 @@ def _playback_media_from_resolved(
             ),
         ),
         stream_type=stream_type,
-        content_id=load_request.media.content_id,
+        content_id=asset_id,
         title=title,
         subtitle=subtitle,
         images=_images(

@@ -217,8 +217,65 @@ async def test_resolve_media_live_uses_manifest_url() -> None:
         media.streams[0].url
         == "https://live.streaming.a2d.tv/content/channels/tv4/dash.mpd"
     )
+    assert media.content_id == "live-asset"
     assert media.title == "TV4"
     assert media.duration == 0
+
+
+async def test_resolve_media_uses_custom_data_asset_id_for_content_id() -> None:
+    app = Tv4Play()
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url == "https://nordic-gateway.tv4.a2d.tv/graphql":
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "media": {
+                            "__typename": "Channel",
+                            "title": "TV4",
+                            "channelType": "STANDARD",
+                            "isDrmProtected": True,
+                            "images": {"logo": {"source": "https://img/logo.svg"}},
+                        }
+                    }
+                },
+                request=request,
+            )
+        if url.startswith("https://playback2.a2d.tv/play/custom-asset?"):
+            return httpx.Response(
+                200,
+                json=_playback_payload(
+                    asset_id="custom-asset",
+                    is_live=True,
+                    state="live",
+                    manifest_url="https://live.streaming.a2d.tv/content/channels/tv4/dash.mpd",
+                ),
+                request=request,
+            )
+        return httpx.Response(404, json={"error": "unexpected"}, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        session = _make_session(client)
+        await app.on_launch(session, LaunchCredentials())
+        state = app.require_state(session)
+        state.tokens = cast("Any", type("Tokens", (), {"access_token": "access-1"})())
+
+        media = await app.resolve_media(
+            session,
+            LoadRequest(
+                request_id=1,
+                media=MediaInfo(
+                    content_id="",
+                    stream_type=StreamType.BUFFERED,
+                    custom_data={"assetId": "custom-asset"},
+                ),
+            ),
+        )
+
+    assert not isinstance(media, MediaResolveFailure)
+    assert media.content_id == "custom-asset"
 
 
 async def test_graphql_422_does_not_block_playback_resolution() -> None:
