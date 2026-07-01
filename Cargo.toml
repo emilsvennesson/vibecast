@@ -7,6 +7,8 @@ members = [
     "crates/vibecast-security",
     "crates/vibecast-cast",
     "crates/vibecast-discovery",
+    "crates/vibecast-messages",
+    "crates/vibecast-core",
 ]
 
 [workspace.package]

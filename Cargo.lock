@@ -1738,6 +1738,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "vibecast-core"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "vibecast-cast",
+ "vibecast-messages",
+ "vibecast-proto",
+ "vibecast-security",
+]
+
+[[package]]
 name = "vibecast-discovery"
 version = "0.1.0"
 dependencies = [
@@ -1757,6 +1774,14 @@ dependencies = [
  "tower",
  "tracing",
  "vibecast-security",
+]
+
+[[package]]
+name = "vibecast-messages"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
