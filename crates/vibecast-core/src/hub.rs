@@ -12,7 +12,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde::Serialize;
+use serde_json::Value;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -27,8 +29,8 @@ use vibecast_messages::{
 };
 use vibecast_proto::CastMessage;
 use vibecast_sdk::{
-    AppContext, AppSession, LaunchCredentials, MediaResolveError, PlaybackMedia, PlaybackState,
-    ReceiverContext,
+    AppContext, AppSession, LaunchCredentials, MediaResolveError, MessageDisposition,
+    NoopSenderChannel, PlaybackMedia, PlaybackState, ReceiverContext, SenderChannel,
 };
 
 use crate::coordinator::{loading_media_info, media_info, Coordinator};
@@ -37,6 +39,37 @@ use crate::proxy::{collect_routes, rewrite_streams, to_payload, SessionProxy};
 use crate::registry::{AppRegistry, ProxyRegistrar};
 
 const RECEIVER_0: &str = "receiver-0";
+
+/// A per-callback [`SenderChannel`] that writes custom-namespace app messages
+/// directly to the relevant connection(s), never through the hub mailbox (which
+/// is what awaits the app callback).
+struct HubSender {
+    transport_id: String,
+    bound: Option<(ConnectionHandle, String)>,
+    subscribers: Vec<ConnectionHandle>,
+}
+
+#[async_trait]
+impl SenderChannel for HubSender {
+    async fn send_custom(&self, namespace: &str, data: Value) {
+        match &self.bound {
+            Some((handle, sender_id)) => {
+                let _ = handle
+                    .send_json(&self.transport_id, sender_id, namespace, &data)
+                    .await;
+            }
+            None => self.broadcast_custom(namespace, data).await,
+        }
+    }
+
+    async fn broadcast_custom(&self, namespace: &str, data: Value) {
+        for handle in &self.subscribers {
+            let _ = handle
+                .send_json(&self.transport_id, "*", namespace, &data)
+                .await;
+        }
+    }
+}
 
 /// An event driving the hub actor.
 pub enum HubEvent {
@@ -307,12 +340,14 @@ impl DeviceHub {
         let data_dir = self.data_dir.join("apps").join(app_key);
         let _ = std::fs::create_dir_all(&data_dir);
 
-        let ctx = AppContext {
-            session_id: session_id.clone(),
-            transport_id: session_id.clone(),
-            app_id: request.app_id.clone(),
-            http: self.http.clone(),
-            receiver: ReceiverContext {
+        // The stored session context carries only data + a no-op sender; the
+        // hub builds a fresh, sender-bound context per callback that can send.
+        let ctx = AppContext::new(
+            session_id.clone(),
+            session_id.clone(),
+            request.app_id.clone(),
+            self.http.clone(),
+            ReceiverContext {
                 friendly_name: self.identity.friendly_name.clone(),
                 device_model: self.identity.device_model.clone(),
                 device_id: self.identity.device_id.clone(),
@@ -322,7 +357,8 @@ impl DeviceHub {
                 display_width: self.display_width,
                 display_height: self.display_height,
             },
-        };
+            Arc::new(NoopSenderChannel),
+        );
 
         let app: Arc<dyn AppSession> = match provider
             .launch(
@@ -383,7 +419,10 @@ impl DeviceHub {
                 .await;
         }
         self.unregister_proxies(session_id);
-        session.app.on_stop(&session.ctx).await;
+        // Build the teardown context while this session's subscribers are still
+        // registered, so on_stop can broadcast a final message.
+        let ctx = self.callback_context(&session, None);
+        session.app.on_stop(&ctx).await;
         self.subscriptions
             .retain(|_, transport| transport != session_id);
     }
@@ -443,11 +482,17 @@ impl DeviceHub {
                 Ok(ConnectionMessage::Connect(_)) => {
                     self.subscriptions
                         .insert((conn_id, source.clone()), transport.clone());
-                    if let Some(session) = self.sessions.get(&transport) {
-                        let response = session.coordinator.status_response(0);
-                        self.send_to(conn_id, &transport, &source, ns::MEDIA, &response)
-                            .await;
-                    }
+                    let (app, ctx, response) = match self.sessions.get(&transport) {
+                        Some(session) => (
+                            session.app.clone(),
+                            self.callback_context(session, Some((conn_id, source.clone()))),
+                            session.coordinator.status_response(0),
+                        ),
+                        None => return,
+                    };
+                    self.send_to(conn_id, &transport, &source, ns::MEDIA, &response)
+                        .await;
+                    app.on_sender_connected(&ctx, &source).await;
                 }
                 _ => {
                     self.subscriptions.remove(&(conn_id, source));
@@ -457,7 +502,20 @@ impl DeviceHub {
                 self.handle_media(conn_id, &transport, &source, payload)
                     .await
             }
-            other => tracing::debug!(namespace = %other, "unhandled app namespace"),
+            other => {
+                let (app, ctx) = match self.sessions.get(&transport) {
+                    Some(session) => (
+                        session.app.clone(),
+                        self.callback_context(session, Some((conn_id, source.clone()))),
+                    ),
+                    None => return,
+                };
+                let namespace = other.to_string();
+                if app.on_message(&ctx, &namespace, &payload).await == MessageDisposition::Unhandled
+                {
+                    tracing::debug!(namespace = %namespace, "app left message unhandled");
+                }
+            }
         }
     }
 
@@ -734,9 +792,13 @@ impl DeviceHub {
         if !has_manifest && !has_license {
             return media;
         }
+        let Some(session) = self.sessions.get(session_id) else {
+            return media;
+        };
         let proxy = Arc::new(SessionProxy::new(
-            self.http.clone(),
             app_key.to_string(),
+            session.app.clone(),
+            self.callback_context(session, None),
             manifest_routes,
             license_routes,
         ));
@@ -870,18 +932,64 @@ impl DeviceHub {
 
     // -- helpers ------------------------------------------------------------
 
+    /// Current connection handles subscribed to a transport (for broadcasts).
+    fn subscriber_handles(&self, transport: &str) -> Vec<ConnectionHandle> {
+        let connection_ids: HashSet<u64> = self
+            .subscriptions
+            .iter()
+            .filter(|(_, target)| target.as_str() == transport)
+            .map(|((conn, _), _)| *conn)
+            .collect();
+        connection_ids
+            .iter()
+            .filter_map(|id| self.connections.get(id).cloned())
+            .collect()
+    }
+
+    /// Build a per-callback app context whose custom-message sender writes to
+    /// the bound sender (if any) or broadcasts to the transport's subscribers.
+    fn callback_context(&self, session: &Session, bound: Option<(u64, String)>) -> AppContext {
+        let transport_id = session.ctx.transport_id.clone();
+        let subscribers = self.subscriber_handles(&transport_id);
+        let bound = bound.and_then(|(conn_id, sender_id)| {
+            self.connections
+                .get(&conn_id)
+                .map(|handle| (handle.clone(), sender_id))
+        });
+        let sender = Arc::new(HubSender {
+            transport_id: transport_id.clone(),
+            bound,
+            subscribers,
+        });
+        AppContext::new(
+            session.ctx.session_id.clone(),
+            transport_id,
+            session.ctx.app_id.clone(),
+            session.ctx.http.clone(),
+            session.ctx.receiver.clone(),
+            sender,
+        )
+    }
+
     async fn notify_app(&self, session_id: &str) {
-        let Some(session) = self.sessions.get(session_id) else {
-            return;
+        let (app, ctx, state) = match self.sessions.get(session_id) {
+            Some(session) => {
+                let coordinator = &session.coordinator;
+                let state = PlaybackState {
+                    player_state: coordinator.player_state,
+                    current_time: coordinator.current_time,
+                    duration: coordinator.current_media.as_ref().and_then(|m| m.duration),
+                    idle_reason: coordinator.idle_reason,
+                };
+                (
+                    session.app.clone(),
+                    self.callback_context(session, None),
+                    state,
+                )
+            }
+            None => return,
         };
-        let coordinator = &session.coordinator;
-        let state = PlaybackState {
-            player_state: coordinator.player_state,
-            current_time: coordinator.current_time,
-            duration: coordinator.current_media.as_ref().and_then(|m| m.duration),
-            idle_reason: coordinator.idle_reason,
-        };
-        session.app.on_playback_update(&session.ctx, state).await;
+        app.on_playback_update(&ctx, state).await;
     }
 
     fn unregister_proxies(&self, session_id: &str) {

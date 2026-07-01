@@ -12,10 +12,12 @@
 
 mod context;
 mod error;
+mod license;
 mod types;
 
-pub use context::{AppContext, ReceiverContext};
+pub use context::{AppContext, NoopSenderChannel, ReceiverContext, SenderChannel};
 pub use error::{LaunchError, MediaResolveCode, MediaResolveError};
+pub use license::{LicenseForwarder, LicenseRequest, LicenseResponse, LicenseRoute};
 pub use types::{
     DrmInfo, DrmSystem, LaunchCredentials, PlaybackMedia, PlaybackState, PlaybackStream,
 };
@@ -26,6 +28,16 @@ pub use vibecast_messages::{
 };
 
 use async_trait::async_trait;
+use serde_json::Value;
+
+/// Outcome of an app custom-namespace message handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageDisposition {
+    /// The app consumed the message.
+    Handled,
+    /// The app did not handle the message.
+    Unhandled,
+}
 
 /// A Cast app: a factory that launches owned [`AppSession`]s.
 #[async_trait]
@@ -66,6 +78,31 @@ pub trait AppSession: Send + Sync {
         ctx: &AppContext,
         request: &LoadRequest,
     ) -> Result<PlaybackMedia, MediaResolveError>;
+
+    /// Handle a custom-namespace message (namespaces other than media).
+    async fn on_message(
+        &self,
+        _ctx: &AppContext,
+        _namespace: &str,
+        _data: &Value,
+    ) -> MessageDisposition {
+        MessageDisposition::Unhandled
+    }
+
+    /// Called when a sender connects to this app transport.
+    async fn on_sender_connected(&self, _ctx: &AppContext, _sender_id: &str) {}
+
+    /// Resolve a proxied DRM license request. The default forwards it unchanged;
+    /// override to transform the challenge/response (e.g. Prime Video).
+    async fn resolve_license(
+        &self,
+        _ctx: &AppContext,
+        request: LicenseRequest,
+        route: LicenseRoute,
+        forward: &dyn LicenseForwarder,
+    ) -> LicenseResponse {
+        forward.forward(request, route).await
+    }
 
     /// Called when canonical playback state changes.
     async fn on_playback_update(&self, _ctx: &AppContext, _state: PlaybackState) {}

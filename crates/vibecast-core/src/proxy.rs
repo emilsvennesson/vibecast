@@ -3,10 +3,14 @@
 //! Ports `PlaybackCoordinator.handle_license` / `handle_manifest` and the
 //! stream URL rewriting. Registered with the player bridge under the session
 //! id, it runs inside the bridge's HTTP handler tasks (not the hub actor), so
-//! its upstream fetches never block message routing. The route maps are fixed
-//! for one LOAD; a new LOAD registers a fresh handler.
+//! its upstream fetches never block message routing.
+//!
+//! License requests are dispatched to the app session's `resolve_license`,
+//! which by default forwards them via [`DefaultLicenseForwarder`]; apps like
+//! Prime Video override it for custom DRM handling.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use vibecast_bridge::headers::{
@@ -14,14 +18,19 @@ use vibecast_bridge::headers::{
 };
 use vibecast_bridge::{
     default_manifest_content_type, infer_manifest_kind, manifest_route_suffix,
-    normalize_manifest_bytes, DrmPayload, DrmSystem, LicenseHandler, LicenseRequest,
-    LicenseResponse, ManifestHandler, ManifestKind, ManifestProxyRequest, ManifestProxyResponse,
-    PlaybackMediaPayload, PlaybackStreamPayload, ProxyResult,
+    normalize_manifest_bytes, DrmPayload, DrmSystem as WireDrmSystem, LicenseHandler,
+    LicenseRequest as WireLicenseRequest, LicenseResponse as WireLicenseResponse, ManifestHandler,
+    ManifestKind, ManifestProxyRequest, ManifestProxyResponse, PlaybackMediaPayload,
+    PlaybackStreamPayload, ProxyResult,
 };
-use vibecast_sdk::PlaybackMedia;
+use vibecast_sdk::{
+    AppContext, AppSession, DrmSystem, LicenseForwarder, LicenseRequest, LicenseResponse,
+    LicenseRoute as SdkLicenseRoute, PlaybackMedia,
+};
 
 /// A resolved DRM license target.
 pub(crate) struct LicenseRoute {
+    pub system: DrmSystem,
     pub upstream_url: String,
     pub headers: HashMap<String, String>,
 }
@@ -35,89 +44,69 @@ pub(crate) struct ManifestRoute {
 
 /// Session-scoped proxy handler backing the bridge's license/manifest routes.
 pub(crate) struct SessionProxy {
-    http: reqwest::Client,
     app_key: String,
+    app: Arc<dyn AppSession>,
+    ctx: AppContext,
     license_routes: HashMap<String, LicenseRoute>,
     manifest_routes: HashMap<String, ManifestRoute>,
 }
 
 impl SessionProxy {
     pub(crate) fn new(
-        http: reqwest::Client,
         app_key: String,
+        app: Arc<dyn AppSession>,
+        ctx: AppContext,
         manifest_routes: HashMap<String, ManifestRoute>,
         license_routes: HashMap<String, LicenseRoute>,
     ) -> Self {
         Self {
-            http,
             app_key,
+            app,
+            ctx,
             license_routes,
             manifest_routes,
         }
-    }
-
-    async fn forward_license(
-        &self,
-        route: &LicenseRoute,
-        request: &LicenseRequest,
-    ) -> Result<LicenseResponse, reqwest::Error> {
-        // Route headers take precedence; add non-hop-by-hop request headers.
-        let mut headers = route.headers.clone();
-        let mut names: HashSet<String> = headers.keys().map(|k| k.to_ascii_lowercase()).collect();
-        for (key, value) in &request.headers {
-            let lowered = key.to_ascii_lowercase();
-            if HOP_BY_HOP_REQUEST_HEADERS.contains(&lowered.as_str()) {
-                continue;
-            }
-            if !names.contains(&lowered) {
-                headers.insert(key.clone(), value.clone());
-                names.insert(lowered);
-            }
-        }
-        if !request.content_type.is_empty() {
-            headers.insert("Content-Type".to_string(), request.content_type.clone());
-        }
-
-        let mut builder = self
-            .http
-            .post(&route.upstream_url)
-            .body(request.body.clone());
-        for (key, value) in &headers {
-            builder = builder.header(key, value);
-        }
-        let response = builder.send().await?;
-        let status = response.status().as_u16();
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("application/octet-stream")
-            .to_string();
-        let body = response.bytes().await?.to_vec();
-        Ok(LicenseResponse {
-            body,
-            content_type,
-            status,
-        })
     }
 }
 
 #[async_trait]
 impl LicenseHandler for SessionProxy {
-    async fn handle_license(&self, request: LicenseRequest) -> ProxyResult<LicenseResponse> {
+    async fn handle_license(
+        &self,
+        request: WireLicenseRequest,
+    ) -> ProxyResult<WireLicenseResponse> {
         let Some(route_id) = request.route_id.clone() else {
             return Ok(error_license(400, "missing license route"));
         };
         let Some(route) = self.license_routes.get(&route_id) else {
             return Ok(error_license(404, "unknown license route"));
         };
-        match self.forward_license(route, &request).await {
-            Ok(response) => Ok(response),
-            Err(error) => {
-                tracing::warn!(%error, route = %route_id, "license forward failed");
-                Ok(error_license(502, "app license resolution failed"))
-            }
-        }
+
+        let sdk_request = LicenseRequest {
+            session_id: request.session_id,
+            body: request.body,
+            content_type: request.content_type,
+            route_id: Some(route_id.clone()),
+            headers: request.headers,
+        };
+        let sdk_route = SdkLicenseRoute {
+            route_id,
+            system: route.system,
+            upstream_url: route.upstream_url.clone(),
+            headers: route.headers.clone(),
+        };
+        let forwarder = DefaultLicenseForwarder {
+            http: self.ctx.http.clone(),
+        };
+        let response = self
+            .app
+            .resolve_license(&self.ctx, sdk_request, sdk_route, &forwarder)
+            .await;
+        Ok(WireLicenseResponse {
+            body: response.body,
+            content_type: response.content_type,
+            status: response.status,
+        })
     }
 }
 
@@ -139,7 +128,7 @@ impl ManifestHandler for SessionProxy {
             reqwest::Method::GET
         };
 
-        let mut builder = self.http.request(method, &route.upstream_url);
+        let mut builder = self.ctx.http.request(method, &route.upstream_url);
         for (key, value) in &headers {
             builder = builder.header(key, value);
         }
@@ -203,8 +192,77 @@ impl ManifestHandler for SessionProxy {
     }
 }
 
-fn error_license(status: u16, message: &str) -> LicenseResponse {
-    LicenseResponse {
+/// The default license behavior: merge headers and POST to the upstream URL.
+struct DefaultLicenseForwarder {
+    http: reqwest::Client,
+}
+
+impl DefaultLicenseForwarder {
+    async fn post(
+        &self,
+        request: &LicenseRequest,
+        route: &SdkLicenseRoute,
+    ) -> Result<LicenseResponse, reqwest::Error> {
+        // Route headers take precedence; add non-hop-by-hop request headers.
+        let mut headers = route.headers.clone();
+        let mut names: HashSet<String> = headers.keys().map(|k| k.to_ascii_lowercase()).collect();
+        for (key, value) in &request.headers {
+            let lowered = key.to_ascii_lowercase();
+            if HOP_BY_HOP_REQUEST_HEADERS.contains(&lowered.as_str()) {
+                continue;
+            }
+            if !names.contains(&lowered) {
+                headers.insert(key.clone(), value.clone());
+                names.insert(lowered);
+            }
+        }
+        if !request.content_type.is_empty() {
+            headers.insert("Content-Type".to_string(), request.content_type.clone());
+        }
+
+        let mut builder = self
+            .http
+            .post(&route.upstream_url)
+            .body(request.body.clone());
+        for (key, value) in &headers {
+            builder = builder.header(key, value);
+        }
+        let response = builder.send().await?;
+        let status = response.status().as_u16();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let body = response.bytes().await?.to_vec();
+        Ok(LicenseResponse {
+            body,
+            content_type,
+            status,
+        })
+    }
+}
+
+#[async_trait]
+impl LicenseForwarder for DefaultLicenseForwarder {
+    async fn forward(&self, request: LicenseRequest, route: SdkLicenseRoute) -> LicenseResponse {
+        match self.post(&request, &route).await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(%error, route = %route.upstream_url, "license forward failed");
+                LicenseResponse {
+                    body: b"app license resolution failed".to_vec(),
+                    content_type: "application/octet-stream".to_string(),
+                    status: 502,
+                }
+            }
+        }
+    }
+}
+
+fn error_license(status: u16, message: &str) -> WireLicenseResponse {
+    WireLicenseResponse {
         body: message.as_bytes().to_vec(),
         content_type: "application/octet-stream".to_string(),
         status,
@@ -257,6 +315,7 @@ pub(crate) fn collect_routes(
             license_routes.insert(
                 format!("r{index}"),
                 LicenseRoute {
+                    system: drm.system,
                     upstream_url: drm.license_url.clone(),
                     headers: drm.headers.clone(),
                 },
@@ -299,8 +358,8 @@ pub(crate) fn to_payload(media: &PlaybackMedia) -> PlaybackMediaPayload {
                 content_type: stream.content_type.clone(),
                 drm: stream.drm.as_ref().map(|drm| DrmPayload {
                     system: match drm.system {
-                        vibecast_sdk::DrmSystem::Widevine => DrmSystem::Widevine,
-                        vibecast_sdk::DrmSystem::ClearKey => DrmSystem::ClearKey,
+                        DrmSystem::Widevine => WireDrmSystem::Widevine,
+                        DrmSystem::ClearKey => WireDrmSystem::ClearKey,
                     },
                     license_url: drm.license_url.clone(),
                     headers: drm.headers.clone(),

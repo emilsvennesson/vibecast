@@ -1,6 +1,32 @@
-//! Per-session app context.
+//! Per-session app context and the custom-message sender seam.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use serde_json::Value;
+
+/// Sends custom-namespace messages on behalf of an app callback.
+///
+/// The coordinator supplies a per-callback implementation that writes directly
+/// to the relevant sender connection(s), so it never routes back through the
+/// hub mailbox that is awaiting the callback.
+#[async_trait]
+pub trait SenderChannel: Send + Sync {
+    /// Send to the sender that triggered the callback (broadcasts if unbound).
+    async fn send_custom(&self, namespace: &str, data: Value);
+    /// Broadcast to all senders subscribed to this transport.
+    async fn broadcast_custom(&self, namespace: &str, data: Value);
+}
+
+/// A no-op channel for contexts without a live transport (tests, teardown).
+pub struct NoopSenderChannel;
+
+#[async_trait]
+impl SenderChannel for NoopSenderChannel {
+    async fn send_custom(&self, _namespace: &str, _data: Value) {}
+    async fn broadcast_custom(&self, _namespace: &str, _data: Value) {}
+}
 
 /// Receiver metadata made available to app sessions.
 #[derive(Debug, Clone)]
@@ -46,7 +72,7 @@ impl ReceiverContext {
 }
 
 /// Context passed to app callbacks for one session.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AppContext {
     /// Session id.
     pub session_id: String,
@@ -58,4 +84,38 @@ pub struct AppContext {
     pub http: reqwest::Client,
     /// Receiver metadata.
     pub receiver: ReceiverContext,
+    sender: Arc<dyn SenderChannel>,
+}
+
+impl AppContext {
+    /// Build a context bound to the given custom-message sender channel.
+    #[must_use]
+    pub fn new(
+        session_id: impl Into<String>,
+        transport_id: impl Into<String>,
+        app_id: impl Into<String>,
+        http: reqwest::Client,
+        receiver: ReceiverContext,
+        sender: Arc<dyn SenderChannel>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            transport_id: transport_id.into(),
+            app_id: app_id.into(),
+            http,
+            receiver,
+            sender,
+        }
+    }
+
+    /// Send a custom-namespace message to the sender associated with this
+    /// callback (broadcasts if there is no bound sender).
+    pub async fn send_custom(&self, namespace: &str, data: Value) {
+        self.sender.send_custom(namespace, data).await;
+    }
+
+    /// Broadcast a custom-namespace message to all senders on this transport.
+    pub async fn broadcast_custom(&self, namespace: &str, data: Value) {
+        self.sender.broadcast_custom(namespace, data).await;
+    }
 }

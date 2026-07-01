@@ -178,18 +178,19 @@ mod tests {
     use super::*;
 
     fn context() -> AppContext {
-        AppContext {
-            session_id: "sess-1".into(),
-            transport_id: "pid-1".into(),
-            app_id: "95370A1C".into(),
-            http: reqwest::Client::new(),
-            receiver: ReceiverContext::new(
+        AppContext::new(
+            "sess-1",
+            "pid-1",
+            "95370A1C",
+            reqwest::Client::new(),
+            ReceiverContext::new(
                 "Living Room",
                 "Chromecast",
                 "receiver-device-id",
                 PathBuf::from("/tmp/vibecast-tests/apps/svtplay"),
             ),
-        }
+            std::sync::Arc::new(vibecast_sdk::NoopSenderChannel),
+        )
     }
 
     fn session(server: &MockServer) -> SvtSession {

@@ -16,7 +16,7 @@ use vibecast_messages::{PlayerState, Volume};
 use vibecast_proto::CastCodec;
 use vibecast_sdk::{
     AppContext, AppProvider, AppSession, LaunchCredentials, LaunchError, LoadRequest,
-    MediaResolveError, PlaybackMedia, PlaybackStream, StreamType,
+    MediaResolveError, PlaybackMedia, PlaybackStream, ReceiverContext, StreamType,
 };
 use vibecast_security::CertificateBundle;
 
@@ -89,6 +89,9 @@ impl AppProvider for FakeApp {
     fn app_key(&self) -> &'static str {
         "fake"
     }
+    fn namespaces(&self) -> &'static [&'static str] {
+        &[FAKE_NS]
+    }
     async fn launch(
         &self,
         _ctx: &AppContext,
@@ -97,6 +100,8 @@ impl AppProvider for FakeApp {
         Ok(Box::new(FakeSession))
     }
 }
+
+const FAKE_NS: &str = "urn:x-cast:test.fake";
 
 struct FakeSession;
 
@@ -123,6 +128,22 @@ impl AppSession for FakeSession {
         media.duration = Some(120.0);
         media.start_time = request.current_time;
         Ok(media)
+    }
+
+    async fn on_message(
+        &self,
+        ctx: &AppContext,
+        namespace: &str,
+        data: &Value,
+    ) -> vibecast_sdk::MessageDisposition {
+        if namespace == FAKE_NS {
+            let echo = data.get("type").cloned();
+            ctx.send_custom(namespace, serde_json::json!({"type": "PONG", "echo": echo}))
+                .await;
+            vibecast_sdk::MessageDisposition::Handled
+        } else {
+            vibecast_sdk::MessageDisposition::Unhandled
+        }
     }
 }
 
@@ -425,6 +446,94 @@ async fn receiver_status_lists_running_app() {
     assert_eq!(status["requestId"], 5);
     assert_eq!(status["status"]["applications"][0]["appId"], "APP1");
     assert_eq!(status["status"]["applications"][0]["senderConnected"], true);
+}
+
+#[tokio::test]
+async fn custom_namespace_message_is_handled_and_replies() {
+    let mut harness = setup().await;
+    let client = &mut harness.client;
+    let transport = launch(client).await;
+    send(client, ns::CONNECTION, &transport, r#"{"type":"CONNECT"}"#).await;
+    let _ = next_json(client).await; // connect status
+
+    // A message on the app's custom namespace reaches on_message, which replies
+    // to the sender via ctx.send_custom.
+    send(client, FAKE_NS, &transport, r#"{"type":"PING"}"#).await;
+    let reply = next_json(client).await;
+    assert_eq!(reply["type"], "PONG");
+    assert_eq!(reply["echo"], "PING");
+}
+
+/// An app session whose `resolve_license` reverses the challenge instead of
+/// forwarding (proving the override is used, no network involved).
+struct LicenseSession;
+
+#[async_trait]
+impl AppSession for LicenseSession {
+    async fn resolve_media(
+        &self,
+        _ctx: &AppContext,
+        _request: &LoadRequest,
+    ) -> Result<PlaybackMedia, MediaResolveError> {
+        Err(MediaResolveError::internal("UNUSED"))
+    }
+
+    async fn resolve_license(
+        &self,
+        _ctx: &AppContext,
+        request: vibecast_sdk::LicenseRequest,
+        _route: vibecast_sdk::LicenseRoute,
+        _forward: &dyn vibecast_sdk::LicenseForwarder,
+    ) -> vibecast_sdk::LicenseResponse {
+        let mut body = request.body;
+        body.reverse();
+        vibecast_sdk::LicenseResponse {
+            body,
+            content_type: "application/xprotobuf".into(),
+            status: 200,
+        }
+    }
+}
+
+#[tokio::test]
+async fn app_resolve_license_override_is_used() {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    use vibecast_bridge::{LicenseHandler, LicenseRequest as WireLicenseRequest};
+
+    use crate::proxy::{LicenseRoute, SessionProxy};
+
+    let app: Arc<dyn AppSession> = Arc::new(LicenseSession);
+    let ctx = AppContext::new(
+        "s",
+        "s",
+        "APP1",
+        reqwest::Client::new(),
+        ReceiverContext::new("Living Room", "Chromecast", "dev-1", PathBuf::from("/tmp")),
+        Arc::new(vibecast_sdk::NoopSenderChannel),
+    );
+    let license_routes = HashMap::from([(
+        "r0".to_string(),
+        LicenseRoute {
+            system: vibecast_sdk::DrmSystem::ClearKey,
+            upstream_url: "https://unused.example/license".into(),
+            headers: HashMap::new(),
+        },
+    )]);
+    let proxy = SessionProxy::new("fake".into(), app, ctx, HashMap::new(), license_routes);
+
+    let request = WireLicenseRequest {
+        session_id: "s".into(),
+        body: b"abc".to_vec(),
+        content_type: "application/octet-stream".into(),
+        route_id: Some("r0".into()),
+        headers: HashMap::new(),
+    };
+    let response = proxy.handle_license(request).await.unwrap();
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, b"cba");
+    assert_eq!(response.content_type, "application/xprotobuf");
 }
 
 #[tokio::test]
