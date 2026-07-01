@@ -5,9 +5,10 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from vibecast.apps.primevideo import PrimeVideo
     from vibecast.apps.svtplay import SvtPlay
+    from vibecast.apps.tv4play import Tv4Play
     from vibecast.apps.viaplay import Viaplay
 
-__all__ = ["PrimeVideo", "SvtPlay", "Viaplay"]
+__all__ = ["PrimeVideo", "SvtPlay", "Tv4Play", "Viaplay"]
 
 
 def __getattr__(name: str) -> Any:
@@ -19,6 +20,10 @@ def __getattr__(name: str) -> Any:
         from vibecast.apps.svtplay import SvtPlay
 
         return SvtPlay
+    if name == "Tv4Play":
+        from vibecast.apps.tv4play import Tv4Play
+
+        return Tv4Play
     if name == "Viaplay":
         from vibecast.apps.viaplay import Viaplay
 

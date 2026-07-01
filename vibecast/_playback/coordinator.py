@@ -46,7 +46,7 @@ from vibecast._playback.manifest_proxy import (
     manifest_route_suffix,
     normalize_manifest_bytes,
 )
-from vibecast.app import MediaResolveFailure, MediaResolveFailureCode
+from vibecast.app import MediaResolveFailure, MediaResolveFailureCode, PlaybackProxy
 from vibecast.player import (
     LicenseRequest,
     LicenseResponse,
@@ -694,6 +694,8 @@ class PlaybackCoordinator:
     def _with_manifest_proxy(self, media: PlaybackMedia) -> PlaybackMedia:
         self._unregister_manifest_handler()
         if self._player_bridge is None:
+            return media
+        if not self._app.playback_proxy_policy().enables(PlaybackProxy.MANIFEST):
             return media
 
         rewritten_streams: list[PlaybackStream] = []

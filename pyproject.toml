@@ -17,6 +17,7 @@ dependencies = [
 [project.entry-points."vibecast.apps"]
 primevideo = "vibecast.apps.primevideo:PrimeVideo"
 svtplay = "vibecast.apps.svtplay:SvtPlay"
+tv4play = "vibecast.apps.tv4play:Tv4Play"
 viaplay = "vibecast.apps.viaplay:Viaplay"
 
 [dependency-groups]

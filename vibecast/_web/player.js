@@ -468,9 +468,11 @@
     try {
       const player = await ensurePlayer();
       sendStateReport(command.sessionId, "BUFFERING", null, true);
-      const startTime = Number.isFinite(media.startTime) ? media.startTime : 0;
+      const isLive = media.streamType === "LIVE";
+      const requestedStartTime = Number.isFinite(media.startTime) ? media.startTime : 0;
+      const startTime = isLive && requestedStartTime <= 0 ? undefined : requestedStartTime;
 
-      pushLog("info", "Loading " + streams.length + " stream(s), startTime=" + startTime);
+      pushLog("info", "Loading " + streams.length + " stream(s), startTime=" + (startTime === undefined ? "live-edge" : startTime));
 
       let loaded = false;
       let lastErrorMessage = "No stream candidates could be loaded.";

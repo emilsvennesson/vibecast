@@ -14,6 +14,8 @@ from vibecast.app import (
     MediaResolveFailure,
     MediaResolveFailureCode,
     MediaResolveResult,
+    PlaybackProxy,
+    PlaybackProxyPolicy,
     StatefulAppProvider,
     media_failure_from_exception,
 )
@@ -59,6 +61,9 @@ _DEFAULT_SUPPORTED_CODECS = ("H265", "H264")
 _DEFAULT_DYNAMIC_RANGE_FORMATS = ("None",)
 _DEFAULT_SUPPORTED_FRAME_RATES = ("Standard", "High")
 _DEFAULT_SUPPORTED_SUBTITLE_FORMATS = ("TTMLv2", "DFXP")
+_PLAYBACK_PROXY_POLICY = PlaybackProxyPolicy(
+    enabled=frozenset({PlaybackProxy.MANIFEST})
+)
 
 
 @dataclass(slots=True)
@@ -119,6 +124,10 @@ class PrimeVideo(StatefulAppProvider[_PrimeSessionState]):
     @override
     def app_key(self) -> str:
         return "primevideo"
+
+    @override
+    def playback_proxy_policy(self) -> PlaybackProxyPolicy:
+        return _PLAYBACK_PROXY_POLICY
 
     @override
     def configure(self, config: dict[str, Any]) -> None:

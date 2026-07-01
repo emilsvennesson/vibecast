@@ -13,6 +13,7 @@ from vibecast.app import (
     MediaInfo,
     MediaMetadata,
     MediaResolveFailure,
+    PlaybackProxy,
     ReceiverContext,
 )
 from vibecast.apps.primevideo._api import PrimeCatalogMetadata, PrimeVideoAPI
@@ -53,6 +54,7 @@ def test_app_metadata() -> None:
     assert app.app_ids() == frozenset({"17608BC8"})
     assert app.display_name() == "Prime Video"
     assert app.namespaces() == frozenset({_NS_PRIME})
+    assert app.playback_proxy_policy().enables(PlaybackProxy.MANIFEST)
 
 
 async def test_resolve_media_uses_preload_stream_data() -> None:
