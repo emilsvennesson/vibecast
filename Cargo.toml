@@ -2,7 +2,12 @@
 # Coexists with the Python tree during migration; Python cutover is the final phase.
 [workspace]
 resolver = "2"
-members = ["crates/vibecast-proto", "crates/vibecast-security", "crates/vibecast-cast"]
+members = [
+    "crates/vibecast-proto",
+    "crates/vibecast-security",
+    "crates/vibecast-cast",
+    "crates/vibecast-discovery",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -28,7 +33,13 @@ rustls-pki-types = { version = "1", features = ["std"] }
 x509-parser = "0.16"
 arc-swap = "1"
 md-5 = "0.10"
+sha2 = "0.10"
 hex = "0.4"
+
+# Discovery: mDNS advertisement + eureka HTTP/HTTPS
+mdns-sd = "0.20"
+axum = "0.8"
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -46,6 +57,7 @@ tracing = "0.1"
 # Dev / test
 proptest = "1"
 rcgen = "0.13"
+tower = "0.5"
 
 [profile.release]
 strip = true

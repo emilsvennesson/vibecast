@@ -4,6 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use md5::{Digest, Md5};
 
+use crate::error::SecurityError;
+
 /// Current wall-clock time as whole seconds since the Unix epoch.
 pub(crate) fn now_unix() -> i64 {
     SystemTime::now()
@@ -57,6 +59,19 @@ impl CertificateBundle {
     #[must_use]
     pub fn cert_digest_md5(&self) -> String {
         hex::encode(Md5::digest(&self.peer_cert_der))
+    }
+
+    /// The device certificate's SubjectPublicKeyInfo in DER, for the eureka
+    /// `public_key` field (base64 of this).
+    pub fn device_public_key_der(&self) -> Result<Vec<u8>, SecurityError> {
+        let (_, cert) =
+            x509_parser::parse_x509_certificate(&self.device_cert_der).map_err(|e| {
+                SecurityError::Cert {
+                    field: "cpu",
+                    reason: e.to_string(),
+                }
+            })?;
+        Ok(cert.public_key().raw.to_vec())
     }
 }
 
