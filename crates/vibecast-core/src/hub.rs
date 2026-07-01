@@ -46,6 +46,8 @@ pub enum HubEvent {
     Report(PlayerReport),
     /// The result of an app's `resolve_media` (internal feedback).
     MediaResolved(MediaResolved),
+    /// Stop all app sessions cleanly, then acknowledge (graceful shutdown).
+    Shutdown(tokio::sync::oneshot::Sender<()>),
 }
 
 /// The (spawned) result of resolving media for one LOAD request.
@@ -172,6 +174,12 @@ impl DeviceHub {
             }
             HubEvent::Report(report) => self.on_report(report).await,
             HubEvent::MediaResolved(resolved) => self.on_media_resolved(resolved).await,
+            HubEvent::Shutdown(ack) => {
+                for session_id in self.sessions.keys().cloned().collect::<Vec<_>>() {
+                    self.stop_session(&session_id).await;
+                }
+                let _ = ack.send(());
+            }
         }
     }
 

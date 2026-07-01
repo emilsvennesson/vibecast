@@ -20,7 +20,7 @@ vibecast-sdk = { path = "../vibecast-sdk" }
 vibecast-messages = { path = "../vibecast-messages" }
 vibecast-apps-svtplay = { path = "../vibecast-apps-svtplay" }
 
-tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "signal"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "signal", "time", "sync"] }
 clap = { workspace = true }
 anyhow = { workspace = true }
 reqwest = { workspace = true }

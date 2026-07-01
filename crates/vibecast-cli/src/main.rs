@@ -38,6 +38,9 @@ const EUREKA_HTTP_PORT: u16 = 8008;
 /// Cast app ids advertised by every receiver (default media / backdrop apps).
 const BASE_APP_IDS: &[&str] = &["CC1AD845", "0F5096E8"];
 
+/// Google endpoint for the Cast device CRL (opaque protobuf blob).
+const CRL_URL: &str = "https://clients3.google.com/cast/chromecast/device/crl";
+
 /// Command-line arguments. Flags override matching `config.toml` values.
 #[derive(Debug, Parser)]
 #[command(name = "vibecast", about = "A native Google Cast receiver")]
@@ -110,10 +113,10 @@ async fn run(args: Args) -> anyhow::Result<()> {
         .bind_host
         .clone()
         .unwrap_or_else(|| config.network.bind_host.clone());
-    let device_id = args
-        .device_id
-        .clone()
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let device_id = match &args.device_id {
+        Some(id) => id.clone(),
+        None => load_or_create_device_id(&data_dir),
+    };
     let local_ip = detect_local_ip(&bind_host);
 
     // --- certificates ---
@@ -144,6 +147,9 @@ async fn run(args: Args) -> anyhow::Result<()> {
 
     // --- shared HTTP client (User-Agent + CAST-DEVICE-CAPABILITIES + timeout) ---
     let http = build_http_client(&config).context("building HTTP client")?;
+
+    // Device-auth CRL: prefer the manifest's embedded CRL, else fetch from Google.
+    let crl = resolve_crl(&http, bundle.crl.clone()).await;
 
     // --- player bridge ---
     let (reports_tx, mut reports_rx) = mpsc::channel(64);
@@ -187,7 +193,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let (events_tx, events_rx) = mpsc::channel(64);
     let auth = AuthMaterial {
         bundle: bundle.clone(),
-        crl: bundle.crl.clone(),
+        crl: crl.clone(),
     };
     let cast_server = Arc::new(CastServer::new(cast_tls, auth, events_tx));
     spawn_server_forward(events_rx, hub_tx.clone());
@@ -250,6 +256,18 @@ async fn run(args: Args) -> anyhow::Result<()> {
     advertisement
         .start()
         .context("starting mDNS advertisement")?;
+    let advertisement = Arc::new(tokio::sync::Mutex::new(advertisement));
+
+    // Certificate-rotation loop: hot-swap TLS (both servers share the resolver),
+    // device-auth material, and the mDNS digest when the active cert expires.
+    spawn_cert_rotation(
+        store,
+        resolver,
+        cast_server.clone(),
+        advertisement.clone(),
+        crl,
+        config.network.cert_rotation_poll,
+    );
 
     tracing::info!(
         name = %friendly_name,
@@ -263,9 +281,81 @@ async fn run(args: Args) -> anyhow::Result<()> {
         .await
         .context("waiting for shutdown signal")?;
     tracing::info!("shutting down");
-    advertisement.stop();
+    advertisement.lock().await.stop();
+    // Tear down app sessions cleanly (app on_stop + proxy unregister) before exit.
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    if hub_tx.send(HubEvent::Shutdown(ack_tx)).await.is_ok() {
+        let _ = tokio::time::timeout(Duration::from_secs(5), ack_rx).await;
+    }
     bridge.stop().await;
     Ok(())
+}
+
+fn spawn_cert_rotation(
+    mut store: CertificateStore,
+    resolver: Arc<CertResolver>,
+    cast_server: Arc<CastServer>,
+    advertisement: Arc<tokio::sync::Mutex<CastAdvertisement>>,
+    startup_crl: Option<Vec<u8>>,
+    poll_seconds: f64,
+) {
+    tokio::spawn(async move {
+        let period = Duration::from_secs_f64(poll_seconds.max(1.0));
+        let mut ticker = tokio::time::interval(period);
+        ticker.tick().await; // consume the immediate first tick
+        loop {
+            ticker.tick().await;
+            let rotated = match store.rotate_if_needed(unix_now()) {
+                Ok(Some(bundle)) => bundle.clone(),
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::error!(%error, "certificate rotation check failed");
+                    continue;
+                }
+            };
+            if let Err(error) = resolver.update(&rotated) {
+                tracing::error!(%error, "failed to hot-swap TLS certificate");
+                continue;
+            }
+            let crl = rotated.crl.clone().or_else(|| startup_crl.clone());
+            cast_server.update_auth(AuthMaterial {
+                bundle: rotated.clone(),
+                crl,
+            });
+            if let Err(error) = advertisement
+                .lock()
+                .await
+                .update_cert_digest(&rotated.cert_digest_md5())
+            {
+                tracing::error!(%error, "failed to update mDNS certificate digest");
+            }
+            tracing::info!("rotated active certificate (TLS + device-auth + mDNS)");
+        }
+    });
+}
+
+/// Load the stable device id from the data dir, generating and persisting one
+/// on first run so senders see the same id across restarts.
+fn load_or_create_device_id(data_dir: &std::path::Path) -> String {
+    let path = data_dir.join("cast_receiver_device_id");
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let trimmed = existing.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    if let Err(error) = std::fs::write(&path, &id) {
+        tracing::warn!(%error, path = %path.display(), "could not persist device id");
+    }
+    id
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn resolve_certs_path(args: &Args, config: &Config, data_dir: &std::path::Path) -> PathBuf {
@@ -326,6 +416,30 @@ fn build_http_client(config: &Config) -> anyhow::Result<reqwest::Client> {
         .timeout(Duration::from_secs_f64(config.network.http_timeout))
         .build()
         .context("building reqwest client")
+}
+
+/// Resolve the device-auth CRL: prefer the manifest's, else fetch from Google.
+/// A fetch failure is non-fatal — most senders authenticate without a CRL.
+async fn resolve_crl(http: &reqwest::Client, manifest_crl: Option<Vec<u8>>) -> Option<Vec<u8>> {
+    if let Some(crl) = manifest_crl {
+        tracing::info!(bytes = crl.len(), "using CRL from manifest");
+        return Some(crl);
+    }
+    match fetch_crl(http).await {
+        Ok(crl) => {
+            tracing::info!(bytes = crl.len(), "fetched Cast CRL");
+            Some(crl)
+        }
+        Err(error) => {
+            tracing::warn!(%error, "CRL fetch failed; continuing without a CRL");
+            None
+        }
+    }
+}
+
+async fn fetch_crl(http: &reqwest::Client) -> anyhow::Result<Vec<u8>> {
+    let response = http.get(CRL_URL).send().await?.error_for_status()?;
+    Ok(response.bytes().await?.to_vec())
 }
 
 fn spawn_server_forward(

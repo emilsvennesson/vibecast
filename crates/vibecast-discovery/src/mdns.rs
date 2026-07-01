@@ -284,6 +284,24 @@ impl CastAdvertisement {
             let _ = daemon.shutdown();
         }
     }
+
+    /// Re-advertise with an updated certificate digest (on cert rotation).
+    ///
+    /// Re-registration goes through a full stop/start so the new TXT is
+    /// re-announced regardless of responder caching. Certificate rotation is
+    /// rare, so the brief re-advertise is acceptable.
+    pub fn update_cert_digest(&mut self, cert_digest: &str) -> Result<(), DiscoveryError> {
+        let digest = cert_digest.to_uppercase();
+        if self.txt.cd == digest {
+            return Ok(());
+        }
+        self.txt.cd = digest;
+        if self.daemons.is_empty() {
+            return Ok(()); // not currently advertising
+        }
+        self.stop();
+        self.start()
+    }
 }
 
 impl Drop for CastAdvertisement {
@@ -306,6 +324,21 @@ mod tests {
         assert!(compute_bs("device-1")
             .bytes()
             .all(|b| b.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn update_cert_digest_updates_txt_when_not_advertising() {
+        let mut advertisement = CastAdvertisement::new(
+            "Living Room",
+            "Chromecast",
+            "dev-id",
+            8009,
+            "abc123",
+            Vec::<String>::new(),
+        );
+        assert_eq!(advertisement.txt().cd, "ABC123");
+        advertisement.update_cert_digest("def456").unwrap();
+        assert_eq!(advertisement.txt().cd, "DEF456");
     }
 
     #[test]
