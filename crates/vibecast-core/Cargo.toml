@@ -10,11 +10,16 @@ publish.workspace = true
 vibecast-proto = { path = "../vibecast-proto" }
 vibecast-cast = { path = "../vibecast-cast" }
 vibecast-messages = { path = "../vibecast-messages" }
+vibecast-bridge = { path = "../vibecast-bridge" }
+vibecast-sdk = { path = "../vibecast-sdk" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+async-trait.workspace = true
+reqwest.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 vibecast-security = { path = "../vibecast-security" }
