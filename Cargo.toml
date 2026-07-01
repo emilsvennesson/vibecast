@@ -11,6 +11,7 @@ members = [
     "crates/vibecast-bridge",
     "crates/vibecast-sdk",
     "crates/vibecast-apps-svtplay",
+    "crates/vibecast-apps-tv4play",
     "crates/vibecast-core",
     "crates/vibecast-cli",
 ]

@@ -694,9 +694,11 @@ impl DeviceHub {
         };
         self.broadcast(transport, ns::MEDIA, &response).await;
 
-        // Phase 2: resolve media off the mailbox and feed the result back.
+        // Phase 2: resolve media off the mailbox and feed the result back. The
+        // context is broadcast-capable so apps can push custom messages while
+        // resolving (e.g. TV4's legacy snapshot).
         let (app, ctx) = match self.sessions.get(transport) {
-            Some(session) => (session.app.clone(), session.ctx.clone()),
+            Some(session) => (session.app.clone(), self.callback_context(session, None)),
             None => return,
         };
         let self_tx = self.self_tx.clone();

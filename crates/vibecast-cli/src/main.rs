@@ -21,6 +21,7 @@ use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 
 use vibecast_apps_svtplay::SvtPlay;
+use vibecast_apps_tv4play::Tv4Play;
 use vibecast_bridge::PlayerBridge;
 use vibecast_cast::{AuthMaterial, CastServer, ServerEvent};
 use vibecast_core::{AppRegistry, DeviceHub, DeviceIdentity, HubConfig, HubEvent};
@@ -78,7 +79,7 @@ struct Args {
 
 /// The compiled-in app providers. Adding an app appends one line here.
 fn apps() -> Vec<Arc<dyn AppProvider>> {
-    vec![Arc::new(SvtPlay::new())]
+    vec![Arc::new(SvtPlay::new()), Arc::new(Tv4Play::new())]
 }
 
 #[tokio::main]
@@ -532,7 +533,9 @@ mod tests {
     }
 
     #[test]
-    fn one_app_is_registered() {
-        assert_eq!(apps().len(), 1);
+    fn apps_are_registered() {
+        let keys: Vec<&str> = apps().iter().map(|app| app.app_key()).collect();
+        assert!(keys.contains(&"svtplay"));
+        assert!(keys.contains(&"tv4play"));
     }
 }
