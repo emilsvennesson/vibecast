@@ -8,6 +8,8 @@ yanked = "deny"
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Intra-workspace path deps have no version req; that's expected, not a wildcard risk.
+allow-wildcard-paths = true
 # Guard against the vulnerable RSA crate sneaking in transitively.
 [[bans.deny]]
 name = "rsa"

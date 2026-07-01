@@ -2,7 +2,7 @@
 # Coexists with the Python tree during migration; Python cutover is the final phase.
 [workspace]
 resolver = "2"
-members = ["crates/vibecast-proto"]
+members = ["crates/vibecast-proto", "crates/vibecast-security", "crates/vibecast-cast"]
 
 [workspace.package]
 version = "0.1.0"
@@ -21,6 +21,23 @@ prost = "0.14"
 prost-build = "0.14"
 protox = "0.9"
 
+# TLS + certificates (device-auth uses static harvested signatures, so no runtime RSA signing)
+rustls = "0.23"
+tokio-rustls = "0.26"
+rustls-pki-types = { version = "1", features = ["std"] }
+x509-parser = "0.16"
+arc-swap = "1"
+md-5 = "0.10"
+hex = "0.4"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+
+# Async stream/sink combinators (sink feature enables SinkExt + Framed::split)
+futures-util = { version = "0.3", features = ["sink"] }
+
 # Errors / logging
 thiserror = "2"
 anyhow = "1"
@@ -28,6 +45,7 @@ tracing = "0.1"
 
 # Dev / test
 proptest = "1"
+rcgen = "0.13"
 
 [profile.release]
 strip = true

@@ -1,0 +1,25 @@
+[package]
+name = "vibecast-cast"
+description = "CastV2 TLS transport: connection handling, device auth, heartbeat, routing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+vibecast-proto = { path = "../vibecast-proto" }
+vibecast-security = { path = "../vibecast-security" }
+tokio.workspace = true
+tokio-util.workspace = true
+tokio-rustls.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+arc-swap.workspace = true
+futures-util.workspace = true
+prost.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
