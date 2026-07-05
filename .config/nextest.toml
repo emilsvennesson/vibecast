@@ -1,0 +1,11 @@
+# cargo-nextest configuration.
+[profile.default]
+fail-fast = true
+
+[profile.ci]
+# In CI, run everything and emit a JUnit report for PR annotations.
+fail-fast = false
+failure-output = "immediate-final"
+
+[profile.ci.junit]
+path = "junit.xml"

@@ -1,0 +1,22 @@
+[package]
+name = "vibecast-proto"
+description = "CastV2 protobuf types and length-prefixed message framing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+prost.workspace = true
+bytes.workspace = true
+tokio-util.workspace = true
+thiserror.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true
+protox.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

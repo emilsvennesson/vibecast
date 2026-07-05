@@ -1,0 +1,51 @@
+# cargo-deny configuration. Run: cargo deny check
+[advisories]
+version = 2
+# Fail on any known advisory. The pure-Rust `rsa` crate (RUSTSEC-2023-0071,
+# Marvin timing attack) is deliberately NOT a dependency — we sign via aws-lc-rs.
+yanked = "deny"
+ignore = [
+    # proc-macro-error (unmaintained; NOT a vulnerability) is pulled in only at
+    # BUILD TIME as a transitive proc-macro dep of the `xot` XML tree library
+    # (xot -> genawaiter -> genawaiter-proc-macro -> proc-macro-error). It is
+    # never linked into the shipped receiver binary and has no upstream fix.
+    # xot is the mutable-DOM crate we use for DASH manifest normalization; the
+    # only alternative is a hand-rolled streaming rewrite that trades this
+    # build-time advisory for substantially more parser code. Revisit if xot
+    # drops genawaiter or a maintained generator crate replaces it.
+    "RUSTSEC-2024-0370",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Intra-workspace path deps have no version req; that's expected, not a wildcard risk.
+allow-wildcard-paths = true
+# Guard against the vulnerable RSA crate sneaking in transitively.
+[[bans.deny]]
+name = "rsa"
+
+[licenses]
+version = 2
+# Our own workspace crates are unpublished (publish = false); don't require a
+# license expression for them.
+private = { ignore = true }
+# Permissive licenses acceptable for a redistributable binary.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+    # webpki-roots ships the Mozilla root-cert bundle (data) under CDLA-Permissive-2.0.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

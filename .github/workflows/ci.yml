@@ -4,44 +4,62 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: astral-sh/setup-uv@v5
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          enable-cache: true
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Install dependencies
-        run: uv sync
-
-      - name: Lint
-        run: uv run ruff check .
-
-      - name: Format
-        run: uv run ruff format --check .
-
-      - name: Type check
-        run: uv run basedpyright
-
-      - name: Dependency check
-        run: uv run deptry .
-
-  test:
+  msrv:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: Swatinem/rust-cache@v2
+      - name: build (declared MSRV)
+        run: cargo build --all-targets --all-features
 
-      - uses: astral-sh/setup-uv@v5
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
         with:
-          enable-cache: true
+          tool: cargo-nextest
+      - name: nextest
+        run: cargo nextest run --all-features --profile ci
+      - name: doctests
+        run: cargo test --doc --all-features
 
-      - name: Install dependencies
-        run: uv sync
-
-      - name: Run tests
-        run: uv run pytest
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: cargo-deny
+        run: cargo deny check

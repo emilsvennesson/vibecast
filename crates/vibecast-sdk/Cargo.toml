@@ -1,0 +1,25 @@
+[package]
+name = "vibecast-sdk"
+description = "Stable app-author SDK for building vibecast Cast applications"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The stable app-author surface. Keep dependencies minimal: app crates depend
+# ONLY on this crate. No transport, TLS, or bridge dependencies leak in.
+[dependencies]
+vibecast-messages = { path = "../vibecast-messages" }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { workspace = true }
+http = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

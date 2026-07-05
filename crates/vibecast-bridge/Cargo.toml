@@ -1,0 +1,29 @@
+[package]
+name = "vibecast-bridge"
+description = "Player bridge: WebSocket/renderer relay and DRM/manifest proxy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+vibecast-messages = { path = "../vibecast-messages" }
+
+tokio = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
+http = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+xot = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tokio-tungstenite = "0.29"
+tower = { workspace = true, features = ["util"] }

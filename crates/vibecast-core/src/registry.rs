@@ -1,0 +1,104 @@
+//! App registry and the proxy-registration seam.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use vibecast_bridge::{LicenseHandler, ManifestHandler, PlayerBridge};
+use vibecast_sdk::AppProvider;
+
+/// A configuration error building an [`AppRegistry`].
+#[derive(Debug, thiserror::Error)]
+pub enum RegistryError {
+    /// Two providers claim the same Cast application id.
+    #[error("duplicate app id {app_id:?} registered by {existing:?} and {duplicate:?}")]
+    DuplicateAppId {
+        /// The conflicting Cast application id.
+        app_id: String,
+        /// Display name of the already-registered provider.
+        existing: String,
+        /// Display name of the provider that tried to re-register it.
+        duplicate: String,
+    },
+}
+
+/// Maps Cast application ids to their providers (explicit registration).
+pub struct AppRegistry {
+    by_id: HashMap<String, Arc<dyn AppProvider>>,
+    all: Vec<Arc<dyn AppProvider>>,
+}
+
+impl AppRegistry {
+    /// Build a registry from an explicit list of providers.
+    ///
+    /// Returns [`RegistryError::DuplicateAppId`] if two providers claim the
+    /// same Cast application id, rather than silently overwriting one — a
+    /// misconfiguration should fail loudly at startup.
+    pub fn new(providers: Vec<Arc<dyn AppProvider>>) -> Result<Self, RegistryError> {
+        let mut by_id: HashMap<String, Arc<dyn AppProvider>> = HashMap::new();
+        for provider in &providers {
+            for app_id in provider.app_ids() {
+                if let Some(existing) = by_id.get(*app_id) {
+                    return Err(RegistryError::DuplicateAppId {
+                        app_id: (*app_id).to_string(),
+                        existing: existing.display_name().to_string(),
+                        duplicate: provider.display_name().to_string(),
+                    });
+                }
+                by_id.insert((*app_id).to_string(), provider.clone());
+            }
+        }
+        Ok(Self {
+            by_id,
+            all: providers,
+        })
+    }
+
+    /// Look up the provider for an app id.
+    #[must_use]
+    pub fn get(&self, app_id: &str) -> Option<Arc<dyn AppProvider>> {
+        self.by_id.get(app_id).cloned()
+    }
+
+    /// All registered providers.
+    #[must_use]
+    pub fn all(&self) -> &[Arc<dyn AppProvider>] {
+        &self.all
+    }
+
+    /// All handled app ids (for mDNS/discovery advertisement).
+    #[must_use]
+    pub fn app_ids(&self) -> Vec<String> {
+        self.by_id.keys().cloned().collect()
+    }
+}
+
+/// Abstraction over the bridge's session-scoped proxy registration, so the hub
+/// can be tested with a fake bridge.
+pub trait ProxyRegistrar: Send + Sync {
+    /// Register a session license handler; returns its proxy URL.
+    fn register_license(&self, session_id: &str, handler: Arc<dyn LicenseHandler>) -> String;
+    /// Unregister a session license handler.
+    fn unregister_license(&self, session_id: &str);
+    /// Register a session manifest handler; returns its proxy URL prefix.
+    fn register_manifest(&self, session_id: &str, handler: Arc<dyn ManifestHandler>) -> String;
+    /// Unregister a session manifest handler.
+    fn unregister_manifest(&self, session_id: &str);
+}
+
+impl ProxyRegistrar for PlayerBridge {
+    fn register_license(&self, session_id: &str, handler: Arc<dyn LicenseHandler>) -> String {
+        self.register_license_handler(session_id.to_string(), handler)
+    }
+
+    fn unregister_license(&self, session_id: &str) {
+        self.unregister_license_handler(session_id);
+    }
+
+    fn register_manifest(&self, session_id: &str, handler: Arc<dyn ManifestHandler>) -> String {
+        self.register_manifest_handler(session_id.to_string(), handler)
+    }
+
+    fn unregister_manifest(&self, session_id: &str) {
+        self.unregister_manifest_handler(session_id);
+    }
+}

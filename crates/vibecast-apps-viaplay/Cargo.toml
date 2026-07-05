@@ -1,0 +1,25 @@
+[package]
+name = "vibecast-apps-viaplay"
+description = "Viaplay Cast application"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+vibecast-sdk = { path = "../vibecast-sdk" }
+
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+std-uritemplate = "2"
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+wiremock = "0.6"

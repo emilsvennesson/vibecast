@@ -31,10 +31,17 @@ executes playback commands, and reports Kodi playback state back to vibecast.
 
 ## vibecast side
 
-Start vibecast so Kodi can reach the player server endpoint, for example:
+Start the vibecast receiver so Kodi can reach the player server endpoint. The
+player bridge is on by default at `:8010` — no separate flag is needed:
 
 ```bash
-uv run python -m vibecast --manifest /path/to/manifest.json --name "Living Room" --player-host 0.0.0.0 --player-port 8010
+cargo run -p vibecast-cli -- --name "Living Room"
+```
+
+or, after `cargo build -p vibecast-cli --release`:
+
+```bash
+./target/release/vibecast --name "Living Room"
 ```
 
 If you run vibecast and Kodi on different machines, ensure firewall/network rules
