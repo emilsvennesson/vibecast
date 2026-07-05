@@ -136,3 +136,87 @@ impl AppContext {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Serialize;
+    use serde_json::{json, Value};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct CapturingChannel {
+        sent: Mutex<Vec<(String, Value)>>,
+        broadcast: Mutex<Vec<(String, Value)>>,
+    }
+
+    #[async_trait]
+    impl SenderChannel for CapturingChannel {
+        async fn send_custom(&self, namespace: &str, data: Value) {
+            self.sent
+                .lock()
+                .expect("sent not poisoned")
+                .push((namespace.to_string(), data));
+        }
+        async fn broadcast_custom(&self, namespace: &str, data: Value) {
+            self.broadcast
+                .lock()
+                .expect("broadcast not poisoned")
+                .push((namespace.to_string(), data));
+        }
+    }
+
+    fn ctx(channel: Arc<CapturingChannel>) -> AppContext {
+        AppContext::new(
+            "s1",
+            "t1",
+            "APP",
+            reqwest::Client::new(),
+            ReceiverContext::new("vibecast", "Model", "device-1", PathBuf::new()),
+            channel,
+        )
+    }
+
+    #[derive(Serialize)]
+    struct StatusMsg {
+        status: &'static str,
+        progress: f64,
+    }
+
+    #[tokio::test]
+    async fn send_custom_forwards_typed_payload_as_json() {
+        let channel = Arc::new(CapturingChannel::default());
+        let ctx = ctx(channel.clone());
+        ctx.send_custom(
+            "urn:test:status",
+            StatusMsg {
+                status: "PLAYING",
+                progress: 0.5,
+            },
+        )
+        .await;
+        let sent = channel.sent.lock().expect("sent not poisoned");
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, "urn:test:status");
+        assert_eq!(sent[0].1, json!({"status":"PLAYING","progress":0.5}));
+    }
+
+    #[tokio::test]
+    async fn broadcast_custom_forwards_typed_payload_as_json() {
+        let channel = Arc::new(CapturingChannel::default());
+        let ctx = ctx(channel.clone());
+        ctx.broadcast_custom(
+            "urn:test:broadcast",
+            StatusMsg {
+                status: "IDLE",
+                progress: 1.0,
+            },
+        )
+        .await;
+        let broadcast = channel.broadcast.lock().expect("broadcast not poisoned");
+        assert_eq!(broadcast.len(), 1);
+        assert_eq!(broadcast[0].0, "urn:test:broadcast");
+        assert_eq!(broadcast[0].1, json!({"status":"IDLE","progress":1.0}));
+        assert!(channel.sent.lock().expect("sent not poisoned").is_empty());
+    }
+}

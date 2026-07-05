@@ -217,4 +217,23 @@ mod tests {
             "CONTENT_UNAVAILABLE"
         );
     }
+
+    #[test]
+    fn display_includes_code_detail_and_message() {
+        let error = MediaResolveError::invalid_request("BAD_ID")
+            .with_message("content id is not a valid URL");
+        let display = error.to_string();
+        assert!(display.starts_with("INVALID_REQUEST (BAD_ID)"), "{display}");
+        assert!(
+            display.ends_with("content id is not a valid URL"),
+            "{display}"
+        );
+    }
+
+    #[test]
+    fn from_http_status_custom_detail_code_is_used() {
+        let error = MediaResolveError::from_http_status(401, Some("TOKEN_EXPIRED".into()));
+        assert_eq!(error.code, MediaResolveCode::AuthRequired);
+        assert_eq!(error.detail_code.as_deref(), Some("TOKEN_EXPIRED"));
+    }
 }

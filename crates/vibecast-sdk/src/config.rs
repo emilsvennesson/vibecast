@@ -103,4 +103,20 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("unknown field"));
     }
+
+    #[test]
+    fn round_trip_preserves_value() {
+        let value = json!({"name":"custom","enabled":false});
+        let config = AppConfig::from_value(value.clone());
+        assert_eq!(config.as_value(), &value);
+    }
+
+    #[test]
+    fn partial_override_uses_typed_defaults() {
+        let parsed: TypedConfig = AppConfig::from_value(json!({"name":"overridden"}))
+            .deserialize()
+            .unwrap();
+        assert_eq!(parsed.name, "overridden");
+        assert!(parsed.enabled); // default preserved
+    }
 }
