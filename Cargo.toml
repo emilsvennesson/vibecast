@@ -13,6 +13,7 @@ members = [
     "crates/vibecast-apps-svtplay",
     "crates/vibecast-apps-tv4play",
     "crates/vibecast-apps-viaplay",
+    "crates/vibecast-apps-primevideo",
     "crates/vibecast-core",
     "crates/vibecast-cli",
 ]

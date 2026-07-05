@@ -31,7 +31,7 @@ pub struct Config {
     pub volume: VolumeConfig,
     /// Cast firmware identity + streaming-API capabilities.
     pub cast: CastConfig,
-    /// Per-app config tables (`[apps.<key>]`), consumed by `AppProvider::configure`.
+    /// Per-app config tables (`[apps.<key>]`), passed to `AppProvider::configure`.
     pub apps: HashMap<String, toml::Table>,
 }
 

@@ -20,6 +20,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 
+use vibecast_apps_primevideo::PrimeVideo;
 use vibecast_apps_svtplay::SvtPlay;
 use vibecast_apps_tv4play::Tv4Play;
 use vibecast_apps_viaplay::Viaplay;
@@ -28,7 +29,7 @@ use vibecast_cast::{AuthMaterial, CastServer, ServerEvent};
 use vibecast_core::{AppRegistry, DeviceHub, DeviceIdentity, HubConfig, HubEvent};
 use vibecast_discovery::{CastAdvertisement, EurekaIdentity, EurekaServer};
 use vibecast_messages::Volume;
-use vibecast_sdk::AppProvider;
+use vibecast_sdk::{AppConfig, AppProvider};
 use vibecast_security::{server_config, CertResolver, CertificateStore};
 
 use crate::config::Config;
@@ -79,12 +80,35 @@ struct Args {
 }
 
 /// The compiled-in app providers. Adding an app appends one line here.
-fn apps() -> Vec<Arc<dyn AppProvider>> {
-    vec![
-        Arc::new(SvtPlay::new()),
-        Arc::new(Tv4Play::new()),
-        Arc::new(Viaplay::new()),
-    ]
+fn apps(config: &Config) -> anyhow::Result<Vec<Arc<dyn AppProvider>>> {
+    let mut providers: Vec<Box<dyn AppProvider>> = vec![
+        Box::new(SvtPlay::new()),
+        Box::new(Tv4Play::new()),
+        Box::new(Viaplay::new()),
+        Box::new(PrimeVideo::new()),
+    ];
+
+    for provider in &mut providers {
+        let app_key = provider.app_key();
+        let app_config = match config.apps.get(app_key) {
+            Some(table) => app_config_from_toml(table)
+                .with_context(|| format!("loading config for app {app_key}"))?,
+            None => AppConfig::empty(),
+        };
+        provider
+            .configure(&app_config)
+            .with_context(|| format!("configuring app {app_key}"))?;
+    }
+
+    Ok(providers
+        .into_iter()
+        .map(Arc::<dyn AppProvider>::from)
+        .collect())
+}
+
+fn app_config_from_toml(table: &toml::Table) -> anyhow::Result<AppConfig> {
+    let value = serde_json::to_value(table).context("serializing app config")?;
+    Ok(AppConfig::from_value(value))
 }
 
 #[tokio::main]
@@ -138,7 +162,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let eureka_tls = server_config(resolver.clone()).context("eureka TLS config")?;
 
     // --- apps ---
-    let providers = apps();
+    let providers = apps(&config).context("configuring app providers")?;
     let mut discovery_app_ids: Vec<String> =
         BASE_APP_IDS.iter().map(|id| (*id).to_string()).collect();
     for provider in &providers {
@@ -550,8 +574,11 @@ mod tests {
 
     #[test]
     fn apps_are_registered() {
-        let keys: Vec<&str> = apps().iter().map(|app| app.app_key()).collect();
+        let providers = apps(&Config::default()).unwrap();
+        let keys: Vec<&str> = providers.iter().map(|app| app.app_key()).collect();
         assert!(keys.contains(&"svtplay"));
         assert!(keys.contains(&"tv4play"));
+        assert!(keys.contains(&"viaplay"));
+        assert!(keys.contains(&"primevideo"));
     }
 }

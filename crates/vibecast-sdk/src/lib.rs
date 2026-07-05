@@ -10,11 +10,13 @@
 
 #![forbid(unsafe_code)]
 
+mod config;
 mod context;
 mod error;
 mod license;
 mod types;
 
+pub use config::{AppConfig, AppConfigError};
 pub use context::{AppContext, NoopSenderChannel, ReceiverContext, SenderChannel};
 pub use error::{LaunchError, MediaResolveCode, MediaResolveError};
 pub use license::{LicenseForwarder, LicenseRequest, LicenseResponse, LicenseRoute};
@@ -59,6 +61,14 @@ pub trait AppProvider: Send + Sync {
     /// Custom namespaces (besides media) this app handles.
     fn namespaces(&self) -> &'static [&'static str] {
         &[]
+    }
+
+    /// Configure this provider before registration.
+    ///
+    /// Hosts call this once with the app-specific config block. The default
+    /// implementation accepts and ignores config so simple apps stay minimal.
+    fn configure(&mut self, _config: &AppConfig) -> Result<(), AppConfigError> {
+        Ok(())
     }
 
     /// Launch a session for one of [`app_ids`](Self::app_ids).
