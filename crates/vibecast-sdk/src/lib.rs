@@ -1,10 +1,9 @@
-//! Stable app-author SDK for vibecast.
+//! App-author SDK for vibecast.
 //!
 //! Implement [`AppProvider`] (a factory) and [`AppSession`] (an owned,
-//! per-launch session) to add a Cast app. `launch` returns a boxed session
-//! that *owns* its state for the session's lifetime — there is no shared
-//! session map to look up, so the "missing session state" error class from the
-//! Python design does not exist here.
+//! per-launch session) to add a Cast app. `launch` returns a shared session
+//! that *owns* its state for the session's lifetime; the runtime holds it
+//! behind an [`Arc`](std::sync::Arc) so callbacks can run off the routing task.
 //!
 //! App crates depend ONLY on this crate.
 
@@ -28,6 +27,12 @@ pub use types::{
 pub use vibecast_messages::{
     IdleReason, LoadRequest, MediaImage, MediaInfo, MediaMetadata, PlayerState, StreamType,
 };
+
+// Re-export the HTTP header types used in the license proxy API so app crates
+// depend only on this crate.
+pub use http::{HeaderMap, HeaderName, HeaderValue};
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -72,11 +77,14 @@ pub trait AppProvider: Send + Sync {
     }
 
     /// Launch a session for one of [`app_ids`](Self::app_ids).
+    ///
+    /// The returned session is shared: the runtime keeps it behind an [`Arc`]
+    /// so per-sender callbacks can run outside the routing task.
     async fn launch(
         &self,
         ctx: &AppContext,
         credentials: LaunchCredentials,
-    ) -> Result<Box<dyn AppSession>, LaunchError>;
+    ) -> Result<Arc<dyn AppSession>, LaunchError>;
 }
 
 /// An owned, running app session.

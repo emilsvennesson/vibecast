@@ -1,9 +1,8 @@
 //! Per-session playback state and MEDIA_STATUS construction.
 //!
-//! Ports the state-tracking parts of `vibecast._playback.coordinator`. The
-//! surrounding IO (sending to senders, driving the renderer, registering
-//! proxies) lives in the hub, which owns the transport registry; this module
-//! owns only the serialized playback state and the status builders.
+//! This module owns only the serialized playback state and the status builders.
+//! The surrounding IO (sending to senders, driving the renderer, registering
+//! proxies) lives in the hub, which owns the transport registry.
 
 use serde_json::Value;
 use vibecast_messages::{

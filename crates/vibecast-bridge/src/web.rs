@@ -1,8 +1,7 @@
 //! Embedded web-player assets.
 //!
-//! Only two files ship with the receiver, so they are compiled in with
-//! `include_str!` rather than pulled from disk at runtime (mirrors the
-//! Python `importlib.resources` loader, minus the filesystem).
+//! Only two files ship with the receiver, so they are compiled into the binary
+//! with `include_str!` rather than read from disk at runtime.
 
 /// The browser renderer HTML page (Shaka Player host).
 pub const PLAYER_HTML: &str = include_str!("../assets/player.html");

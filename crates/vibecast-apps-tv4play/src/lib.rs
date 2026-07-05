@@ -1,17 +1,18 @@
 //! Bundled TV4 Play app.
 //!
-//! Redesign of the Python `apps/tv4play`: the owned [`Tv4Session`] holds its
-//! mutable auth/playback state behind a `tokio::Mutex` (instead of the Python
-//! `_sessions` map), typed serde models replace pydantic, and the legacy
-//! custom-namespace snapshot is broadcast through `AppContext::broadcast_custom`.
+//! The owned [`Tv4Session`] holds its mutable auth/playback state behind a
+//! `tokio::Mutex`, and its custom-namespace snapshot ([`Tv4Message`]) is
+//! broadcast through `AppContext::broadcast_custom`.
 
 #![forbid(unsafe_code)]
 
 mod api;
 mod models;
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 use tokio::sync::Mutex;
 use vibecast_sdk::{
     normalize_stream_type, AppContext, AppProvider, AppSession, DrmInfo, DrmSystem,
@@ -21,7 +22,10 @@ use vibecast_sdk::{
 };
 
 use crate::api::{merged_custom_data, Tv4AuthTokens, Tv4Error, Tv4PlayApi, Tv4ResolvedMedia};
-use crate::models::{Tv4Images, Tv4Media, Tv4PlaybackItem, Tv4PlaybackResponse};
+use crate::models::{
+    Tv4AssetMetadata, Tv4Capabilities, Tv4Images, Tv4Media, Tv4Message, Tv4PlaybackItem,
+    Tv4PlaybackResponse, Tv4Progress, Tv4SeekableRange,
+};
 
 const NS_TV4: &str = "urn:x-cast:avod.chromecast";
 const APP_IDS: &[&str] = &["B6470434"];
@@ -60,8 +64,8 @@ impl AppProvider for Tv4Play {
         &self,
         ctx: &AppContext,
         _credentials: LaunchCredentials,
-    ) -> Result<Box<dyn AppSession>, LaunchError> {
-        Ok(Box::new(Tv4Session {
+    ) -> Result<Arc<dyn AppSession>, LaunchError> {
+        Ok(Arc::new(Tv4Session {
             api: Tv4PlayApi::new(ctx.http.clone()),
             state: Mutex::new(Tv4State::default()),
         }))
@@ -194,16 +198,25 @@ impl Tv4Session {
         let Some((asset_id, media, playback, playback_state)) = snapshot else {
             return;
         };
-        ctx.broadcast_custom(NS_TV4, json!({"type": "assetId", "value": asset_id}))
-            .await;
         ctx.broadcast_custom(
             NS_TV4,
-            json!({"type": "assetMetadata", "value": asset_metadata(&asset_id, &media, playback.as_ref())}),
+            Tv4Message::AssetId {
+                value: asset_id.clone(),
+            },
         )
         .await;
         ctx.broadcast_custom(
             NS_TV4,
-            json!({"type": "playbackCapabilities", "value": capabilities(playback.as_ref())}),
+            Tv4Message::AssetMetadata {
+                value: asset_metadata(&asset_id, &media, playback.as_ref()),
+            },
+        )
+        .await;
+        ctx.broadcast_custom(
+            NS_TV4,
+            Tv4Message::PlaybackCapabilities {
+                value: capabilities(playback.as_ref()),
+            },
         )
         .await;
         broadcast_progress(ctx, &media, playback_state.as_ref()).await;
@@ -221,23 +234,22 @@ async fn broadcast_progress(
         .unwrap_or(0.0)
         .max(0.0);
     let current_time = playback_state.map_or(0.0, |s| s.current_time).max(0.0);
-    let message_type = if media.stream_type == StreamType::Live {
-        "liveProgressData"
-    } else {
-        "progressData"
+    let progress = Tv4Progress {
+        current_time,
+        position: current_time,
+        duration,
+        is_in_ad_break: false,
+        live_seekable_range: Tv4SeekableRange {
+            start: 0.0,
+            end: duration,
+        },
     };
-    ctx.broadcast_custom(
-        NS_TV4,
-        json!({
-            "type": message_type,
-            "currentTime": current_time,
-            "position": current_time,
-            "duration": duration,
-            "isInAdBreak": false,
-            "liveSeekableRange": {"start": 0, "end": duration},
-        }),
-    )
-    .await;
+    let message = if media.stream_type == StreamType::Live {
+        Tv4Message::LiveProgressData(progress)
+    } else {
+        Tv4Message::ProgressData(progress)
+    };
+    ctx.broadcast_custom(NS_TV4, message).await;
 }
 
 fn extract_asset_id(request: &LoadRequest) -> String {
@@ -440,29 +452,29 @@ fn asset_metadata(
     asset_id: &str,
     media: &PlaybackMedia,
     playback: Option<&Tv4PlaybackResponse>,
-) -> Value {
+) -> Tv4AssetMetadata {
     let media_type = playback
         .and_then(|p| p.metadata.as_ref())
         .and_then(|m| m.media_type.clone())
         .unwrap_or_default();
-    json!({
-        "id": asset_id,
-        "title": media.title,
-        "description": media.subtitle,
-        "image": media.images.first().map(|image| image.url.clone()),
-        "type": media_type,
-        "isLive": media.stream_type == StreamType::Live,
-    })
+    Tv4AssetMetadata {
+        id: asset_id.to_string(),
+        title: media.title.clone(),
+        description: media.subtitle.clone(),
+        image: media.images.first().map(|image| image.url.clone()),
+        media_type,
+        is_live: media.stream_type == StreamType::Live,
+    }
 }
 
-fn capabilities(playback: Option<&Tv4PlaybackResponse>) -> Value {
+fn capabilities(playback: Option<&Tv4PlaybackResponse>) -> Tv4Capabilities {
     let capabilities = playback.map(|p| &p.capabilities);
-    json!({
-        "pause": capabilities.is_none_or(|c| c.pause),
-        "seek": capabilities.is_none_or(|c| c.seek),
-        "skip_ads": false,
-        "stream_switch": capabilities.is_some_and(|c| c.stream_switch),
-    })
+    Tv4Capabilities {
+        pause: capabilities.is_none_or(|c| c.pause),
+        seek: capabilities.is_none_or(|c| c.seek),
+        skip_ads: false,
+        stream_switch: capabilities.is_some_and(|c| c.stream_switch),
+    }
 }
 
 fn content_type_for_url(url: &str) -> String {
@@ -828,7 +840,7 @@ mod tests {
                 "position": 42.0,
                 "duration": 120.0,
                 "isInAdBreak": false,
-                "liveSeekableRange": {"start": 0, "end": 120.0},
+                "liveSeekableRange": {"start": 0.0, "end": 120.0},
             })
         );
     }

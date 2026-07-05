@@ -124,6 +124,52 @@ pub struct ViaplayReceiverState {
     pub feature_flags: Value,
 }
 
+/// Outbound Viaplay custom-namespace messages, tagged by `type`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum ViaplayResponse {
+    /// The user must authorize the device via the activation URL / code.
+    #[serde(rename = "AUTHORIZATION_REQUIRED", rename_all = "camelCase")]
+    AuthorizationRequired {
+        /// Activation URL, omitted when unknown.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        authorization_url: Option<String>,
+        /// Full receiver state snapshot.
+        receiver_state: ViaplayReceiverState,
+    },
+    /// A receiver-state update.
+    #[serde(rename = "RECEIVER_STATE", rename_all = "camelCase")]
+    ReceiverState {
+        /// Full receiver state snapshot.
+        receiver_state: ViaplayReceiverState,
+    },
+    /// Authentication succeeded.
+    #[serde(rename = "SESSION_OK", rename_all = "camelCase")]
+    SessionOk {
+        /// Authenticated user id, if known.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        user_id: Option<String>,
+        /// Active profile id, if known.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        profile_id: Option<String>,
+        /// User display name, if known.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        user_display_name: Option<String>,
+        /// Full receiver state snapshot.
+        receiver_state: ViaplayReceiverState,
+    },
+    /// Position / duration progress update.
+    #[serde(rename = "POSDUR", rename_all = "camelCase")]
+    Posdur {
+        /// Current position (whole seconds).
+        position: i64,
+        /// Total duration (whole seconds).
+        duration: i64,
+        /// Full receiver state snapshot.
+        receiver_state: ViaplayReceiverState,
+    },
+}
+
 // ---------------------------------------------------------------------------
 // Viaplay HTTP API response models
 // ---------------------------------------------------------------------------

@@ -1,8 +1,8 @@
 //! TLS server configuration with in-memory, hot-swappable certificates.
 //!
 //! A [`CertResolver`] holds the current [`CertifiedKey`] behind an [`ArcSwap`],
-//! so certificate rotation is a lock-free atomic store with zero downtime — no
-//! temp files, unlike the Python `ssl` module.
+//! so certificate rotation is a lock-free atomic store with zero downtime and
+//! no temp files.
 
 use std::sync::Arc;
 

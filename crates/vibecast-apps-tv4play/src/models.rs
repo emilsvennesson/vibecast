@@ -1,7 +1,7 @@
 //! Typed response models for the TV4 Play HTTP + GraphQL APIs.
 //!
-//! `rename_all = "camelCase"` supplies the field aliases the Python pydantic
-//! models spelled out by hand; unknown fields are ignored by serde.
+//! `rename_all = "camelCase"` maps the wire field names; unknown fields are
+//! ignored by serde.
 
 use serde::{Deserialize, Serialize};
 
@@ -183,6 +183,97 @@ impl Default for Tv4PlaybackCapabilities {
 
 fn default_true() -> bool {
     true
+}
+
+// ---------------------------------------------------------------------------
+// Cast namespace — outbound messages (receiver -> sender)
+// ---------------------------------------------------------------------------
+
+/// Outbound TV4 Play custom-namespace messages, tagged by `type`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum Tv4Message {
+    /// The resolved asset id.
+    #[serde(rename = "assetId")]
+    AssetId {
+        /// Asset id value.
+        value: String,
+    },
+    /// Asset metadata for the loaded content.
+    #[serde(rename = "assetMetadata")]
+    AssetMetadata {
+        /// Metadata payload.
+        value: Tv4AssetMetadata,
+    },
+    /// Playback control capabilities.
+    #[serde(rename = "playbackCapabilities")]
+    PlaybackCapabilities {
+        /// Capabilities payload.
+        value: Tv4Capabilities,
+    },
+    /// On-demand playback progress.
+    #[serde(rename = "progressData")]
+    ProgressData(Tv4Progress),
+    /// Live playback progress.
+    #[serde(rename = "liveProgressData")]
+    LiveProgressData(Tv4Progress),
+}
+
+/// Asset metadata echoed to senders on the TV4 namespace.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tv4AssetMetadata {
+    /// Asset id.
+    pub id: String,
+    /// Display title.
+    pub title: Option<String>,
+    /// Display subtitle / description.
+    pub description: Option<String>,
+    /// Primary artwork URL.
+    pub image: Option<String>,
+    /// Upstream media type string.
+    #[serde(rename = "type")]
+    pub media_type: String,
+    /// Whether the asset is live.
+    pub is_live: bool,
+}
+
+/// Playback control capabilities echoed to senders (snake_case on the wire).
+#[derive(Debug, Clone, Serialize)]
+pub struct Tv4Capabilities {
+    /// Pause is allowed.
+    pub pause: bool,
+    /// Seeking is allowed.
+    pub seek: bool,
+    /// Ad-skip is allowed.
+    pub skip_ads: bool,
+    /// Stream switching is allowed.
+    pub stream_switch: bool,
+}
+
+/// Playback progress payload for `progressData` / `liveProgressData`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tv4Progress {
+    /// Current playback position (seconds).
+    pub current_time: f64,
+    /// Alias of `current_time` retained for sender compatibility.
+    pub position: f64,
+    /// Total duration (seconds).
+    pub duration: f64,
+    /// Whether an ad break is in progress.
+    pub is_in_ad_break: bool,
+    /// Seekable range for the current stream.
+    pub live_seekable_range: Tv4SeekableRange,
+}
+
+/// A seekable time range in seconds.
+#[derive(Debug, Clone, Serialize)]
+pub struct Tv4SeekableRange {
+    /// Range start (seconds).
+    pub start: f64,
+    /// Range end (seconds).
+    pub end: f64,
 }
 
 /// Top-level playback response from `playback2`.

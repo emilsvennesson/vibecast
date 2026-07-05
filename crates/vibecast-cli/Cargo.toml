@@ -24,6 +24,7 @@ vibecast-apps-viaplay = { path = "../vibecast-apps-viaplay" }
 vibecast-apps-primevideo = { path = "../vibecast-apps-primevideo" }
 
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "signal", "time", "sync"] }
+tokio-util = { workspace = true, features = ["rt"] }
 clap = { workspace = true }
 anyhow = { workspace = true }
 reqwest = { workspace = true }

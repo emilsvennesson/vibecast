@@ -5,6 +5,8 @@
 mod api;
 mod models;
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use url::Url;
 use vibecast_sdk::{
@@ -51,8 +53,8 @@ impl AppProvider for SvtPlay {
         &self,
         ctx: &AppContext,
         _credentials: LaunchCredentials,
-    ) -> Result<Box<dyn AppSession>, LaunchError> {
-        Ok(Box::new(SvtSession {
+    ) -> Result<Arc<dyn AppSession>, LaunchError> {
+        Ok(Arc::new(SvtSession {
             api: SvtPlayApi::new(ctx.http.clone()),
         }))
     }

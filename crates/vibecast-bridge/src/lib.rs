@@ -1,11 +1,10 @@
 //! Player bridge: the HTTP/WebSocket seam between the coordinator and external
 //! renderers (browser / Kodi).
 //!
-//! Ports `vibecast._playback` and `vibecast.player`. The bridge serves the
-//! embedded Shaka Player page, relays [`PlayerCommand`]s to renderers over a
-//! WebSocket, forwards [`PlayerReport`]s from the primary renderer back to the
-//! coordinator, and proxies DRM license and DASH/HLS manifest requests (with
-//! normalization) on behalf of the active session.
+//! The bridge serves the embedded Shaka Player page, relays [`PlayerCommand`]s
+//! to renderers over a WebSocket, forwards [`PlayerReport`]s from the primary
+//! renderer back to the coordinator, and proxies DRM license and DASH/HLS
+//! manifest requests (with normalization) on behalf of the active session.
 
 #![forbid(unsafe_code)]
 
@@ -26,6 +25,6 @@ pub use protocol::{
 };
 pub use proxy::{
     LicenseHandler, LicenseRequest, LicenseResponse, ManifestHandler, ManifestProxyRequest,
-    ManifestProxyResponse, ProxyError, ProxyResult,
+    ManifestProxyResponse, ProxyError, ProxyResult, RouteId, RouteIdParseError, RouteKind,
 };
 pub use web::{PLAYER_HTML, PLAYER_JS};

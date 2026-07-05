@@ -1,12 +1,12 @@
 //! The device hub: a single-task actor owning the transport registry,
 //! subscriptions, receiver-0 platform state, and all app sessions.
 //!
-//! Ports `vibecast._runtime.device` + `handlers` + the IO half of the
-//! coordinator. Everything runs in one task fed by [`HubEvent`]s (cast messages,
-//! renderer reports, and internal media-resolution results), preserving the
-//! serialized semantics of the asyncio design without shared-mutable locking.
-//! The one slow operation — `resolve_media` — is spawned and its result fed
-//! back as a [`HubEvent::MediaResolved`], so the mailbox never blocks on it.
+//! The hub task is a fast state machine: it owns all routing state and mutates
+//! it without locks. Anything that can block — `resolve_media` and every app
+//! callback (`on_message`, `on_sender_connected`, `on_playback_update`,
+//! `on_stop`) — runs off the mailbox. `resolve_media` is spawned and its result
+//! fed back internally; the other callbacks run on a per-session ordered task,
+//! so a slow app never stalls Cast routing.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -71,8 +71,10 @@ impl SenderChannel for HubSender {
     }
 }
 
-/// An event driving the hub actor.
-pub enum HubEvent {
+/// An event driving the hub actor. Internal to the crate: external callers use
+/// [`DeviceHubHandle`], so the internal `MediaResolved` feedback variant is
+/// never part of the public API.
+enum HubEvent {
     /// A transport event from the Cast TLS server.
     Server(ServerEvent),
     /// A player report from the renderer bridge.
@@ -84,12 +86,106 @@ pub enum HubEvent {
 }
 
 /// The (spawned) result of resolving media for one LOAD request.
-pub struct MediaResolved {
+struct MediaResolved {
     session_id: String,
     request_id: i64,
     connection_id: u64,
     sender_id: String,
     result: Result<PlaybackMedia, MediaResolveError>,
+}
+
+/// The device hub has shut down and no longer accepts events.
+#[derive(Debug, thiserror::Error)]
+#[error("device hub is closed")]
+pub struct HubClosed;
+
+/// A cheap, cloneable handle for feeding the [`DeviceHub`] typed events.
+///
+/// This is the only way external code drives the hub, so internal scheduling
+/// details (media-resolution feedback, per-session jobs) stay private.
+#[derive(Clone)]
+pub struct DeviceHubHandle {
+    tx: mpsc::Sender<HubEvent>,
+}
+
+impl DeviceHubHandle {
+    /// Deliver a Cast transport event (connect, message, disconnect).
+    ///
+    /// # Errors
+    /// Returns [`HubClosed`] if the hub has stopped.
+    pub async fn send_server_event(&self, event: ServerEvent) -> Result<(), HubClosed> {
+        self.tx
+            .send(HubEvent::Server(event))
+            .await
+            .map_err(|_| HubClosed)
+    }
+
+    /// Deliver a renderer player report.
+    ///
+    /// # Errors
+    /// Returns [`HubClosed`] if the hub has stopped.
+    pub async fn send_player_report(&self, report: PlayerReport) -> Result<(), HubClosed> {
+        self.tx
+            .send(HubEvent::Report(report))
+            .await
+            .map_err(|_| HubClosed)
+    }
+
+    /// Stop all app sessions cleanly and wait for the hub to acknowledge.
+    ///
+    /// Returns once teardown completes or the hub has already stopped.
+    pub async fn shutdown(&self) {
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        if self.tx.send(HubEvent::Shutdown(ack_tx)).await.is_ok() {
+            let _ = ack_rx.await;
+        }
+    }
+}
+
+/// A unit of app-callback work run on a session's dedicated, ordered task so a
+/// slow app (HTTP auth, token exchange, ...) never blocks the hub mailbox. Jobs
+/// for one session run in the order the hub enqueues them.
+enum AppJob {
+    /// A sender connected to the app transport.
+    SenderConnected { ctx: AppContext, sender_id: String },
+    /// A custom-namespace message arrived.
+    Message {
+        ctx: AppContext,
+        namespace: String,
+        data: Value,
+    },
+    /// Canonical playback state changed.
+    PlaybackUpdate {
+        ctx: AppContext,
+        state: PlaybackState,
+    },
+    /// The session is being torn down (final job).
+    Stop { ctx: AppContext },
+}
+
+/// Drive one app session's callbacks in order, off the hub mailbox.
+async fn run_app_session(app: Arc<dyn AppSession>, mut jobs: mpsc::Receiver<AppJob>) {
+    while let Some(job) = jobs.recv().await {
+        match job {
+            AppJob::SenderConnected { ctx, sender_id } => {
+                app.on_sender_connected(&ctx, &sender_id).await;
+            }
+            AppJob::Message {
+                ctx,
+                namespace,
+                data,
+            } => {
+                if app.on_message(&ctx, &namespace, &data).await == MessageDisposition::Unhandled {
+                    tracing::debug!(namespace = %namespace, "app left message unhandled");
+                }
+            }
+            AppJob::PlaybackUpdate { ctx, state } => app.on_playback_update(&ctx, state).await,
+            AppJob::Stop { ctx } => {
+                app.on_stop(&ctx).await;
+                break;
+            }
+        }
+    }
 }
 
 /// A running app session registered as a Cast transport (id == transport id).
@@ -103,6 +199,8 @@ struct Session {
     app: Arc<dyn AppSession>,
     ctx: AppContext,
     coordinator: Coordinator,
+    /// Ordered mailbox for this session's app callbacks (run off the hub task).
+    jobs: mpsc::Sender<AppJob>,
 }
 
 /// Construction parameters for the hub.
@@ -179,17 +277,26 @@ impl DeviceHub {
         }
     }
 
-    /// A sender for feeding [`HubEvent`]s (cast events and renderer reports).
+    /// A handle for feeding the hub Cast transport events and renderer reports.
     #[must_use]
-    pub fn sender(&self) -> mpsc::Sender<HubEvent> {
-        self.self_tx.clone()
+    pub fn handle(&self) -> DeviceHubHandle {
+        DeviceHubHandle {
+            tx: self.self_tx.clone(),
+        }
     }
 
-    /// Run the hub until the event channel closes.
+    /// Run the hub until it is shut down or the event channel closes.
+    ///
+    /// A [`DeviceHubHandle::shutdown`] tears down every session and then stops
+    /// the loop, so the task completes and can be awaited during shutdown.
     pub async fn run(mut self) {
         let mut events = self.events.take().expect("run called once");
         while let Some(event) = events.recv().await {
+            let stop = matches!(event, HubEvent::Shutdown(_));
             self.dispatch(event).await;
+            if stop {
+                break;
+            }
         }
     }
 
@@ -383,7 +490,7 @@ impl DeviceHub {
                     session_id = %session_id,
                     "app launched"
                 );
-                Arc::from(session)
+                session
             }
             Err(error) => {
                 tracing::warn!(%error, app_id = %request.app_id, "app launch failed");
@@ -404,6 +511,11 @@ impl DeviceHub {
         namespaces.sort();
         namespaces.push(ns::MEDIA.to_string());
 
+        // Per-session callback task: app callbacks run here, in order, so a slow
+        // app never blocks the hub mailbox.
+        let (jobs_tx, jobs_rx) = mpsc::channel(32);
+        tokio::spawn(run_app_session(app.clone(), jobs_rx));
+
         let session = Session {
             app_id: request.app_id.clone(),
             app_key: app_key.to_string(),
@@ -414,6 +526,7 @@ impl DeviceHub {
             app,
             ctx,
             coordinator: Coordinator::new(self.volume.clone()),
+            jobs: jobs_tx,
         };
         self.sessions.insert(session_id, session);
 
@@ -435,9 +548,11 @@ impl DeviceHub {
         }
         self.unregister_proxies(session_id);
         // Build the teardown context while this session's subscribers are still
-        // registered, so on_stop can broadcast a final message.
+        // registered, so on_stop can broadcast a final message. Enqueue it as the
+        // session's final job; dropping `session` then closes its task once the
+        // job has drained.
         let ctx = self.callback_context(&session, None);
-        session.app.on_stop(&ctx).await;
+        let _ = session.jobs.send(AppJob::Stop { ctx }).await;
         self.subscriptions
             .retain(|_, transport| transport != session_id);
     }
@@ -497,17 +612,22 @@ impl DeviceHub {
                 Ok(ConnectionMessage::Connect(_)) => {
                     self.subscriptions
                         .insert((conn_id, source.clone()), transport.clone());
-                    let (app, ctx, response) = match self.sessions.get(&transport) {
+                    let (ctx, response, jobs) = match self.sessions.get(&transport) {
                         Some(session) => (
-                            session.app.clone(),
                             self.callback_context(session, Some((conn_id, source.clone()))),
                             session.coordinator.status_response(0),
+                            session.jobs.clone(),
                         ),
                         None => return,
                     };
                     self.send_to(conn_id, &transport, &source, ns::MEDIA, &response)
                         .await;
-                    app.on_sender_connected(&ctx, &source).await;
+                    let _ = jobs
+                        .send(AppJob::SenderConnected {
+                            ctx,
+                            sender_id: source,
+                        })
+                        .await;
                 }
                 _ => {
                     self.subscriptions.remove(&(conn_id, source));
@@ -518,18 +638,20 @@ impl DeviceHub {
                     .await
             }
             other => {
-                let (app, ctx) = match self.sessions.get(&transport) {
+                let (ctx, jobs) = match self.sessions.get(&transport) {
                     Some(session) => (
-                        session.app.clone(),
                         self.callback_context(session, Some((conn_id, source.clone()))),
+                        session.jobs.clone(),
                     ),
                     None => return,
                 };
-                let namespace = other.to_string();
-                if app.on_message(&ctx, &namespace, &payload).await == MessageDisposition::Unhandled
-                {
-                    tracing::debug!(namespace = %namespace, "app left message unhandled");
-                }
+                let _ = jobs
+                    .send(AppJob::Message {
+                        ctx,
+                        namespace: other.to_string(),
+                        data: payload,
+                    })
+                    .await;
             }
         }
     }
@@ -774,17 +896,12 @@ impl DeviceHub {
             return;
         }
 
-        let app_key = self
-            .sessions
-            .get(&session_id)
-            .map(|s| s.app_key.clone())
-            .unwrap_or_default();
         let media_session_id = self
             .sessions
             .get(&session_id)
             .map(|s| s.coordinator.media_session_id)
             .unwrap_or(0);
-        let media = self.attach_proxies(&session_id, &app_key, media_session_id, media);
+        let media = self.attach_proxies(&session_id, media_session_id, media);
 
         tracing::info!(
             session_id = %session_id,
@@ -826,7 +943,6 @@ impl DeviceHub {
     fn attach_proxies(
         &self,
         session_id: &str,
-        app_key: &str,
         media_session_id: i64,
         mut media: PlaybackMedia,
     ) -> PlaybackMedia {
@@ -840,7 +956,6 @@ impl DeviceHub {
             return media;
         };
         let proxy = Arc::new(SessionProxy::new(
-            app_key.to_string(),
             session.app.clone(),
             self.callback_context(session, None),
             manifest_routes,
@@ -1025,7 +1140,7 @@ impl DeviceHub {
     }
 
     async fn notify_app(&self, session_id: &str) {
-        let (app, ctx, state) = match self.sessions.get(session_id) {
+        let (jobs, ctx, state) = match self.sessions.get(session_id) {
             Some(session) => {
                 let coordinator = &session.coordinator;
                 let state = PlaybackState {
@@ -1035,14 +1150,14 @@ impl DeviceHub {
                     idle_reason: coordinator.idle_reason,
                 };
                 (
-                    session.app.clone(),
+                    session.jobs.clone(),
                     self.callback_context(session, None),
                     state,
                 )
             }
             None => return,
         };
-        app.on_playback_update(&ctx, state).await;
+        let _ = jobs.send(AppJob::PlaybackUpdate { ctx, state }).await;
     }
 
     fn unregister_proxies(&self, session_id: &str) {

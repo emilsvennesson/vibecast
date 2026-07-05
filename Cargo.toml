@@ -1,5 +1,5 @@
-# Rust rewrite of vibecast (see /Users/emil/.claude/plans/fizzy-mixing-donut.md).
-# Coexists with the Python tree during migration; Python cutover is the final phase.
+# vibecast: a native Google Cast receiver, organized as a Cargo workspace of
+# focused crates (protocol, transport, discovery, bridge, runtime, apps, CLI).
 [workspace]
 resolver = "2"
 members = [
@@ -44,6 +44,10 @@ arc-swap = "1"
 md-5 = "0.10"
 sha2 = "0.10"
 hex = "0.4"
+
+# Shared HTTP types (HeaderMap/HeaderName/HeaderValue) used on proxy boundaries;
+# unifies with axum + reqwest header types (all built on the `http` crate).
+http = "1"
 
 # Discovery: mDNS advertisement + eureka HTTP/HTTPS
 mdns-sd = "0.20"

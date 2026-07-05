@@ -1,9 +1,12 @@
 //! HTTP header filtering for the playback proxy flows.
 //!
-//! Ports `vibecast._playback.headers`: hop-by-hop headers must not be
-//! forwarded when relaying license/manifest requests and responses.
+//! Hop-by-hop headers must not be forwarded when relaying license/manifest
+//! requests and responses. Operating on [`http::HeaderMap`] (rather than a
+//! `HashMap<String, String>`) preserves duplicate headers, keeps values as
+//! validated [`HeaderValue`]s, and reuses the canonical case-insensitive
+//! [`HeaderName`] comparison instead of ad-hoc lowercasing.
 
-use std::collections::HashMap;
+use http::header::{HeaderMap, HeaderName};
 
 /// Hop-by-hop request headers that must be stripped before forwarding upstream.
 pub const HOP_BY_HOP_REQUEST_HEADERS: &[&str] = &[
@@ -50,57 +53,58 @@ pub const MANIFEST_PROXY_BLOCKED_RESPONSE_HEADERS: &[&str] = &[
 
 /// Drop hop-by-hop request headers before forwarding upstream.
 #[must_use]
-pub fn filter_upstream_headers(headers: &HashMap<String, String>) -> HashMap<String, String> {
+pub fn filter_upstream_headers(headers: &HeaderMap) -> HeaderMap {
     filter(headers, HOP_BY_HOP_REQUEST_HEADERS)
 }
 
 /// Drop blocked and hop-by-hop response headers.
 #[must_use]
-pub fn filter_upstream_response_headers(
-    headers: &HashMap<String, String>,
-) -> HashMap<String, String> {
+pub fn filter_upstream_response_headers(headers: &HeaderMap) -> HeaderMap {
     filter(headers, MANIFEST_PROXY_BLOCKED_RESPONSE_HEADERS)
 }
 
 /// Extract the token list named by any `Connection` header.
 #[must_use]
-pub fn connection_header_tokens(headers: &HashMap<String, String>) -> Vec<String> {
+pub fn connection_header_tokens(headers: &HeaderMap) -> Vec<HeaderName> {
     let mut tokens = Vec::new();
-    for (key, value) in headers {
-        if !key.eq_ignore_ascii_case("connection") {
-            continue;
-        }
+    for value in headers.get_all(http::header::CONNECTION) {
+        let Ok(value) = value.to_str() else { continue };
         for token in value.split(',') {
-            let normalized = token.trim().to_ascii_lowercase();
-            if !normalized.is_empty() {
-                tokens.push(normalized);
+            if let Ok(name) = HeaderName::try_from(token.trim()) {
+                tokens.push(name);
             }
         }
     }
     tokens
 }
 
-fn filter(headers: &HashMap<String, String>, blocked: &[&str]) -> HashMap<String, String> {
+fn filter(headers: &HeaderMap, blocked: &[&str]) -> HeaderMap {
     let connection_tokens = connection_header_tokens(headers);
-    headers
-        .iter()
-        .filter(|(key, _)| {
-            let lowered = key.to_ascii_lowercase();
-            !blocked.contains(&lowered.as_str()) && !connection_tokens.contains(&lowered)
-        })
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect()
+    let mut out = HeaderMap::with_capacity(headers.len());
+    for (name, value) in headers {
+        let name_str = name.as_str();
+        let is_blocked = blocked.contains(&name_str) || connection_tokens.contains(name);
+        if !is_blocked {
+            out.append(name.clone(), value.clone());
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http::header::HeaderValue;
 
-    fn map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-            .collect()
+    fn map(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (name, value) in pairs {
+            headers.append(
+                HeaderName::try_from(*name).unwrap(),
+                HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        headers
     }
 
     #[test]
@@ -115,10 +119,13 @@ mod tests {
         assert!(!filtered.contains_key("Host"));
         assert!(!filtered.contains_key("Content-Length"));
         assert_eq!(
-            filtered.get("Authorization").map(String::as_str),
+            filtered.get("Authorization").and_then(|v| v.to_str().ok()),
             Some("Bearer x")
         );
-        assert_eq!(filtered.get("X-Custom").map(String::as_str), Some("keep"));
+        assert_eq!(
+            filtered.get("X-Custom").and_then(|v| v.to_str().ok()),
+            Some("keep")
+        );
     }
 
     #[test]
@@ -131,7 +138,10 @@ mod tests {
         let filtered = filter_upstream_response_headers(&headers);
         assert!(!filtered.contains_key("Connection"));
         assert!(!filtered.contains_key("X-Remove-Me"));
-        assert_eq!(filtered.get("X-Preserved").map(String::as_str), Some("ok"));
+        assert_eq!(
+            filtered.get("X-Preserved").and_then(|v| v.to_str().ok()),
+            Some("ok")
+        );
     }
 
     #[test]
@@ -157,6 +167,9 @@ mod tests {
                 "{blocked} should be dropped"
             );
         }
-        assert_eq!(filtered.get("X-Preserved").map(String::as_str), Some("ok"));
+        assert_eq!(
+            filtered.get("X-Preserved").and_then(|v| v.to_str().ok()),
+            Some("ok")
+        );
     }
 }

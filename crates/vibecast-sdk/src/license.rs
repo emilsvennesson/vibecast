@@ -6,9 +6,8 @@
 //! [`AppSession::resolve_license`](crate::AppSession::resolve_license) and do
 //! their own HTTP, optionally still calling `forward`.
 
-use std::collections::HashMap;
-
 use async_trait::async_trait;
+use http::HeaderMap;
 
 use crate::DrmSystem;
 
@@ -24,7 +23,7 @@ pub struct LicenseRequest {
     /// Route selector identifying which stream's DRM applies.
     pub route_id: Option<String>,
     /// Filtered request headers.
-    pub headers: HashMap<String, String>,
+    pub headers: HeaderMap,
 }
 
 /// The license response returned to the renderer.
@@ -60,7 +59,7 @@ pub struct LicenseRoute {
     /// Upstream license acquisition URL.
     pub upstream_url: String,
     /// Extra headers to attach when forwarding.
-    pub headers: HashMap<String, String>,
+    pub headers: HeaderMap,
 }
 
 /// Forwards a license request to its upstream URL (the coordinator's default

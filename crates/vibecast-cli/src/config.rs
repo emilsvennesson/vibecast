@@ -1,10 +1,9 @@
 //! Typed TOML configuration.
 //!
-//! Redesign of the Python `_config` loader: serde derives replace ~700 lines of
-//! hand-written per-field validation. `#[serde(default)]` gives per-field
+//! serde derives handle validation: `#[serde(default)]` gives per-field
 //! fallbacks (a missing file or key uses the Chromecast-like defaults) and
-//! `deny_unknown_fields` gives the same unknown-key rejection with clear errors.
-//! Config lives in the platform binary only; the portable core never sees it.
+//! `deny_unknown_fields` rejects unknown keys with clear errors. Config lives in
+//! the platform binary only; the portable core never sees it.
 
 use std::collections::HashMap;
 use std::path::Path;

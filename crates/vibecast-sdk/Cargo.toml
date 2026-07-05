@@ -15,3 +15,5 @@ serde_json = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 reqwest = { workspace = true }
+http = { workspace = true }
+tracing = { workspace = true }

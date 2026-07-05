@@ -1,8 +1,7 @@
 //! Error types for the app SDK.
 
-/// Canonical app media-resolution failure reasons (mirrors the Cast
-/// `MediaResolveFailureCode`). The string form is used as the `LOAD_FAILED`
-/// reason sent to senders.
+/// Canonical app media-resolution failure reasons. The string form is used as
+/// the `LOAD_FAILED` reason sent to senders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaResolveCode {
     /// Malformed or unsupported request.
@@ -94,8 +93,7 @@ impl MediaResolveError {
         Self::new(MediaResolveCode::InternalError, detail_code)
     }
 
-    /// Map one upstream HTTP status code to a canonical failure (matches the
-    /// Python `media_failure_from_http_status` mapping).
+    /// Map one upstream HTTP status code to a canonical failure.
     #[must_use]
     pub fn from_http_status(status: u16, detail_code: Option<String>) -> Self {
         let (code, retryable) = match status {
@@ -153,9 +151,39 @@ impl From<reqwest::Error> for MediaResolveError {
 }
 
 /// Raised when an app fails to launch.
+///
+/// Carries a human-readable message and an optional underlying cause so hosts
+/// can log the full error chain instead of a flattened string.
 #[derive(Debug, thiserror::Error)]
-#[error("app launch failed: {0}")]
-pub struct LaunchError(pub String);
+#[error("app launch failed: {message}")]
+pub struct LaunchError {
+    message: String,
+    #[source]
+    source: Option<Box<dyn std::error::Error + Send + Sync>>,
+}
+
+impl LaunchError {
+    /// A launch failure with a message and no underlying cause.
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    /// A launch failure wrapping an underlying error as its `#[source]`.
+    #[must_use]
+    pub fn with_source(
+        message: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            source: Some(Box::new(source)),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

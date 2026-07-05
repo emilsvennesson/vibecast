@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::Serialize;
 use serde_json::Value;
 
 /// Sends custom-namespace messages on behalf of an app callback.
@@ -110,12 +111,28 @@ impl AppContext {
 
     /// Send a custom-namespace message to the sender associated with this
     /// callback (broadcasts if there is no bound sender).
-    pub async fn send_custom(&self, namespace: &str, data: Value) {
-        self.sender.send_custom(namespace, data).await;
+    ///
+    /// Accepts any [`Serialize`] value, so apps can pass a typed message struct
+    /// or a `serde_json::Value`. A serialization failure is logged rather than
+    /// silently dropped.
+    pub async fn send_custom<T: Serialize>(&self, namespace: &str, message: T) {
+        match serde_json::to_value(&message) {
+            Ok(value) => self.sender.send_custom(namespace, value).await,
+            Err(error) => {
+                tracing::error!(%error, namespace, "failed to serialize outbound app message");
+            }
+        }
     }
 
     /// Broadcast a custom-namespace message to all senders on this transport.
-    pub async fn broadcast_custom(&self, namespace: &str, data: Value) {
-        self.sender.broadcast_custom(namespace, data).await;
+    ///
+    /// Accepts any [`Serialize`] value; see [`send_custom`](Self::send_custom).
+    pub async fn broadcast_custom<T: Serialize>(&self, namespace: &str, message: T) {
+        match serde_json::to_value(&message) {
+            Ok(value) => self.sender.broadcast_custom(namespace, value).await,
+            Err(error) => {
+                tracing::error!(%error, namespace, "failed to serialize outbound app message");
+            }
+        }
     }
 }

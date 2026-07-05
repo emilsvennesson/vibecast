@@ -18,6 +18,8 @@ use anyhow::Context;
 use clap::Parser;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing_subscriber::EnvFilter;
 
 use vibecast_apps_primevideo::PrimeVideo;
@@ -26,7 +28,7 @@ use vibecast_apps_tv4play::Tv4Play;
 use vibecast_apps_viaplay::Viaplay;
 use vibecast_bridge::PlayerBridge;
 use vibecast_cast::{AuthMaterial, CastServer, ServerEvent};
-use vibecast_core::{AppRegistry, DeviceHub, DeviceIdentity, HubConfig, HubEvent};
+use vibecast_core::{AppRegistry, DeviceHub, DeviceHubHandle, DeviceIdentity, HubConfig};
 use vibecast_discovery::{CastAdvertisement, EurekaIdentity, EurekaServer};
 use vibecast_messages::Volume;
 use vibecast_sdk::{AppConfig, AppProvider};
@@ -183,7 +185,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
             tracing::warn!(app = %app_key, "config for an unregistered app is ignored");
         }
     }
-    let registry = AppRegistry::new(providers);
+    let registry = AppRegistry::new(providers).context("building app registry")?;
 
     // --- shared HTTP client (User-Agent + CAST-DEVICE-CAPABILITIES + timeout) ---
     let http = build_http_client(&config).context("building HTTP client")?;
@@ -215,15 +217,29 @@ async fn run(args: Args) -> anyhow::Result<()> {
         display_width: config.device.display_width,
         display_height: config.device.display_height,
     });
-    let hub_tx = hub.sender();
+    let hub_handle = hub.handle();
+
+    // All long-running tasks are tracked and share one cancellation token, so
+    // shutdown is deterministic rather than relying on process exit.
+    let shutdown = CancellationToken::new();
+    let tasks = TaskTracker::new();
 
     // Player reports (primary renderer) -> hub.
     {
-        let hub_tx = hub_tx.clone();
-        tokio::spawn(async move {
-            while let Some(report) = reports_rx.recv().await {
-                if hub_tx.send(HubEvent::Report(report)).await.is_err() {
-                    break;
+        let hub_handle = hub_handle.clone();
+        let shutdown = shutdown.clone();
+        tasks.spawn(async move {
+            loop {
+                tokio::select! {
+                    () = shutdown.cancelled() => break,
+                    report = reports_rx.recv() => match report {
+                        Some(report) => {
+                            if hub_handle.send_player_report(report).await.is_err() {
+                                break;
+                            }
+                        }
+                        None => break,
+                    },
                 }
             }
         });
@@ -236,17 +252,23 @@ async fn run(args: Args) -> anyhow::Result<()> {
         crl: crl.clone(),
     };
     let cast_server = Arc::new(CastServer::new(cast_tls, auth, events_tx));
-    spawn_server_forward(events_rx, hub_tx.clone());
-    tokio::spawn(hub.run());
+    spawn_server_forward(&tasks, shutdown.clone(), events_rx, hub_handle.clone());
+    tasks.spawn(hub.run());
 
     let cast_listener = TcpListener::bind((bind_host.as_str(), cast_port))
         .await
         .with_context(|| format!("binding cast port {cast_port}"))?;
     {
         let cast_server = cast_server.clone();
-        tokio::spawn(async move {
-            if let Err(error) = cast_server.serve(cast_listener).await {
-                tracing::error!(%error, "cast server stopped");
+        let shutdown = shutdown.clone();
+        tasks.spawn(async move {
+            tokio::select! {
+                () = shutdown.cancelled() => {}
+                result = cast_server.serve(cast_listener) => {
+                    if let Err(error) = result {
+                        tracing::error!(%error, "cast server stopped");
+                    }
+                }
             }
         });
     }
@@ -261,25 +283,37 @@ async fn run(args: Args) -> anyhow::Result<()> {
     );
     {
         let eureka = eureka.clone();
+        let shutdown = shutdown.clone();
         let listener = TcpListener::bind((bind_host.as_str(), eureka_http_port))
             .await
             .with_context(|| format!("binding eureka http port {eureka_http_port}"))?;
-        tokio::spawn(async move {
-            if let Err(error) = eureka.serve_http(listener).await {
-                tracing::error!(%error, "eureka http stopped");
+        tasks.spawn(async move {
+            tokio::select! {
+                () = shutdown.cancelled() => {}
+                result = eureka.serve_http(listener) => {
+                    if let Err(error) = result {
+                        tracing::error!(%error, "eureka http stopped");
+                    }
+                }
             }
         });
     }
     {
         let eureka = eureka.clone();
+        let shutdown = shutdown.clone();
         let listener = std::net::TcpListener::bind((bind_host.as_str(), eureka_https_port))
             .with_context(|| format!("binding eureka https port {eureka_https_port}"))?;
         listener
             .set_nonblocking(true)
             .context("eureka https nonblocking")?;
-        tokio::spawn(async move {
-            if let Err(error) = eureka.serve_https(listener, eureka_tls).await {
-                tracing::error!(%error, "eureka https stopped");
+        tasks.spawn(async move {
+            tokio::select! {
+                () = shutdown.cancelled() => {}
+                result = eureka.serve_https(listener, eureka_tls) => {
+                    if let Err(error) = result {
+                        tracing::error!(%error, "eureka https stopped");
+                    }
+                }
             }
         });
     }
@@ -301,6 +335,8 @@ async fn run(args: Args) -> anyhow::Result<()> {
     // Certificate-rotation loop: hot-swap TLS (both servers share the resolver),
     // device-auth material, and the mDNS digest when the active cert expires.
     spawn_cert_rotation(
+        &tasks,
+        shutdown.clone(),
         store,
         resolver,
         cast_server.clone(),
@@ -322,16 +358,25 @@ async fn run(args: Args) -> anyhow::Result<()> {
         .context("waiting for shutdown signal")?;
     tracing::info!("shutting down");
     advertisement.lock().await.stop();
-    // Tear down app sessions cleanly (app on_stop + proxy unregister) before exit.
-    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-    if hub_tx.send(HubEvent::Shutdown(ack_tx)).await.is_ok() {
-        let _ = tokio::time::timeout(Duration::from_secs(5), ack_rx).await;
-    }
+    // Tear down app sessions cleanly (app on_stop + proxy unregister) first, then
+    // gracefully stop the bridge and cancel the remaining supervised tasks.
+    let _ = tokio::time::timeout(Duration::from_secs(5), hub_handle.shutdown()).await;
     bridge.stop().await;
+    shutdown.cancel();
+    tasks.close();
+    if tokio::time::timeout(Duration::from_secs(5), tasks.wait())
+        .await
+        .is_err()
+    {
+        tracing::warn!("background tasks did not stop within 5s; exiting anyway");
+    }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_cert_rotation(
+    tasks: &TaskTracker,
+    shutdown: CancellationToken,
     mut store: CertificateStore,
     resolver: Arc<CertResolver>,
     cast_server: Arc<CastServer>,
@@ -339,12 +384,15 @@ fn spawn_cert_rotation(
     startup_crl: Option<Vec<u8>>,
     poll_seconds: f64,
 ) {
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         let period = Duration::from_secs_f64(poll_seconds.max(1.0));
         let mut ticker = tokio::time::interval(period);
         ticker.tick().await; // consume the immediate first tick
         loop {
-            ticker.tick().await;
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                _ = ticker.tick() => {}
+            }
             let rotated = match store.rotate_if_needed(unix_now()) {
                 Ok(Some(bundle)) => bundle.clone(),
                 Ok(None) => continue,
@@ -484,13 +532,23 @@ async fn fetch_crl(http: &reqwest::Client) -> anyhow::Result<Vec<u8>> {
 }
 
 fn spawn_server_forward(
+    tasks: &TaskTracker,
+    shutdown: CancellationToken,
     mut events_rx: mpsc::Receiver<ServerEvent>,
-    hub_tx: mpsc::Sender<HubEvent>,
+    hub_handle: DeviceHubHandle,
 ) {
-    tokio::spawn(async move {
-        while let Some(event) = events_rx.recv().await {
-            if hub_tx.send(HubEvent::Server(event)).await.is_err() {
-                break;
+    tasks.spawn(async move {
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                event = events_rx.recv() => match event {
+                    Some(event) => {
+                        if hub_handle.send_server_event(event).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                },
             }
         }
     });

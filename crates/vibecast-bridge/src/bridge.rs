@@ -2,12 +2,11 @@
 //! to external renderers (browser / Kodi) and proxying DRM license and
 //! manifest requests.
 //!
-//! Ports `vibecast._playback.player_bridge`. The connection registry,
-//! primary/observer election and per-session resync snapshots live in a single
-//! actor task (fed over an `mpsc`), preserving the serialized semantics of the
-//! Python asyncio design without shared-mutable locking on the WebSocket path.
-//! The license/manifest handler registries are plain maps (registered rarely,
-//! looked up per request, then invoked outside any lock).
+//! The connection registry, primary/observer election and per-session resync
+//! snapshots live in a single actor task (fed over an `mpsc`), so the WebSocket
+//! path needs no shared-mutable locking. The license/manifest handler
+//! registries are plain maps (registered rarely, looked up per request, then
+//! invoked outside any lock).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
@@ -23,13 +22,15 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use vibecast_messages::{IdleReason, PlayerState};
 
 use crate::headers::{filter_upstream_headers, filter_upstream_response_headers};
 use crate::protocol::{PlaybackMediaPayload, PlayerCommand, PlayerReport};
-use crate::proxy::{LicenseHandler, LicenseRequest, ManifestHandler, ManifestProxyRequest};
+use crate::proxy::{
+    LicenseHandler, LicenseRequest, ManifestHandler, ManifestProxyRequest, RouteId,
+};
 use crate::web::{PLAYER_HTML, PLAYER_HTML_CONTENT_TYPE, PLAYER_JS, PLAYER_JS_CONTENT_TYPE};
 
 /// A renderer that plays media in response to bridge commands.
@@ -369,16 +370,28 @@ impl BridgeState {
     }
 }
 
+/// Handles for the tasks a running bridge owns, so shutdown is deterministic.
+struct RunningTasks {
+    actor: JoinHandle<()>,
+    server: JoinHandle<()>,
+    shutdown: oneshot::Sender<()>,
+}
+
 /// HTTP/WebSocket bridge relaying player commands to external renderers.
 pub struct PlayerBridge {
     state: BridgeState,
     bind_host: Arc<str>,
-    server: Mutex<Option<JoinHandle<()>>>,
+    reports_tx: mpsc::Sender<PlayerReport>,
+    /// Receiver half of the command channel, consumed when the actor is spawned
+    /// in [`start`](Self::start). Construction itself spawns no tasks.
+    commands_rx: Mutex<Option<mpsc::Receiver<BridgeMsg>>>,
+    tasks: Mutex<Option<RunningTasks>>,
 }
 
 impl PlayerBridge {
-    /// Create a bridge, spawning the connection actor. Player reports from the
-    /// primary renderer are delivered on `reports`.
+    /// Create a bridge. Construction is side-effect free: no tasks are spawned
+    /// and no runtime is required until [`start`](Self::start) is called. Player
+    /// reports from the primary renderer are delivered on `reports`.
     #[must_use]
     pub fn new(host: impl Into<String>, port: u16, reports: mpsc::Sender<PlayerReport>) -> Self {
         let host = host.into();
@@ -389,14 +402,6 @@ impl PlayerBridge {
         };
 
         let (commands_tx, commands_rx) = mpsc::channel(128);
-        let actor = BridgeActor {
-            connections: Vec::new(),
-            primary: None,
-            snapshots: HashMap::new(),
-            reports_tx: reports,
-        };
-        tokio::spawn(actor.run(commands_rx));
-
         let state = BridgeState {
             commands: commands_tx,
             licenses: Arc::new(Mutex::new(HashMap::new())),
@@ -410,23 +415,58 @@ impl PlayerBridge {
         Self {
             state,
             bind_host: Arc::from(host.as_str()),
-            server: Mutex::new(None),
+            reports_tx: reports,
+            commands_rx: Mutex::new(Some(commands_rx)),
+            tasks: Mutex::new(None),
         }
     }
 
-    /// Bind the listener and start serving. Idempotent-safe to call once.
+    /// Bind the listener, spawn the connection actor, and start serving. A
+    /// second call while already running is a no-op.
     pub async fn start(&self) -> std::io::Result<()> {
+        if self.tasks.lock().unwrap().is_some() {
+            return Ok(());
+        }
+
         let listener =
             tokio::net::TcpListener::bind((self.bind_host.as_ref(), self.state.configured_port))
                 .await?;
         let port = listener.local_addr()?.port();
         self.state.port.store(port, Ordering::SeqCst);
 
+        // Spawn the connection actor now, not at construction time.
+        let commands_rx = self
+            .commands_rx
+            .lock()
+            .unwrap()
+            .take()
+            .expect("bridge already consumed its command receiver");
+        let actor = BridgeActor {
+            connections: Vec::new(),
+            primary: None,
+            snapshots: HashMap::new(),
+            reports_tx: self.reports_tx.clone(),
+        };
+        let actor_handle = tokio::spawn(actor.run(commands_rx));
+
         let app = router(self.state.clone());
-        let handle = tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server_handle = tokio::spawn(async move {
+            let served = axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+            if let Err(error) = served {
+                tracing::error!(%error, "player bridge server stopped");
+            }
         });
-        *self.server.lock().unwrap() = Some(handle);
+
+        *self.tasks.lock().unwrap() = Some(RunningTasks {
+            actor: actor_handle,
+            server: server_handle,
+            shutdown: shutdown_tx,
+        });
 
         tracing::info!(
             host = %self.state.resolved_host,
@@ -438,10 +478,19 @@ impl PlayerBridge {
         Ok(())
     }
 
-    /// Stop serving and clear session handlers.
+    /// Gracefully stop serving, await task completion, and clear session
+    /// handlers. Safe to call when not running.
     pub async fn stop(&self) {
-        if let Some(handle) = self.server.lock().unwrap().take() {
-            handle.abort();
+        let tasks = self.tasks.lock().unwrap().take();
+        if let Some(tasks) = tasks {
+            // Signal graceful shutdown and await the server draining in-flight
+            // requests, then stop the connection actor.
+            let _ = tasks.shutdown.send(());
+            if let Err(error) = tasks.server.await {
+                tracing::warn!(%error, "player bridge server task join failed");
+            }
+            tasks.actor.abort();
+            let _ = tasks.actor.await;
         }
         self.state.port.store(0, Ordering::SeqCst);
         self.state.licenses.lock().unwrap().clear();
@@ -611,12 +660,13 @@ async fn license_handler(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
         .to_string();
+    let route_id = params.get("route").and_then(|raw| raw.parse().ok());
     let request = LicenseRequest {
         session_id,
         body: body.to_vec(),
         content_type,
-        route_id: params.get("route").cloned(),
-        headers: filter_upstream_headers(&header_map_to_map(&request_headers)),
+        route_id,
+        headers: filter_upstream_headers(&request_headers),
     };
 
     match handler.handle_license(request).await {
@@ -642,17 +692,17 @@ async fn manifest_handler(
         return StatusCode::NOT_FOUND.into_response();
     };
 
-    let route_id = route_path.split('.').next().unwrap_or("").to_string();
-    if route_id.is_empty() {
+    let route_segment = route_path.split('.').next().unwrap_or("");
+    let Ok(route_id) = route_segment.parse::<RouteId>() else {
         return StatusCode::BAD_REQUEST.into_response();
-    }
+    };
 
     let is_head = method == Method::HEAD;
     let request = ManifestProxyRequest {
         session_id,
         route_id,
-        method: method.as_str().to_string(),
-        headers: filter_upstream_headers(&header_map_to_map(&request_headers)),
+        method,
+        headers: filter_upstream_headers(&request_headers),
     };
 
     match handler.handle_manifest(request).await {
@@ -660,12 +710,15 @@ async fn manifest_handler(
             let mut builder = Response::builder()
                 .status(response.status)
                 .header(CONTENT_TYPE, response.content_type);
-            for (name, value) in filter_upstream_response_headers(&response.headers) {
+            let forwarded = filter_upstream_response_headers(&response.headers);
+            for (name, value) in &forwarded {
                 // Drop upstream caching directives; the proxy URL is reused
                 // across stream switches (only the query version changes), so a
                 // cached manifest would stall playback on the previous stream.
-                let lowered = name.to_ascii_lowercase();
-                if lowered == "cache-control" || lowered == "expires" || lowered == "etag" {
+                if *name == http::header::CACHE_CONTROL
+                    || *name == http::header::EXPIRES
+                    || *name == http::header::ETAG
+                {
                     continue;
                 }
                 builder = builder.header(name, value);
@@ -681,16 +734,6 @@ async fn manifest_handler(
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
-}
-
-fn header_map_to_map(headers: &HeaderMap) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    for (name, value) in headers {
-        if let Ok(value) = value.to_str() {
-            map.insert(name.as_str().to_string(), value.to_string());
-        }
-    }
-    map
 }
 
 #[cfg(test)]
@@ -977,7 +1020,7 @@ mod tests {
         let recorded = handler.requests.lock().unwrap();
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].session_id, "session-1");
-        assert_eq!(recorded[0].route_id.as_deref(), Some("r7"));
+        assert_eq!(recorded[0].route_id, Some(RouteId::license(7)));
         assert_eq!(recorded[0].body, b"challenge");
     }
 
@@ -1028,7 +1071,7 @@ mod tests {
     #[async_trait]
     impl LicenseHandler for FailingLicense {
         async fn handle_license(&self, _request: LicenseRequest) -> ProxyResult<LicenseResponse> {
-            Err(ProxyError("boom".into()))
+            Err(ProxyError::Internal("boom".into()))
         }
     }
 
@@ -1058,11 +1101,13 @@ mod tests {
             request: ManifestProxyRequest,
         ) -> ProxyResult<ManifestProxyResponse> {
             self.requests.lock().unwrap().push(request);
+            let mut headers = HeaderMap::new();
+            headers.insert(http::header::CACHE_CONTROL, "no-store".parse().unwrap());
             Ok(ManifestProxyResponse {
                 body: b"#EXTM3U\n".to_vec(),
                 content_type: "application/vnd.apple.mpegurl".into(),
                 status: 200,
-                headers: HashMap::from([("Cache-Control".to_string(), "no-store".to_string())]),
+                headers,
             })
         }
     }
@@ -1087,8 +1132,8 @@ mod tests {
         {
             let recorded = handler.requests.lock().unwrap();
             assert_eq!(recorded.len(), 1);
-            assert_eq!(recorded[0].route_id, "m7");
-            assert_eq!(recorded[0].method, "GET");
+            assert_eq!(recorded[0].route_id, RouteId::manifest(7));
+            assert_eq!(recorded[0].method, Method::GET);
         }
 
         let (missing, _headers, _body) = http_get(&bridge, "/manifest/missing/m0.mpd").await;
@@ -1103,12 +1148,12 @@ mod tests {
             &self,
             request: ManifestProxyRequest,
         ) -> ProxyResult<ManifestProxyResponse> {
-            assert_eq!(request.method, "HEAD");
+            assert_eq!(request.method, Method::HEAD);
             Ok(ManifestProxyResponse {
                 body: b"ignored".to_vec(),
                 content_type: "application/dash+xml".into(),
                 status: 200,
-                headers: HashMap::new(),
+                headers: HeaderMap::new(),
             })
         }
     }
@@ -1138,19 +1183,22 @@ mod tests {
             &self,
             _request: ManifestProxyRequest,
         ) -> ProxyResult<ManifestProxyResponse> {
-            let headers = HashMap::from([
-                (
-                    "Connection".to_string(),
-                    "keep-alive, X-Remove-Me".to_string(),
-                ),
-                ("Content-Encoding".to_string(), "gzip".to_string()),
-                ("Content-Length".to_string(), "999".to_string()),
-                ("Content-Type".to_string(), "text/plain".to_string()),
-                ("Set-Cookie".to_string(), "sid=123".to_string()),
-                ("Transfer-Encoding".to_string(), "chunked".to_string()),
-                ("X-Remove-Me".to_string(), "1".to_string()),
-                ("X-Preserved".to_string(), "ok".to_string()),
-            ]);
+            let mut headers = HeaderMap::new();
+            for (name, value) in [
+                ("Connection", "keep-alive, X-Remove-Me"),
+                ("Content-Encoding", "gzip"),
+                ("Content-Length", "999"),
+                ("Content-Type", "text/plain"),
+                ("Set-Cookie", "sid=123"),
+                ("Transfer-Encoding", "chunked"),
+                ("X-Remove-Me", "1"),
+                ("X-Preserved", "ok"),
+            ] {
+                headers.append(
+                    http::HeaderName::try_from(name).unwrap(),
+                    value.parse().unwrap(),
+                );
+            }
             Ok(ManifestProxyResponse {
                 body: b"#EXTM3U\n".to_vec(),
                 content_type: "application/vnd.apple.mpegurl".into(),

@@ -1,9 +1,9 @@
 //! Bundled Viaplay app.
 //!
-//! Redesign of the Python `apps/viaplay`: the owned [`ViaplaySession`] holds
-//! its mutable auth / playback state behind a `tokio::Mutex`, typed serde
-//! models replace pydantic, and device-code polling runs as a cancellable
-//! `tokio::spawn` task via [`CancellationToken`].
+//! The owned [`ViaplaySession`] holds its mutable auth / playback state behind a
+//! `tokio::Mutex`. Device-code polling and the rest of the auth flow run on
+//! cancellable tasks owned by a [`TaskTracker`], so they stop deterministically
+//! when the session tears down.
 
 #![forbid(unsafe_code)]
 
@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::sync::{watch, Mutex};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use vibecast_sdk::{
     normalize_stream_type, AppContext, AppProvider, AppSession, DrmInfo, DrmSystem,
     LaunchCredentials, LaunchError, LoadRequest, MediaResolveCode, MediaResolveError,
@@ -27,6 +28,7 @@ use vibecast_sdk::{
 use crate::api::{DeviceAuthInfo, SessionCheckResult, SetupParams, ViaplayApi, ViaplayError};
 use crate::models::{
     AudioTrackState, SubtitleState, UserProfile, ViaplayReceiverState, ViaplayRequest,
+    ViaplayResponse,
 };
 
 const NS_VIAPLAY: &str = "urn:x-cast:tv.viaplay.chromecast";
@@ -70,9 +72,9 @@ impl AppProvider for Viaplay {
         &self,
         ctx: &AppContext,
         credentials: LaunchCredentials,
-    ) -> Result<Box<dyn AppSession>, LaunchError> {
+    ) -> Result<Arc<dyn AppSession>, LaunchError> {
         let (auth_tx, auth_rx) = watch::channel(false);
-        Ok(Box::new(ViaplaySession {
+        Ok(Arc::new(ViaplaySession {
             api: ViaplayApi::new(
                 ctx.http.clone(),
                 ctx.receiver.device_id.clone(),
@@ -86,6 +88,7 @@ impl AppProvider for Viaplay {
             auth_tx,
             _auth_rx: auth_rx,
             cancel: Mutex::new(CancellationToken::new()),
+            tasks: TaskTracker::new(),
             auth_timeout: Duration::from_secs(30),
         }))
     }
@@ -143,6 +146,8 @@ struct ViaplaySession {
     /// wait the full timeout every load.
     _auth_rx: watch::Receiver<bool>,
     cancel: Mutex<CancellationToken>,
+    /// Owns the spawned auth tasks so teardown can stop them deterministically.
+    tasks: TaskTracker,
     /// How long `resolve_media` waits for authentication before failing.
     auth_timeout: Duration,
 }
@@ -356,8 +361,12 @@ impl AppSession for ViaplaySession {
                 let state = self.state.clone();
                 let auth_tx = self.auth_tx.clone();
                 let ctx = ctx.clone();
-                tokio::spawn(async move {
-                    complete_device_auth(&api, &state, &auth_tx, &ctx).await;
+                let cancel = self.cancel.lock().await.clone();
+                self.tasks.spawn(async move {
+                    tokio::select! {
+                        () = cancel.cancelled() => {}
+                        () = complete_device_auth(&api, &state, &auth_tx, &ctx) => {}
+                    }
                 });
             }
             ViaplayRequest::GotoIdle {} => {
@@ -401,7 +410,11 @@ impl AppSession for ViaplaySession {
     }
 
     async fn on_stop(&self, _ctx: &AppContext) {
+        // Cancel in-flight auth work and stop accepting new tasks. Cancellation
+        // unwinds every awaited HTTP step promptly, so no task keeps running (or
+        // broadcasting) past teardown.
         self.cancel.lock().await.cancel();
+        self.tasks.close();
     }
 }
 
@@ -451,12 +464,18 @@ impl ViaplaySession {
         let state = self.state.clone();
         let auth_tx = self.auth_tx.clone();
         let ctx = ctx.clone();
-        tokio::spawn(async move {
-            if let Err(e) =
-                run_auth_flow(&api, &state, &auth_tx, &ctx, &new_token, credentials_token).await
-            {
-                tracing::error!(error = %e, "auth flow failed");
-                let _ = auth_tx.send(true);
+        let cancel = new_token.clone();
+        self.tasks.spawn(async move {
+            tokio::select! {
+                () = cancel.cancelled() => {
+                    tracing::debug!("viaplay auth flow cancelled");
+                }
+                result = run_auth_flow(&api, &state, &auth_tx, &ctx, &new_token, credentials_token) => {
+                    if let Err(e) = result {
+                        tracing::error!(error = %e, "auth flow failed");
+                        let _ = auth_tx.send(true);
+                    }
+                }
             }
         });
     }
@@ -537,22 +556,23 @@ async fn start_device_auth(
         Some(&auth_info.user_code),
     )
     .await;
-    let rs_value = serde_json::to_value(&rs).expect("receiver state serialization");
 
     // Broadcast AUTHORIZATION_REQUIRED.
-    let mut auth_msg = serde_json::Map::new();
-    auth_msg.insert("type".into(), json!("AUTHORIZATION_REQUIRED"));
-    if !auth_info.activate_url.is_empty() {
-        auth_msg.insert("authorizationUrl".into(), json!(auth_info.activate_url));
-    }
-    auth_msg.insert("receiverState".into(), rs_value.clone());
-    ctx.broadcast_custom(NS_VIAPLAY, Value::Object(auth_msg))
-        .await;
+    let authorization_url =
+        (!auth_info.activate_url.is_empty()).then(|| auth_info.activate_url.clone());
+    ctx.broadcast_custom(
+        NS_VIAPLAY,
+        ViaplayResponse::AuthorizationRequired {
+            authorization_url,
+            receiver_state: rs.clone(),
+        },
+    )
+    .await;
 
     // Broadcast RECEIVER_STATE.
     ctx.broadcast_custom(
         NS_VIAPLAY,
-        json!({"type": "RECEIVER_STATE", "receiverState": rs_value}),
+        ViaplayResponse::ReceiverState { receiver_state: rs },
     )
     .await;
 
@@ -661,22 +681,17 @@ async fn mark_authenticated(
 
 async fn send_session_ok(state: &Arc<Mutex<ViaplayState>>, ctx: &AppContext) {
     let rs = build_receiver_state(state, "IDLE", None, None).await;
-    let rs_value = serde_json::to_value(&rs).expect("receiver state serialization");
-    let guard = state.lock().await;
-    let mut msg = serde_json::Map::new();
-    msg.insert("type".into(), json!("SESSION_OK"));
-    if !guard.user_id.is_empty() {
-        msg.insert("userId".into(), json!(guard.user_id));
-    }
-    if !guard.profile_id.is_empty() {
-        msg.insert("profileId".into(), json!(guard.profile_id));
-    }
-    if !guard.user_display_name.is_empty() {
-        msg.insert("userDisplayName".into(), json!(guard.user_display_name));
-    }
-    msg.insert("receiverState".into(), rs_value);
-    drop(guard);
-    ctx.broadcast_custom(NS_VIAPLAY, Value::Object(msg)).await;
+    let message = {
+        let guard = state.lock().await;
+        ViaplayResponse::SessionOk {
+            user_id: (!guard.user_id.is_empty()).then(|| guard.user_id.clone()),
+            profile_id: (!guard.profile_id.is_empty()).then(|| guard.profile_id.clone()),
+            user_display_name: (!guard.user_display_name.is_empty())
+                .then(|| guard.user_display_name.clone()),
+            receiver_state: rs,
+        }
+    };
+    ctx.broadcast_custom(NS_VIAPLAY, message).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -743,10 +758,9 @@ async fn broadcast_receiver_state(
     status: &str,
 ) {
     let rs = build_receiver_state(state, status, None, None).await;
-    let rs_value = serde_json::to_value(&rs).expect("receiver state serialization");
     ctx.broadcast_custom(
         NS_VIAPLAY,
-        json!({"type": "RECEIVER_STATE", "receiverState": rs_value}),
+        ViaplayResponse::ReceiverState { receiver_state: rs },
     )
     .await;
 }
@@ -765,19 +779,17 @@ async fn broadcast_posdur(
     }
 
     let rs = build_receiver_state(state, "CASTING", None, None).await;
-    let rs_value = serde_json::to_value(&rs).expect("receiver state serialization");
 
     let position = playback_state.current_time.max(0.0) as i64;
     let dur = duration.unwrap_or(0.0).max(0.0) as i64;
 
     ctx.broadcast_custom(
         NS_VIAPLAY,
-        json!({
-            "type": "POSDUR",
-            "position": position,
-            "duration": dur,
-            "receiverState": rs_value,
-        }),
+        ViaplayResponse::Posdur {
+            position,
+            duration: dur,
+            receiver_state: rs,
+        },
     )
     .await;
 }
@@ -820,7 +832,6 @@ fn map_viaplay_error(error: ViaplayError, detail: &str) -> MediaResolveError {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex as StdMutex};
 
@@ -899,6 +910,7 @@ mod tests {
             auth_tx,
             _auth_rx: auth_rx,
             cancel: Mutex::new(CancellationToken::new()),
+            tasks: TaskTracker::new(),
             auth_timeout: Duration::from_millis(50),
         }
     }
@@ -1162,13 +1174,13 @@ mod tests {
             body: b"challenge".to_vec(),
             content_type: "application/octet-stream".to_string(),
             route_id: Some("r0".to_string()),
-            headers: HashMap::new(),
+            headers: vibecast_sdk::HeaderMap::new(),
         };
         let route = LicenseRoute {
             route_id: "r0".to_string(),
             system: DrmSystem::Widevine,
             upstream_url: "https://drm.example.com/license".to_string(),
-            headers: HashMap::new(),
+            headers: vibecast_sdk::HeaderMap::new(),
         };
 
         let response = session

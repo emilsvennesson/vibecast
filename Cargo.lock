@@ -2510,6 +2510,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]
@@ -2839,6 +2840,7 @@ dependencies = [
  "async-trait",
  "axum",
  "futures-util",
+ "http",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2882,6 +2884,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-util",
  "toml",
  "tracing",
  "tracing-subscriber",
@@ -2905,6 +2908,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures-util",
+ "http",
  "reqwest",
  "serde",
  "serde_json",
@@ -2969,10 +2973,12 @@ name = "vibecast-sdk"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "http",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tracing",
  "vibecast-messages",
 ]
 

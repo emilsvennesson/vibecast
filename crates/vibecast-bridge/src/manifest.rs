@@ -1,11 +1,10 @@
 //! Manifest normalization transforms for the proxy.
 //!
-//! Ports `vibecast._playback.manifest_proxy`. Shaka Player receives manifests
-//! through the bridge, so relative URLs must be absolutized against the
-//! upstream URL and DASH `<SegmentTimeline>` `<Pattern>` shorthand (a
-//! nonstandard extension some CDNs emit) must be expanded into plain `<S>`
-//! runs. DASH manipulation uses the `xot` mutable XML tree (the analogue of
-//! Python's `ElementTree`); HLS is a line-oriented text rewrite.
+//! Shaka Player receives manifests through the bridge, so relative URLs must be
+//! absolutized against the upstream URL and DASH `<SegmentTimeline>`
+//! `<Pattern>` shorthand (a nonstandard extension some CDNs emit) must be
+//! expanded into plain `<S>` runs. DASH manipulation uses the `xot` mutable XML
+//! tree; HLS is a line-oriented text rewrite.
 
 use url::Url;
 use xot::{NameId, Node, Xot};
@@ -62,17 +61,12 @@ pub fn manifest_route_suffix(kind: ManifestKind) -> &'static str {
 }
 
 /// Normalize one manifest body, returning the rewritten bytes and content type.
-///
-/// `app_key` is accepted for parity with the Python transform context (an
-/// app-specific hook); no current transform consumes it.
 #[must_use]
 pub fn normalize_manifest_bytes(
     body: &[u8],
     upstream_url: &str,
     content_type: Option<&str>,
-    app_key: Option<&str>,
 ) -> (Vec<u8>, String) {
-    let _ = app_key;
     let kind = infer_manifest_kind(content_type, upstream_url);
     let resolved_content_type = content_type
         .map(str::to_string)
@@ -474,7 +468,6 @@ mod tests {
             manifest.as_bytes(),
             "https://cdn.example.com/live/manifest.mpd?token=abc",
             Some("application/dash+xml"),
-            Some("primevideo"),
         );
         let text = String::from_utf8(normalized).unwrap();
 
@@ -500,7 +493,6 @@ mod tests {
             manifest.as_bytes(),
             "https://cdn.example.com/live/manifest.mpd",
             Some("application/dash+xml"),
-            None,
         );
         let text = String::from_utf8(normalized).unwrap();
         assert!(
@@ -523,7 +515,6 @@ segment-2.ts\n";
             playlist.as_bytes(),
             "https://cdn.example.com/hls/master.m3u8",
             Some("application/vnd.apple.mpegurl"),
-            Some("test"),
         );
         let text = String::from_utf8(normalized).unwrap();
 
@@ -545,12 +536,8 @@ segment-2.ts\n";
     #[test]
     fn unknown_manifest_is_passed_through_untouched() {
         let body = b"not a manifest";
-        let (normalized, content_type) = normalize_manifest_bytes(
-            body,
-            "https://example.com/video.mp4",
-            Some("video/mp4"),
-            None,
-        );
+        let (normalized, content_type) =
+            normalize_manifest_bytes(body, "https://example.com/video.mp4", Some("video/mp4"));
         assert_eq!(normalized, body);
         assert_eq!(content_type, "video/mp4");
     }

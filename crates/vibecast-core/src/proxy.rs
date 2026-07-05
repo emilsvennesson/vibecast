@@ -1,18 +1,19 @@
 //! Session-scoped DRM-license and manifest proxy handler.
 //!
-//! Ports `PlaybackCoordinator.handle_license` / `handle_manifest` and the
-//! stream URL rewriting. Registered with the player bridge under the session
-//! id, it runs inside the bridge's HTTP handler tasks (not the hub actor), so
-//! its upstream fetches never block message routing.
+//! Handles the proxied license/manifest requests and the stream-URL rewriting.
+//! Registered with the player bridge under the session id, it runs inside the
+//! bridge's HTTP handler tasks (not the hub actor), so its upstream fetches
+//! never block message routing.
 //!
 //! License requests are dispatched to the app session's `resolve_license`,
 //! which by default forwards them via [`DefaultLicenseForwarder`]; apps like
 //! Prime Video override it for custom DRM handling.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use http::{HeaderMap, HeaderName, HeaderValue};
 use vibecast_bridge::headers::{
     filter_upstream_headers, filter_upstream_response_headers, HOP_BY_HOP_REQUEST_HEADERS,
 };
@@ -21,7 +22,7 @@ use vibecast_bridge::{
     normalize_manifest_bytes, DrmPayload, DrmSystem as WireDrmSystem, LicenseHandler,
     LicenseRequest as WireLicenseRequest, LicenseResponse as WireLicenseResponse, ManifestHandler,
     ManifestKind, ManifestProxyRequest, ManifestProxyResponse, PlaybackMediaPayload,
-    PlaybackStreamPayload, ProxyResult,
+    PlaybackStreamPayload, ProxyResult, RouteId,
 };
 use vibecast_sdk::{
     AppContext, AppSession, DrmSystem, LicenseForwarder, LicenseRequest, LicenseResponse,
@@ -32,7 +33,7 @@ use vibecast_sdk::{
 pub(crate) struct LicenseRoute {
     pub system: DrmSystem,
     pub upstream_url: String,
-    pub headers: HashMap<String, String>,
+    pub headers: HeaderMap,
 }
 
 /// A resolved manifest target.
@@ -44,23 +45,20 @@ pub(crate) struct ManifestRoute {
 
 /// Session-scoped proxy handler backing the bridge's license/manifest routes.
 pub(crate) struct SessionProxy {
-    app_key: String,
     app: Arc<dyn AppSession>,
     ctx: AppContext,
-    license_routes: HashMap<String, LicenseRoute>,
-    manifest_routes: HashMap<String, ManifestRoute>,
+    license_routes: HashMap<RouteId, LicenseRoute>,
+    manifest_routes: HashMap<RouteId, ManifestRoute>,
 }
 
 impl SessionProxy {
     pub(crate) fn new(
-        app_key: String,
         app: Arc<dyn AppSession>,
         ctx: AppContext,
-        manifest_routes: HashMap<String, ManifestRoute>,
-        license_routes: HashMap<String, LicenseRoute>,
+        manifest_routes: HashMap<RouteId, ManifestRoute>,
+        license_routes: HashMap<RouteId, LicenseRoute>,
     ) -> Self {
         Self {
-            app_key,
             app,
             ctx,
             license_routes,
@@ -75,7 +73,7 @@ impl LicenseHandler for SessionProxy {
         &self,
         request: WireLicenseRequest,
     ) -> ProxyResult<WireLicenseResponse> {
-        let Some(route_id) = request.route_id.clone() else {
+        let Some(route_id) = request.route_id else {
             return Ok(error_license(400, "missing license route"));
         };
         let Some(route) = self.license_routes.get(&route_id) else {
@@ -89,11 +87,11 @@ impl LicenseHandler for SessionProxy {
             session_id: request.session_id.clone(),
             body: request.body,
             content_type: request.content_type,
-            route_id: Some(route_id.clone()),
+            route_id: Some(route_id.to_string()),
             headers: request.headers,
         };
         let sdk_route = SdkLicenseRoute {
-            route_id,
+            route_id: route_id.to_string(),
             system,
             upstream_url: upstream_url.clone(),
             headers: route.headers.clone(),
@@ -152,17 +150,18 @@ impl ManifestHandler for SessionProxy {
         };
 
         let headers = filter_upstream_headers(&request.headers);
-        let is_head = request.method.eq_ignore_ascii_case("HEAD");
+        let is_head = request.method == http::Method::HEAD;
         let method = if is_head {
             reqwest::Method::HEAD
         } else {
             reqwest::Method::GET
         };
 
-        let mut builder = self.ctx.http.request(method, &route.upstream_url);
-        for (key, value) in &headers {
-            builder = builder.header(key, value);
-        }
+        let builder = self
+            .ctx
+            .http
+            .request(method, &route.upstream_url)
+            .headers(headers);
         let response = match builder.send().await {
             Ok(response) => response,
             Err(error) => {
@@ -184,8 +183,7 @@ impl ManifestHandler for SessionProxy {
                     route.content_type.clone()
                 }
             });
-        let response_headers =
-            filter_upstream_response_headers(&reqwest_headers_to_map(response.headers()));
+        let response_headers = filter_upstream_response_headers(response.headers());
 
         if is_head {
             return Ok(ManifestProxyResponse {
@@ -204,12 +202,8 @@ impl ManifestHandler for SessionProxy {
             }
         };
         if status < 400 {
-            let (normalized, resolved_content_type) = normalize_manifest_bytes(
-                &body,
-                &route.upstream_url,
-                Some(&content_type),
-                Some(&self.app_key),
-            );
+            let (normalized, resolved_content_type) =
+                normalize_manifest_bytes(&body, &route.upstream_url, Some(&content_type));
             body = normalized;
             content_type = resolved_content_type;
         }
@@ -234,31 +228,30 @@ impl DefaultLicenseForwarder {
         request: &LicenseRequest,
         route: &SdkLicenseRoute,
     ) -> Result<LicenseResponse, reqwest::Error> {
-        // Route headers take precedence; add non-hop-by-hop request headers.
+        // Route headers take precedence; add non-hop-by-hop request headers that
+        // the route did not already set.
         let mut headers = route.headers.clone();
-        let mut names: HashSet<String> = headers.keys().map(|k| k.to_ascii_lowercase()).collect();
-        for (key, value) in &request.headers {
-            let lowered = key.to_ascii_lowercase();
-            if HOP_BY_HOP_REQUEST_HEADERS.contains(&lowered.as_str()) {
+        for (name, value) in &request.headers {
+            if HOP_BY_HOP_REQUEST_HEADERS.contains(&name.as_str()) {
                 continue;
             }
-            if !names.contains(&lowered) {
-                headers.insert(key.clone(), value.clone());
-                names.insert(lowered);
+            if !headers.contains_key(name) {
+                headers.append(name.clone(), value.clone());
             }
         }
-        if !request.content_type.is_empty() {
-            headers.insert("Content-Type".to_string(), request.content_type.clone());
+        if let Ok(content_type) = HeaderValue::from_str(&request.content_type) {
+            if !request.content_type.is_empty() {
+                headers.insert(http::header::CONTENT_TYPE, content_type);
+            }
         }
 
-        let mut builder = self
+        let response = self
             .http
             .post(&route.upstream_url)
-            .body(request.body.clone());
-        for (key, value) in &headers {
-            builder = builder.header(key, value);
-        }
-        let response = builder.send().await?;
+            .headers(headers)
+            .body(request.body.clone())
+            .send()
+            .await?;
         let status = response.status().as_u16();
         let content_type = response
             .headers()
@@ -305,28 +298,31 @@ fn error_manifest(status: u16, message: &str) -> ManifestProxyResponse {
         body: message.as_bytes().to_vec(),
         content_type: "text/plain".to_string(),
         status,
-        headers: HashMap::new(),
+        headers: HeaderMap::new(),
     }
 }
 
-fn reqwest_headers_to_map(headers: &reqwest::header::HeaderMap) -> HashMap<String, String> {
+/// Convert an app's string-keyed DRM header config into a validated [`HeaderMap`],
+/// silently dropping any entries with invalid header names or values.
+fn drm_headers(map: &HashMap<String, String>) -> HeaderMap {
+    let mut headers = HeaderMap::with_capacity(map.len());
+    for (name, value) in map {
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::try_from(name.as_str()),
+            HeaderValue::from_str(value),
+        ) {
+            headers.insert(name, value);
+        }
+    }
     headers
-        .iter()
-        .filter_map(|(key, value)| {
-            value
-                .to_str()
-                .ok()
-                .map(|value| (key.as_str().to_string(), value.to_string()))
-        })
-        .collect()
 }
 
 /// Collect proxy route maps from the resolved media streams.
 pub(crate) fn collect_routes(
     media: &PlaybackMedia,
 ) -> (
-    HashMap<String, ManifestRoute>,
-    HashMap<String, LicenseRoute>,
+    HashMap<RouteId, ManifestRoute>,
+    HashMap<RouteId, LicenseRoute>,
 ) {
     let mut manifest_routes = HashMap::new();
     let mut license_routes = HashMap::new();
@@ -334,7 +330,7 @@ pub(crate) fn collect_routes(
         let kind = infer_manifest_kind(Some(&stream.content_type), &stream.url);
         if kind != ManifestKind::Unknown {
             manifest_routes.insert(
-                format!("m{index}"),
+                RouteId::manifest(index),
                 ManifestRoute {
                     kind,
                     upstream_url: stream.url.clone(),
@@ -344,11 +340,11 @@ pub(crate) fn collect_routes(
         }
         if let Some(drm) = &stream.drm {
             license_routes.insert(
-                format!("r{index}"),
+                RouteId::license(index),
                 LicenseRoute {
                     system: drm.system,
                     upstream_url: drm.license_url.clone(),
-                    headers: drm.headers.clone(),
+                    headers: drm_headers(&drm.headers),
                 },
             );
         }
@@ -375,14 +371,15 @@ pub(crate) fn rewrite_streams(
         if kind != ManifestKind::Unknown {
             if let Some(base) = manifest_base {
                 stream.url = format!(
-                    "{base}/m{index}{}?v={media_session_id}",
-                    manifest_route_suffix(kind)
+                    "{base}/{route}{}?v={media_session_id}",
+                    manifest_route_suffix(kind),
+                    route = RouteId::manifest(index),
                 );
             }
         }
         if let Some(drm) = &mut stream.drm {
             if let Some(base) = license_base {
-                drm.license_url = format!("{base}?route=r{index}");
+                drm.license_url = format!("{base}?route={}", RouteId::license(index));
                 drm.headers = HashMap::new();
             }
         }

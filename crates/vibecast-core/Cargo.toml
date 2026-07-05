@@ -19,6 +19,7 @@ thiserror.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
 reqwest.workspace = true
+http.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

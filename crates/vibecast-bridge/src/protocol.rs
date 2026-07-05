@@ -1,9 +1,8 @@
 //! WebSocket wire protocol between the bridge and external renderers.
 //!
-//! Ports the `PlayerCommand` / `PlayerReport` models from `vibecast.player`.
-//! Commands flow bridge → renderer; reports flow renderer → bridge. Both are
-//! discriminated unions keyed on `type`, with camelCase field names on the
-//! wire (matching the Python `CastModel`).
+//! [`PlayerCommand`] flows bridge → renderer; [`PlayerReport`] flows renderer →
+//! bridge. Both are `#[serde(tag = "type")]` enums with camelCase field names
+//! on the wire.
 
 use std::collections::HashMap;
 

@@ -1,7 +1,7 @@
 //! Typed response models for SVT Play HTTP endpoints.
 //!
 //! The upstream responses carry many more fields than we use; serde ignores
-//! unknown fields by default (matching the Python `extra="allow"`).
+//! unknown fields by default.
 
 use std::collections::HashMap;
 

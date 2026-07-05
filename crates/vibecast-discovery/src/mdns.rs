@@ -240,8 +240,8 @@ impl CastAdvertisement {
     }
 
     /// Start advertising. The base service is required; subtypes are
-    /// best-effort (each needs its own responder due to the shared instance
-    /// name, mirroring the Python multi-responder workaround).
+    /// best-effort — each needs its own responder because they share one
+    /// instance name, which `mdns-sd` cannot register from a single daemon.
     pub fn start(&mut self) -> Result<(), DiscoveryError> {
         if !self.daemons.is_empty() {
             return Ok(());

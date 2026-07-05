@@ -1,8 +1,46 @@
 //! Serde models for Prime Video custom namespace and API payloads.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-// -- Cast custom namespace --------------------------------------------------
+// -- Cast custom namespace: outbound (receiver -> sender) --------------------
+
+/// Outbound Prime Video custom-namespace messages, tagged by `type`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum PrimeResponse {
+    /// Reply to an `AmIRegistered` query; `error` is present when unregistered.
+    #[serde(rename = "AmIRegisteredResponse")]
+    AmIRegistered {
+        /// Registration error, omitted when the device is registered.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<NotRegisteredError>,
+    },
+    /// Acknowledges an `ApplySettings` message.
+    #[serde(rename = "ApplySettingsResponse")]
+    ApplySettings,
+    /// Acknowledges a `Preload` message.
+    #[serde(rename = "PreloadResponse")]
+    Preload,
+    /// Acknowledges a `Register` message.
+    #[serde(rename = "RegisterResponse")]
+    Register,
+}
+
+/// The `error` payload of an `AmIRegisteredResponse` for an unregistered device.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotRegisteredError {
+    /// Machine-readable error code.
+    pub code: &'static str,
+    /// Internal error name (mirrors `code`).
+    pub internal_name: &'static str,
+    /// Human-readable description.
+    pub message: String,
+    /// Whether the error is fatal to the session.
+    pub is_fatal: bool,
+}
+
+// -- Cast custom namespace: inbound (sender -> receiver) --------------------
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]

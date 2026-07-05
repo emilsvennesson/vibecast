@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::patch::Patch;
+
 /// Media stream type used in LOAD requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum StreamType {
@@ -96,35 +98,44 @@ impl Default for Volume {
 
 impl Volume {
     /// Apply only the explicitly-provided fields from a SET_VOLUME update,
-    /// leaving omitted fields unchanged (mirrors Pydantic `model_fields_set`).
+    /// leaving omitted fields unchanged. [`Patch`] presence tracking means an
+    /// omitted field is never confused with an explicit value.
     pub fn apply_update(&mut self, update: &VolumeUpdate) {
-        if let Some(level) = update.level {
+        if let Some(&level) = update.level.set() {
             self.level = level;
         }
-        if let Some(muted) = update.muted {
+        if let Some(&muted) = update.muted.set() {
             self.muted = muted;
         }
-        if let Some(control_type) = &update.control_type {
+        if let Some(control_type) = update.control_type.set() {
             self.control_type = Some(control_type.clone());
         }
-        if let Some(step) = update.step_interval {
+        if let Some(&step) = update.step_interval.set() {
             self.step_interval = Some(step);
         }
     }
 }
 
 /// Partial volume from a SET_VOLUME request; only present fields are applied.
+///
+/// Fields use [`Patch`] so an omitted key leaves the target unchanged, while a
+/// present key is applied. A present non-nullable field rejects an explicit
+/// JSON `null` at deserialization time.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VolumeUpdate {
     /// Requested level, if provided.
-    pub level: Option<f64>,
+    #[serde(default)]
+    pub level: Patch<f64>,
     /// Requested mute state, if provided.
-    pub muted: Option<bool>,
+    #[serde(default)]
+    pub muted: Patch<bool>,
     /// Requested control type, if provided.
-    pub control_type: Option<String>,
+    #[serde(default)]
+    pub control_type: Patch<String>,
     /// Requested step interval, if provided.
-    pub step_interval: Option<f64>,
+    #[serde(default)]
+    pub step_interval: Patch<f64>,
 }
 
 /// A namespace entry in an application status block.

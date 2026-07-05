@@ -20,7 +20,7 @@ use vibecast_sdk::{
 };
 use vibecast_security::CertificateBundle;
 
-use crate::{AppRegistry, DeviceHub, DeviceIdentity, HubConfig, HubEvent, ProxyRegistrar};
+use crate::{AppRegistry, DeviceHub, DeviceHubHandle, DeviceIdentity, HubConfig, ProxyRegistrar};
 
 // -- fakes -----------------------------------------------------------------
 
@@ -96,8 +96,8 @@ impl AppProvider for FakeApp {
         &self,
         _ctx: &AppContext,
         _credentials: LaunchCredentials,
-    ) -> Result<Box<dyn AppSession>, LaunchError> {
-        Ok(Box::new(FakeSession))
+    ) -> Result<Arc<dyn AppSession>, LaunchError> {
+        Ok(Arc::new(FakeSession))
     }
 }
 
@@ -169,7 +169,7 @@ fn dummy_auth() -> AuthMaterial {
 
 struct Harness {
     client: Framed<DuplexStream, CastCodec>,
-    hub_tx: mpsc::Sender<HubEvent>,
+    hub: DeviceHubHandle,
     renderer: Arc<FakeRenderer>,
     proxy: Arc<FakeProxy>,
 }
@@ -198,7 +198,7 @@ async fn setup() -> Harness {
     let proxy = Arc::new(FakeProxy::default());
     let hub = DeviceHub::new(HubConfig {
         identity: DeviceIdentity::new("Living Room".into(), "Chromecast".into(), "dev-1".into()),
-        registry: AppRegistry::new(vec![Arc::new(FakeApp)]),
+        registry: AppRegistry::new(vec![Arc::new(FakeApp)]).expect("registry"),
         renderer: renderer.clone(),
         proxy: proxy.clone(),
         http: reqwest::Client::new(),
@@ -209,12 +209,12 @@ async fn setup() -> Harness {
         display_width: 1920,
         display_height: 1080,
     });
-    let hub_tx = hub.sender();
+    let hub_handle = hub.handle();
     {
-        let hub_tx = hub_tx.clone();
+        let hub_handle = hub_handle.clone();
         tokio::spawn(async move {
             while let Some(event) = events_rx.recv().await {
-                if hub_tx.send(HubEvent::Server(event)).await.is_err() {
+                if hub_handle.send_server_event(event).await.is_err() {
                     break;
                 }
             }
@@ -224,7 +224,7 @@ async fn setup() -> Harness {
 
     Harness {
         client: Framed::new(client_end, CastCodec),
-        hub_tx,
+        hub: hub_handle,
         renderer,
         proxy,
     }
@@ -408,14 +408,14 @@ async fn primary_player_report_broadcasts_status() {
 
     // A player state report from the renderer bridge.
     harness
-        .hub_tx
-        .send(HubEvent::Report(PlayerReport::State {
+        .hub
+        .send_player_report(PlayerReport::State {
             session_id: transport.clone(),
             player_state: PlayerState::Playing,
             current_time: 33.5,
             duration: Some(120.0),
             idle_reason: None,
-        }))
+        })
         .await
         .unwrap();
 
@@ -500,7 +500,7 @@ async fn app_resolve_license_override_is_used() {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    use vibecast_bridge::{LicenseHandler, LicenseRequest as WireLicenseRequest};
+    use vibecast_bridge::{LicenseHandler, LicenseRequest as WireLicenseRequest, RouteId};
 
     use crate::proxy::{LicenseRoute, SessionProxy};
 
@@ -514,21 +514,21 @@ async fn app_resolve_license_override_is_used() {
         Arc::new(vibecast_sdk::NoopSenderChannel),
     );
     let license_routes = HashMap::from([(
-        "r0".to_string(),
+        RouteId::license(0),
         LicenseRoute {
             system: vibecast_sdk::DrmSystem::ClearKey,
             upstream_url: "https://unused.example/license".into(),
-            headers: HashMap::new(),
+            headers: http::HeaderMap::new(),
         },
     )]);
-    let proxy = SessionProxy::new("fake".into(), app, ctx, HashMap::new(), license_routes);
+    let proxy = SessionProxy::new(app, ctx, HashMap::new(), license_routes);
 
     let request = WireLicenseRequest {
         session_id: "s".into(),
         body: b"abc".to_vec(),
         content_type: "application/octet-stream".into(),
-        route_id: Some("r0".into()),
-        headers: HashMap::new(),
+        route_id: Some(RouteId::license(0)),
+        headers: http::HeaderMap::new(),
     };
     let response = proxy.handle_license(request).await.unwrap();
     assert_eq!(response.status, 200);

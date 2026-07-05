@@ -68,6 +68,19 @@ fn set_volume_applies_only_provided_fields() {
     assert!(volume.muted);
     assert_eq!(volume.level, 0.8);
     assert_eq!(volume.control_type.as_deref(), Some("attenuation"));
+    // Presence tracking: omitted fields are Missing, provided ones are Set.
+    assert!(!req.volume.level.is_set());
+    assert!(req.volume.muted.is_set());
+}
+
+#[test]
+fn set_volume_rejects_explicit_null_for_non_nullable_field() {
+    // An explicit `null` for a non-nullable field is a malformed update, not
+    // an omission: it must fail to parse rather than be silently ignored.
+    let result: Result<SetVolumeRequest, _> = serde_json::from_value(
+        json!({"type": "SET_VOLUME", "requestId": 2, "volume": {"level": null}}),
+    );
+    assert!(result.is_err());
 }
 
 #[test]

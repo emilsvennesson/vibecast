@@ -1,8 +1,9 @@
 //! Bundled Amazon Prime Video app.
 //!
-//! Native Rust implementation: the launched [`PrimeSession`] owns all mutable
-//! auth/playback state behind a `tokio::Mutex`, serde models replace Pydantic,
-//! and Prime's custom Widevine flow is implemented through the SDK license hook.
+//! The launched [`PrimeSession`] owns all mutable auth/playback state behind a
+//! `tokio::Mutex`, per-title license context is scoped to the load that created
+//! its route, and Prime's custom Widevine flow is implemented through the SDK
+//! license hook.
 
 #![forbid(unsafe_code)]
 
@@ -10,10 +11,11 @@ mod api;
 mod models;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 use tokio::sync::Mutex;
 use url::Url;
 use vibecast_sdk::{
@@ -26,7 +28,10 @@ use vibecast_sdk::{
 use crate::api::{
     PrimeApiConfig, PrimeError, PrimePlaybackResources, PrimeVideoApi, WidevineLicenseParams,
 };
-use crate::models::{ApplySettingsMessage, PreloadMessage, PrimeMessage, RegisterMessage};
+use crate::models::{
+    ApplySettingsMessage, NotRegisteredError, PreloadMessage, PrimeMessage, PrimeResponse,
+    RegisterMessage,
+};
 
 const NS_PRIME: &str = "urn:x-cast:com.amazon.primevideo.cast";
 const APP_IDS: &[&str] = &["17608BC8"];
@@ -133,8 +138,8 @@ impl AppProvider for PrimeVideo {
         &self,
         ctx: &AppContext,
         credentials: LaunchCredentials,
-    ) -> Result<Box<dyn AppSession>, LaunchError> {
-        Ok(Box::new(PrimeSession {
+    ) -> Result<Arc<dyn AppSession>, LaunchError> {
+        Ok(Arc::new(PrimeSession {
             api: PrimeVideoApi::new(
                 ctx.http.clone(),
                 self.config
@@ -371,34 +376,32 @@ impl AppSession for PrimeSession {
                         state.device_id = Some(device_id);
                     }
                     if state.actor_access_token.is_some() {
-                        json!({"type": "AmIRegisteredResponse"})
+                        PrimeResponse::AmIRegistered { error: None }
                     } else {
                         let device_id = message
                             .device_id
                             .or_else(|| state.device_id.clone())
                             .unwrap_or_else(|| ctx.receiver.device_id.clone());
-                        json!({
-                            "type": "AmIRegisteredResponse",
-                            "error": {
-                                "code": "NotRegistered",
-                                "internalName": "NotRegistered",
-                                "message": format!("deviceId {device_id} is not registered"),
-                                "isFatal": false,
-                            },
-                        })
+                        PrimeResponse::AmIRegistered {
+                            error: Some(NotRegisteredError {
+                                code: "NotRegistered",
+                                internal_name: "NotRegistered",
+                                message: format!("deviceId {device_id} is not registered"),
+                                is_fatal: false,
+                            }),
+                        }
                     }
                 };
                 ctx.send_custom(NS_PRIME, response).await;
             }
             PrimeMessage::ApplySettings(message) => {
                 self.handle_apply_settings(message).await;
-                ctx.send_custom(NS_PRIME, json!({"type": "ApplySettingsResponse"}))
+                ctx.send_custom(NS_PRIME, PrimeResponse::ApplySettings)
                     .await;
             }
             PrimeMessage::Preload(message) => {
                 self.handle_preload(message).await;
-                ctx.send_custom(NS_PRIME, json!({"type": "PreloadResponse"}))
-                    .await;
+                ctx.send_custom(NS_PRIME, PrimeResponse::Preload).await;
             }
         }
 
@@ -420,10 +423,12 @@ impl AppSession for PrimeSession {
             let Some(device_id) = state.device_id.clone() else {
                 return error_license(500, "missing device id");
             };
-            let title_id = state
-                .current_title_id
-                .clone()
-                .or_else(|| title_id_from_url(&route.upstream_url));
+            // Derive the title from the route's own license URL first: it is
+            // scoped to the load that created this route, so a license request
+            // from an older load never picks up a newer load's title. Fall back
+            // to the session's last title only if the route lacks one.
+            let title_id =
+                title_id_from_url(&route.upstream_url).or_else(|| state.current_title_id.clone());
             let Some(title_id) = title_id else {
                 return error_license(400, "missing title id");
             };
@@ -515,8 +520,7 @@ impl PrimeSession {
             }
         }
 
-        ctx.send_custom(NS_PRIME, json!({"type": "RegisterResponse"}))
-            .await;
+        ctx.send_custom(NS_PRIME, PrimeResponse::Register).await;
     }
 
     async fn handle_apply_settings(&self, message: ApplySettingsMessage) {
@@ -1031,14 +1035,14 @@ mod tests {
                     body: b"abc".to_vec(),
                     content_type: "application/octet-stream".to_string(),
                     route_id: Some("r0".to_string()),
-                    headers: HashMap::new(),
+                    headers: vibecast_sdk::HeaderMap::new(),
                 },
                 LicenseRoute {
                     route_id: "r0".to_string(),
                     system: DrmSystem::Widevine,
                     upstream_url: "https://example.com/license?titleId=amzn1.dv.gti.example"
                         .to_string(),
-                    headers: HashMap::new(),
+                    headers: vibecast_sdk::HeaderMap::new(),
                 },
                 &NoopForwarder,
             )
@@ -1083,14 +1087,14 @@ mod tests {
                     body: b"abc".to_vec(),
                     content_type: "application/octet-stream".to_string(),
                     route_id: Some("r0".to_string()),
-                    headers: HashMap::new(),
+                    headers: vibecast_sdk::HeaderMap::new(),
                 },
                 LicenseRoute {
                     route_id: "r0".to_string(),
                     system: DrmSystem::Widevine,
                     upstream_url: "https://example.com/license?titleId=amzn1.dv.gti.live-example"
                         .to_string(),
-                    headers: HashMap::new(),
+                    headers: vibecast_sdk::HeaderMap::new(),
                 },
                 &NoopForwarder,
             )
