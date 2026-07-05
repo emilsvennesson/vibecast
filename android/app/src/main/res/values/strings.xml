@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">vibecast</string>
+    <string name="channel_name">Receiver</string>
+    <string name="notification_running">Cast receiver is running</string>
+    <string name="action_stop">Stop</string>
+    <string name="status_format">Status: %1$s</string>
+    <string name="start_button">Start receiver</string>
+    <string name="stop_button">Stop receiver</string>
+    <string name="title">vibecast receiver</string>
+</resources>

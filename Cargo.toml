@@ -15,13 +15,17 @@ members = [
     "crates/vibecast-apps-viaplay",
     "crates/vibecast-apps-primevideo",
     "crates/vibecast-core",
+    "crates/vibecast-platform",
     "crates/vibecast-cli",
+    "crates/vibecast-ffi",
+    "crates/uniffi-bindgen",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+# UniFFI 0.32 (vibecast-ffi) sets the workspace floor at 1.87.
+rust-version = "1.87"
 publish = false
 license = "MIT"
 repository = "https://github.com/emilsvennesson/vibecast"
@@ -87,6 +91,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # CLI argument parsing + config
 clap = { version = "4", features = ["derive"] }
 toml = "0.8"
+
+# FFI bindings (vibecast-ffi): Kotlin/Swift/... from one Rust facade
+uniffi = "0.32"
+
+# Android tracing sink (vibecast-ffi, target_os = "android" only)
+tracing-logcat = "0.1"
 
 # Dev / test
 proptest = "1"

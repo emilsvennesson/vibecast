@@ -1,0 +1,19 @@
+[package]
+name = "uniffi-bindgen"
+description = "Version-locked uniffi-bindgen CLI for generating vibecast-ffi bindings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/main.rs"
+
+# The `cli` feature (clap + bindgen) is isolated to this dev tool so it never
+# links into the shipped `vibecast-ffi` cdylib. The version tracks the workspace
+# `uniffi` dep so generated bindings always match the scaffolding.
+[dependencies]
+uniffi = { workspace = true, features = ["cli"] }

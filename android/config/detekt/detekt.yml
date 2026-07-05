@@ -1,0 +1,26 @@
+# Detekt configuration (builds upon the default rule set). Mirrors the Rust
+# side's "lint clean / warnings-as-errors" ethos: the build fails on findings.
+build:
+  maxIssues: 0
+
+complexity:
+  LongMethod:
+    threshold: 80
+  TooManyFunctions:
+    active: false
+
+style:
+  MagicNumber:
+    # Ports, timeouts, and notification ids are self-explanatory constants.
+    active: false
+  ReturnCount:
+    active: false
+  MaxLineLength:
+    maxLineLength: 120
+
+exceptions:
+  TooGenericExceptionCaught:
+    # The UniFFI observer boundary intentionally catches broadly and logs.
+    active: false
+  SwallowedException:
+    active: false

@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.87
       - uses: Swatinem/rust-cache@v2
       - name: build (declared MSRV)
         run: cargo build --all-targets --all-features
@@ -63,3 +63,28 @@ jobs:
           tool: cargo-deny
       - name: cargo-deny
         run: cargo deny check
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+      - name: Install NDK r28
+        run: |
+          yes | sdkmanager "ndk;28.2.13676358" >/dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/28.2.13676358" >> "$GITHUB_ENV"
+      # Builds vibecast-ffi per ABI (cargo-ndk), generates the UniFFI Kotlin
+      # bindings, then compiles + lints the app (ktlint/detekt/Android Lint).
+      - name: Gradle assemble + lint
+        working-directory: android
+        run: ./gradlew :app:assembleDebug lintDebug ktlintCheck detekt --no-daemon --stacktrace
