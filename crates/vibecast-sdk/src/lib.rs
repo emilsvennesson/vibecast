@@ -3,9 +3,80 @@
 //! Implement [`AppProvider`] (a factory) and [`AppSession`] (an owned,
 //! per-launch session) to add a Cast app. `launch` returns a shared session
 //! that *owns* its state for the session's lifetime; the runtime holds it
-//! behind an [`Arc`](std::sync::Arc) so callbacks can run off the routing task.
+//! behind an [`Arc`] so callbacks can run off the routing task.
 //!
-//! App crates depend ONLY on this crate.
+//! App crates depend ONLY on this crate — no transport, TLS, or bridge types
+//! leak in. The Cast protocol types apps need ([`LoadRequest`], [`MediaInfo`],
+//! [`PlayerState`], etc.) are re-exported here so an app's entire dependency on
+//! vibecast is this one crate.
+//!
+//! # Writing an app
+//!
+//! 1. Implement [`AppProvider`] — declare the Cast app ids, display name, and a
+//!    stable `app_key` (used for per-app config and data directories). Override
+//!    [`AppProvider::configure`] to receive the `[apps.<app_key>]` config block
+//!    from `config.toml`; the default accepts and ignores it.
+//! 2. Implement [`AppSession::resolve_media`] — translate a Cast `LOAD` request
+//!    (the `content_id` in [`LoadRequest`]) into a [`PlaybackMedia`] describing
+//!    the playable streams and DRM info. Failures map to typed
+//!    [`MediaResolveError`] codes (sent back to the sender as `LOAD_FAILED`).
+//! 3. Optionally override the other [`AppSession`] callbacks:
+//!    - [`AppSession::on_message`] for custom-namespace messages (declared via
+//!      [`AppProvider::namespaces`]).
+//!    - [`AppSession::resolve_license`] to transform DRM challenges/responses
+//!      before they hit the license proxy (e.g. Prime Video's custom flow). The
+//!      default forwards unchanged.
+//!    - [`AppSession::on_playback_update`] to react to canonical playback state
+//!      (e.g. broadcast progress on a custom namespace).
+//!    - [`AppSession::on_sender_connected`] / [`AppSession::on_stop`] for
+//!      lifecycle hooks.
+//! 4. Register the provider in `crates/vibecast-cli/src/main.rs::apps`.
+//!
+//! `vibecast-apps-svtplay` is the reference app — model new apps on it.
+//!
+//! # Minimal skeleton
+//!
+//! ```no_run
+//! use std::sync::Arc;
+//! use async_trait::async_trait;
+//! use vibecast_sdk::{
+//!     AppContext, AppProvider, AppSession, LaunchCredentials, LaunchError,
+//!     LoadRequest, MediaResolveError, PlaybackMedia,
+//! };
+//!
+//! pub struct MyApp;
+//!
+//! #[async_trait]
+//! impl AppProvider for MyApp {
+//!     fn app_ids(&self) -> &'static [&'static str] { &["DEADBEEF"] }
+//!     fn display_name(&self) -> &'static str { "My App" }
+//!     fn app_key(&self) -> &'static str { "myapp" }
+//!
+//!     async fn launch(
+//!         &self,
+//!         _ctx: &AppContext,
+//!         _credentials: LaunchCredentials,
+//!     ) -> Result<Arc<dyn AppSession>, LaunchError> {
+//!         Ok(Arc::new(MySession))
+//!     }
+//! }
+//!
+//! pub struct MySession;
+//!
+//! #[async_trait]
+//! impl AppSession for MySession {
+//!     async fn resolve_media(
+//!         &self,
+//!         _ctx: &AppContext,
+//!         request: &LoadRequest,
+//!     ) -> Result<PlaybackMedia, MediaResolveError> {
+//!         // resolve request.media.content_id into streams + DRM, then:
+//!         # unreachable!()
+//!     }
+//! }
+//! ```
+//!
+//! Generate the full API docs with `cargo doc -p vibecast-sdk --open`.
 
 #![forbid(unsafe_code)]
 
@@ -135,5 +206,27 @@ pub fn normalize_stream_type(stream_type: StreamType) -> StreamType {
     match stream_type {
         StreamType::None => StreamType::Buffered,
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_none_is_buffered() {
+        assert_eq!(
+            normalize_stream_type(StreamType::None),
+            StreamType::Buffered
+        );
+    }
+
+    #[test]
+    fn normalize_passes_through_buffered_and_live() {
+        assert_eq!(
+            normalize_stream_type(StreamType::Buffered),
+            StreamType::Buffered
+        );
+        assert_eq!(normalize_stream_type(StreamType::Live), StreamType::Live);
     }
 }
