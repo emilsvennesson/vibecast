@@ -1,10 +1,9 @@
 # vibecast
 
 Turn any computer into a Chromecast. vibecast is a native Google Cast
-receiver — it impersonates a Chromecast on your network so the Cast button
-in SVT Play, TV4 Play, Viaplay, and Prime Video works against a PC, HTPC, or
-media server instead of a dongle. Cast from your phone; playback happens on
-the machine running vibecast.
+receiver — it impersonates a Chromecast on your network so the Cast button in
+supported apps works against a PC, HTPC, or media server instead of a dongle.
+Cast from your phone; playback happens on the machine running vibecast.
 
 It's a single Rust binary with no cloud dependency: it speaks the full CastV2
 TLS protocol, advertises itself over mDNS, and runs an embedded Shaka Player
