@@ -3,8 +3,8 @@
 //! Hop-by-hop headers must not be forwarded when relaying license/manifest
 //! requests and responses. Operating on [`http::HeaderMap`] (rather than a
 //! `HashMap<String, String>`) preserves duplicate headers, keeps values as
-//! validated [`HeaderValue`]s, and reuses the canonical case-insensitive
-//! [`HeaderName`] comparison instead of ad-hoc lowercasing.
+//! validated [`http::HeaderValue`]s, and reuses the canonical case-insensitive
+//! [`http::HeaderName`] comparison instead of ad-hoc lowercasing.
 
 use http::header::{HeaderMap, HeaderName};
 

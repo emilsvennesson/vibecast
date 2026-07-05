@@ -1,6 +1,6 @@
 //! Bundled Amazon Prime Video app.
 //!
-//! The launched [`PrimeSession`] owns all mutable auth/playback state behind a
+//! The launched `PrimeSession` owns all mutable auth/playback state behind a
 //! `tokio::Mutex`, per-title license context is scoped to the load that created
 //! its route, and Prime's custom Widevine flow is implemented through the SDK
 //! license hook.

@@ -1,7 +1,7 @@
 //! CastV2 protobuf types and length-prefixed message framing.
 //!
 //! The protobuf types are generated at build time from `proto/cast_channel.proto`
-//! by `protox` + `prost` (see `build.rs`). Framing helpers live in [`framing`].
+//! by `protox` + `prost` (see `build.rs`). Framing helpers live in `framing`.
 
 #![forbid(unsafe_code)]
 

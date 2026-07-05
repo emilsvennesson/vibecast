@@ -1,7 +1,7 @@
 //! Bundled TV4 Play app.
 //!
-//! The owned [`Tv4Session`] holds its mutable auth/playback state behind a
-//! `tokio::Mutex`, and its custom-namespace snapshot ([`Tv4Message`]) is
+//! The owned `Tv4Session` holds its mutable auth/playback state behind a
+//! `tokio::Mutex`, and its custom-namespace snapshot (`Tv4Message`) is
 //! broadcast through `AppContext::broadcast_custom`.
 
 #![forbid(unsafe_code)]

@@ -10,7 +10,7 @@ pub const PLAYER_HTML: &str = include_str!("../assets/player.html");
 pub const PLAYER_JS: &str = include_str!("../assets/player.js");
 
 /// Content type served for [`PLAYER_HTML`].
-pub const PLAYER_HTML_CONTENT_TYPE: &str = "text/html; charset=utf-8";
+pub(crate) const PLAYER_HTML_CONTENT_TYPE: &str = "text/html; charset=utf-8";
 
 /// Content type served for [`PLAYER_JS`].
-pub const PLAYER_JS_CONTENT_TYPE: &str = "application/javascript; charset=utf-8";
+pub(crate) const PLAYER_JS_CONTENT_TYPE: &str = "application/javascript; charset=utf-8";

@@ -4,6 +4,8 @@ description = "Cast device discovery: mDNS advertisement and eureka HTTP/HTTPS e
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [dependencies]

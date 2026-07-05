@@ -252,7 +252,7 @@ pub struct DeviceHub {
 }
 
 impl DeviceHub {
-    /// Build a hub. Feed it with [`sender`](Self::sender) and drive it with
+    /// Build a hub. Feed it with [`handle`](Self::handle) and drive it with
     /// [`run`](Self::run).
     #[must_use]
     pub fn new(config: HubConfig) -> Self {

@@ -1,6 +1,6 @@
 //! Bundled Viaplay app.
 //!
-//! The owned [`ViaplaySession`] holds its mutable auth / playback state behind a
+//! The owned `ViaplaySession` holds its mutable auth / playback state behind a
 //! `tokio::Mutex`. Device-code polling and the rest of the auth flow run on
 //! cancellable tasks owned by a [`TaskTracker`], so they stop deterministically
 //! when the session tears down.

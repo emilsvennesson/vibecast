@@ -1,9 +1,12 @@
 [package]
 name = "vibecast-apps-svtplay"
+description = "SVT Play Cast application"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-publish = false
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [dependencies]
 vibecast-sdk = { path = "../vibecast-sdk" }

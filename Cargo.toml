@@ -23,6 +23,8 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 publish = false
+license = "MIT"
+repository = "https://github.com/emilsvennesson/vibecast"
 
 [workspace.dependencies]
 # Async runtime
