@@ -74,9 +74,9 @@ jobs:
           java-version: '17'
       # Puts sdkmanager on PATH and accepts SDK licenses.
       - uses: android-actions/setup-android@v3
-      - name: Install SDK packages (NDK r28 + platform/build-tools 34)
+      - name: Install SDK packages (NDK r28 + platform/build-tools 36)
         run: |
-          sdkmanager "ndk;28.2.13676358" "platforms;android-34" "build-tools;34.0.0"
+          sdkmanager "ndk;28.2.13676358" "platforms;android-36" "build-tools;36.0.0"
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/28.2.13676358" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:

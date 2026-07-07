@@ -1,6 +1,7 @@
 package com.vibecast.receiver
 
 import android.content.Context
+import androidx.core.content.edit
 
 /**
  * User settings backed by [android.content.SharedPreferences].
@@ -32,7 +33,7 @@ class Settings(
         get() = prefs.getInt(KEY_PLAYER_PORT, DEFAULT_PLAYER_PORT).toUShort()
 
     fun setFriendlyName(name: String) {
-        prefs.edit().putString(KEY_NAME, name).apply()
+        prefs.edit { putString(KEY_NAME, name) }
     }
 
     private companion object {

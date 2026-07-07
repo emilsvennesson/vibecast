@@ -33,7 +33,7 @@ and are **not** committed.
 
 ## Prerequisites
 
-- Android SDK (`ANDROID_HOME` / `local.properties` `sdk.dir`), platform 34, build-tools 34.
+- Android SDK (`ANDROID_HOME` / `local.properties` `sdk.dir`), platform 36, build-tools 36.
 - Android **NDK r28+** (16 KB page default). Set `ANDROID_NDK_HOME`, or install it
   under `$ANDROID_HOME/ndk/` and the build auto-detects the newest.
 - Rust with the Android targets and `cargo-ndk`:
@@ -41,7 +41,7 @@ and are **not** committed.
   rustup target add aarch64-linux-android x86_64-linux-android
   cargo install cargo-ndk    # or: cargo binstall cargo-ndk
   ```
-- JDK 17 (Gradle daemon). The wrapper pins Gradle 8.9 / AGP 8.5.2.
+- JDK 17 (Gradle daemon). The wrapper pins Gradle 8.13 / AGP 8.13.2.
 
 ## Build
 
@@ -103,8 +103,8 @@ Change them in the status app's settings (SharedPreferences) if needed.
 
 ## Notes / limitations
 
-- `targetSdk` is 34 for this phase (no extra SDK download); bump before any Play
-  release (`OldTargetSdkVersion`/`ExpiredTargetSdkVersion` lint checks are disabled
-  for now).
+- `compileSdk`/`targetSdk` are 36 (Android 16), the latest AGP 8.13 supports.
+  Targeting API 37+ (Android 17) additionally needs the `ACCESS_LOCAL_NETWORK`
+  permission — see the note in `AndroidManifest.xml`.
 - `useLegacyPackaging = false` keeps `.so` files page-aligned for 16 KB devices;
-  JNA (5.15) loads them from the APK without extraction.
+  JNA (5.19) loads them from the APK without extraction.
