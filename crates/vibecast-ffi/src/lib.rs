@@ -183,7 +183,9 @@ impl ReceiverHandle {
         // Forward TXT-record changes (cert rotation) to the foreign observer.
         let txt_observer = observer.clone();
         let on_txt: TxtObserver = Arc::new(move |pairs: Vec<(String, String)>| {
-            let _ = txt_observer.on_txt_changed(to_txt_entries(pairs));
+            if let Err(error) = txt_observer.on_txt_changed(to_txt_entries(pairs)) {
+                tracing::warn!(%error, "observer.on_txt_changed failed");
+            }
         });
 
         let running = self.runtime.block_on(vibecast_platform::run(
@@ -192,12 +194,14 @@ impl ReceiverHandle {
             Some(on_txt),
         ))?;
 
-        let _ = observer.on_started(
+        if let Err(error) = observer.on_started(
             running.cast_port,
             running.eureka_http_port,
             running.instance_name.clone(),
             to_txt_entries(running.txt.clone()),
-        );
+        ) {
+            tracing::warn!(%error, "observer.on_started failed");
+        }
 
         state.observer = Some(observer);
         state.running = Some(running);
@@ -215,7 +219,9 @@ impl ReceiverHandle {
             self.runtime.block_on(running.shutdown());
         }
         if let Some(observer) = observer {
-            let _ = observer.on_stopped();
+            if let Err(error) = observer.on_stopped() {
+                tracing::warn!(%error, "observer.on_stopped failed");
+            }
         }
     }
 

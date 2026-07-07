@@ -11,7 +11,9 @@ import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -34,6 +36,11 @@ class CastReceiverService :
     Service(),
     ReceiverObserver {
     private val worker = Executors.newSingleThreadExecutor()
+
+    // NsdManager dispatches its RegistrationListener via a Handler, so all NSD
+    // operations must run on a Looper thread. The observer callbacks that drive
+    // them arrive on Rust/Tokio worker threads, so marshal onto the main looper.
+    private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var nsdManager: NsdManager
 
     private var handle: ReceiverHandle? = null
@@ -113,16 +120,18 @@ class CastReceiverService :
         instanceName: String,
         txt: List<TxtEntry>,
     ) {
-        registerService(instanceName, castPort.toInt(), txt)
+        mainHandler.post { registerService(instanceName, castPort.toInt(), txt) }
         ReceiverState.update("Running", "cast=$castPort eureka=$eurekaHttpPort · $instanceName")
         Log.i(TAG, "receiver started: $instanceName cast=$castPort")
     }
 
     override fun onTxtChanged(txt: List<TxtEntry>) {
-        val name = instanceName ?: return
-        Log.i(TAG, "TXT changed (cert rotation); re-registering NSD")
-        unregisterService()
-        registerService(name, castPort, txt)
+        mainHandler.post {
+            val name = instanceName ?: return@post
+            Log.i(TAG, "TXT changed (cert rotation); re-registering NSD")
+            unregisterService()
+            registerService(name, castPort, txt)
+        }
     }
 
     override fun onStopped() {
@@ -260,6 +269,8 @@ class CastReceiverService :
         }
 
     override fun onDestroy() {
+        // Cancel any queued (re-)registration before tearing down NSD.
+        mainHandler.removeCallbacksAndMessages(null)
         unregisterService()
         val stopping = handle
         handle = null
