@@ -154,6 +154,11 @@ android {
         // ABI hints, backup-rules boilerplate — are noise for a native LAN server
         // and would break CI on every upstream release. Real code-quality checks
         // stay on; NewApi for the generated UniFFI cleaner is scoped in lint.xml.
+        //
+        // OldTargetApi: targetSdk 36 is the max AGP 8.13 supports (37 needs
+        // ACCESS_LOCAL_NETWORK). This check compares against the highest platform
+        // *installed*, so it stays quiet locally but fires on CI runners that
+        // ship a newer platform. Bump targetSdk when moving to a newer AGP.
         disable +=
             setOf(
                 "GradleDependency",
@@ -162,6 +167,7 @@ android {
                 "VectorRaster",
                 "ChromeOsAbiSupport",
                 "DataExtractionRules",
+                "OldTargetApi",
             )
     }
 }
