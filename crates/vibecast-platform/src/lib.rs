@@ -150,7 +150,10 @@ impl RunningReceiver {
     pub async fn shutdown(self) {
         self.advertisement.lock().await.stop();
         let _ = tokio::time::timeout(Duration::from_secs(5), self.hub_handle.shutdown()).await;
-        self.bridge.stop().await;
+        // Bound like the other steps: the bridge's graceful shutdown awaits
+        // in-flight connections, and a long-lived `/player` WebSocket would
+        // otherwise never drain — hanging the blocking FFI `stop()` forever.
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.bridge.stop()).await;
         self.shutdown.cancel();
         self.tasks.close();
         if tokio::time::timeout(Duration::from_secs(5), self.tasks.wait())
@@ -223,13 +226,53 @@ pub async fn run(
     // Device-auth CRL: prefer the manifest's embedded CRL, else fetch from Google.
     let crl = resolve_crl(&http, bundle.crl.clone()).await;
 
-    // --- player bridge ---
+    // --- player bridge (constructed now, started below) ---
     let (reports_tx, mut reports_rx) = mpsc::channel(64);
     let bridge = Arc::new(PlayerBridge::new(
         bind_host.clone(),
         config.network.player_port,
         reports_tx,
     ));
+
+    // Bind every listener and build the eureka server up front, before spawning
+    // any supervised task or starting the bridge. Every fallible setup step is
+    // gathered here, where an early return only has to drop an unspawned socket;
+    // once we begin spawning tasks and start the bridge below, nothing else can
+    // fail, so a partial start never leaks running tasks or bound ports on the
+    // caller's (long-lived, reused) runtime.
+    let cast_listener = TcpListener::bind((bind_host.as_str(), cast_port))
+        .await
+        .map_err(|source| PlatformError::Bind {
+            what: "cast",
+            port: cast_port,
+            source,
+        })?;
+    let eureka = Arc::new(EurekaServer::new(
+        &bundle,
+        eureka_identity(&config, &friendly_name, &model, &device_id, &local_ip),
+    )?);
+    let eureka_http_listener = TcpListener::bind((bind_host.as_str(), eureka_http_port))
+        .await
+        .map_err(|source| PlatformError::Bind {
+            what: "eureka http",
+            port: eureka_http_port,
+            source,
+        })?;
+    let eureka_https_listener = std::net::TcpListener::bind((bind_host.as_str(), eureka_https_port))
+        .map_err(|source| PlatformError::Bind {
+            what: "eureka https",
+            port: eureka_https_port,
+            source,
+        })?;
+    eureka_https_listener
+        .set_nonblocking(true)
+        .map_err(|source| PlatformError::Bind {
+            what: "eureka https",
+            port: eureka_https_port,
+            source,
+        })?;
+
+    // Start the bridge last among the fallible steps.
     bridge.start().await.map_err(PlatformError::BridgeStart)?;
     let player_port = bridge.serving_port().unwrap_or(config.network.player_port);
 
@@ -284,14 +327,6 @@ pub async fn run(
     let cast_server = Arc::new(CastServer::new(cast_tls, auth, events_tx));
     spawn_server_forward(&tasks, shutdown.clone(), events_rx, hub_handle.clone());
     tasks.spawn(hub.run());
-
-    let cast_listener = TcpListener::bind((bind_host.as_str(), cast_port))
-        .await
-        .map_err(|source| PlatformError::Bind {
-            what: "cast",
-            port: cast_port,
-            source,
-        })?;
     {
         let cast_server = cast_server.clone();
         let shutdown = shutdown.clone();
@@ -308,24 +343,13 @@ pub async fn run(
     }
 
     // --- eureka discovery (HTTP + HTTPS) ---
-    let eureka = Arc::new(EurekaServer::new(
-        &bundle,
-        eureka_identity(&config, &friendly_name, &model, &device_id, &local_ip),
-    )?);
     {
         let eureka = eureka.clone();
         let shutdown = shutdown.clone();
-        let listener = TcpListener::bind((bind_host.as_str(), eureka_http_port))
-            .await
-            .map_err(|source| PlatformError::Bind {
-                what: "eureka http",
-                port: eureka_http_port,
-                source,
-            })?;
         tasks.spawn(async move {
             tokio::select! {
                 () = shutdown.cancelled() => {}
-                result = eureka.serve_http(listener) => {
+                result = eureka.serve_http(eureka_http_listener) => {
                     if let Err(error) = result {
                         tracing::error!(%error, "eureka http stopped");
                     }
@@ -336,23 +360,10 @@ pub async fn run(
     {
         let eureka = eureka.clone();
         let shutdown = shutdown.clone();
-        let listener = std::net::TcpListener::bind((bind_host.as_str(), eureka_https_port))
-            .map_err(|source| PlatformError::Bind {
-                what: "eureka https",
-                port: eureka_https_port,
-                source,
-            })?;
-        listener
-            .set_nonblocking(true)
-            .map_err(|source| PlatformError::Bind {
-                what: "eureka https",
-                port: eureka_https_port,
-                source,
-            })?;
         tasks.spawn(async move {
             tokio::select! {
                 () = shutdown.cancelled() => {}
-                result = eureka.serve_https(listener, eureka_tls) => {
+                result = eureka.serve_https(eureka_https_listener, eureka_tls) => {
                     if let Err(error) = result {
                         tracing::error!(%error, "eureka https stopped");
                     }

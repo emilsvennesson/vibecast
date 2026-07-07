@@ -194,17 +194,24 @@ impl ReceiverHandle {
             Some(on_txt),
         ))?;
 
-        if let Err(error) = observer.on_started(
+        // Capture the facts the observer needs, store state, then release the
+        // lock *before* invoking the foreign callback: `state` is a non-reentrant
+        // `std::sync::Mutex`, so an observer that calls back into the handle
+        // (e.g. `is_running`/`stop`) from `on_started` would otherwise deadlock.
+        let started = (
             running.cast_port,
             running.eureka_http_port,
             running.instance_name.clone(),
             to_txt_entries(running.txt.clone()),
-        ) {
+        );
+        state.observer = Some(observer.clone());
+        state.running = Some(running);
+        drop(state);
+
+        let (cast_port, eureka_http_port, instance_name, txt) = started;
+        if let Err(error) = observer.on_started(cast_port, eureka_http_port, instance_name, txt) {
             tracing::warn!(%error, "observer.on_started failed");
         }
-
-        state.observer = Some(observer);
-        state.running = Some(running);
         Ok(())
     }
 

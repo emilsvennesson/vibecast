@@ -43,7 +43,13 @@ class CastReceiverService :
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var nsdManager: NsdManager
 
+    // Written on the worker thread (startReceiver) and read on the main thread
+    // (onDestroy); @Volatile gives the cross-thread visibility that would
+    // otherwise be missing, so onDestroy never misses a started handle.
+    @Volatile
     private var handle: ReceiverHandle? = null
+
+    @Volatile
     private var wifiLock: WifiManager.WifiLock? = null
     private var registrationListener: NsdManager.RegistrationListener? = null
 
@@ -106,6 +112,10 @@ class CastReceiverService :
         try {
             newHandle.start(config, this)
         } catch (error: Exception) {
+            // Clear the handle so the `handle != null` guard above doesn't wedge
+            // a later retry; the failed handle never started, so nothing to stop.
+            handle = null
+            newHandle.close()
             ReceiverState.update("Error", error.message ?: error.toString())
             Log.e(TAG, "receiver start failed", error)
             stopSelf()
@@ -214,11 +224,6 @@ class CastReceiverService :
             }
     }
 
-    private fun releaseWifiLock() {
-        wifiLock?.let { if (it.isHeld) it.release() }
-        wifiLock = null
-    }
-
     // --- Notification ---
 
     private fun createNotificationChannel() {
@@ -274,6 +279,8 @@ class CastReceiverService :
         unregisterService()
         val stopping = handle
         handle = null
+        val lock = wifiLock
+        wifiLock = null
         worker.execute {
             try {
                 stopping?.stop()
@@ -281,9 +288,12 @@ class CastReceiverService :
                 Log.e(TAG, "receiver stop failed", error)
             }
             stopping?.close()
+            // Release the Wi-Fi lock only after shutdown completes, so the radio
+            // stays up for the receiver's cooperative teardown (clean TCP close,
+            // app on_stop / DRM-release traffic).
+            lock?.let { if (it.isHeld) it.release() }
         }
         worker.shutdown()
-        releaseWifiLock()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }

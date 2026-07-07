@@ -95,11 +95,13 @@ async fn run(args: Args) -> anyhow::Result<()> {
         advertise_mdns: true,
     };
 
+    let friendly_name = config.device.friendly_name.clone();
     let receiver = vibecast_platform::run(config, inputs, None)
         .await
         .context("starting receiver")?;
 
     tracing::info!(
+        name = %friendly_name,
         ip = %receiver.local_ip,
         cast_port = receiver.cast_port,
         player = format_args!("http://{}:{}/", receiver.local_ip, receiver.player_port),
