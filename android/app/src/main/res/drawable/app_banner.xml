@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+    <path
+        android:fillColor="#0B1020"
+        android:pathData="M0,0h320v180h-320z" />
+    <!-- Cast glyph -->
+    <path
+        android:fillColor="#4CC2FF"
+        android:pathData="M40,124a14,14 0 0,1 14,14h-14z" />
+    <path
+        android:strokeColor="#4CC2FF"
+        android:strokeWidth="7"
+        android:fillColor="#00000000"
+        android:pathData="M40,110a28,28 0 0,1 28,28" />
+    <path
+        android:strokeColor="#4CC2FF"
+        android:strokeWidth="7"
+        android:fillColor="#00000000"
+        android:pathData="M40,96a42,42 0 0,1 42,42" />
+    <path
+        android:strokeColor="#8A93A6"
+        android:strokeWidth="7"
+        android:fillColor="#00000000"
+        android:pathData="M40,68h104v70h-20" />
+</vector>

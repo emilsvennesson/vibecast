@@ -1,0 +1,13 @@
+# Gradle / Android build artifacts
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+.cxx/
+
+# Native libs are produced by cargo-ndk into build/, never committed.
+app/src/main/jniLibs/
+
+# Never commit harvested device-auth material.
+**/certs.json

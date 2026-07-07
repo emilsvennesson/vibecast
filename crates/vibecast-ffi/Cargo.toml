@@ -1,0 +1,28 @@
+[package]
+name = "vibecast-ffi"
+description = "Platform-neutral UniFFI facade over the vibecast receiver (Android/iOS/...)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "vibecast_ffi"
+# cdylib: the .so/.dylib the platform loads. lib: unit tests + workspace reuse.
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+vibecast-platform = { path = "../vibecast-platform" }
+
+tokio = { workspace = true }
+uniffi = { workspace = true }
+thiserror = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Android tracing sink (no liblog FFI). cfg-gated so host/iOS builds skip it.
+[target.'cfg(target_os = "android")'.dependencies]
+tracing-logcat = { workspace = true }

@@ -203,6 +203,14 @@ impl CastAdvertisement {
         &self.txt
     }
 
+    /// The bare service instance label (e.g. `vibecast-<id>`), without the
+    /// service type — what a foreign discovery registrar (e.g. Android's
+    /// `NsdManager`) uses as the service name.
+    #[must_use]
+    pub fn instance(&self) -> &str {
+        &self.instance
+    }
+
     /// Fully-qualified base service instance name.
     #[must_use]
     pub fn fullname(&self) -> String {

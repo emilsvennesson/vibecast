@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lint>
+    <!--
+      UniFFI-generated bindings select java.lang.ref.Cleaner (API 33) at runtime
+      via Class.forName, falling back to the JNA cleaner below API 33. Lint's
+      NewApi check can't see through that reflective guard, so scope it out for
+      the generated sources only (our own code is still checked).
+    -->
+    <issue id="NewApi">
+        <ignore regexp="generated/uniffi" />
+    </issue>
+</lint>

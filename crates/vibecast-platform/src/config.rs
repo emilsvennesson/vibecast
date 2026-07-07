@@ -1,14 +1,18 @@
-//! Typed TOML configuration.
+//! Typed receiver configuration.
 //!
 //! serde derives handle validation: `#[serde(default)]` gives per-field
 //! fallbacks (a missing file or key uses the Chromecast-like defaults) and
-//! `deny_unknown_fields` rejects unknown keys with clear errors. Config lives in
-//! the platform binary only; the portable core never sees it.
+//! `deny_unknown_fields` rejects unknown keys with clear errors.
+//!
+//! This is the canonical settings type shared by every platform binding. The
+//! desktop CLI populates it from `config.toml` via [`Config::load`]; other
+//! frontends (e.g. the Android FFI) build it programmatically. Per-app config
+//! is stored as [`serde_json::Value`] so it can originate from TOML *or* JSON
+//! without a lossy round-trip.
 
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use vibecast_discovery::DeviceCapabilities;
 
@@ -17,6 +21,29 @@ const CONFIG_FILE: &str = "config.toml";
 const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Linux; Android 11.0; Build/RQ1A.210105.003) \
 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.0 Safari/537.36 \
 CrKey/1.56.500000 DeviceType/AndroidTV";
+
+/// Failure loading `config.toml`.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    /// The config file could not be read.
+    #[error("reading {path}")]
+    Read {
+        /// Config file path.
+        path: String,
+        /// Underlying IO error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// The config file was not valid TOML / violated the schema.
+    #[error("parsing {path}")]
+    Parse {
+        /// Config file path.
+        path: String,
+        /// Underlying deserialization error.
+        #[source]
+        source: toml::de::Error,
+    },
+}
 
 /// Top-level receiver configuration.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -30,8 +57,8 @@ pub struct Config {
     pub volume: VolumeConfig,
     /// Cast firmware identity + streaming-API capabilities.
     pub cast: CastConfig,
-    /// Per-app config tables (`[apps.<key>]`), passed to `AppProvider::configure`.
-    pub apps: HashMap<String, toml::Table>,
+    /// Per-app config values (`[apps.<key>]`), passed to `AppProvider::configure`.
+    pub apps: HashMap<String, serde_json::Value>,
 }
 
 /// `[device]` section.
@@ -191,14 +218,18 @@ impl CastDeviceCapabilities {
 
 impl Config {
     /// Load `{data_dir}/config.toml`. A missing file yields all defaults.
-    pub fn load(data_dir: &Path) -> anyhow::Result<Self> {
+    pub fn load(data_dir: &Path) -> Result<Self, ConfigError> {
         let path = data_dir.join(CONFIG_FILE);
         match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
-            }
+            Ok(text) => toml::from_str(&text).map_err(|source| ConfigError::Parse {
+                path: path.display().to_string(),
+                source,
+            }),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
+            Err(source) => Err(ConfigError::Read {
+                path: path.display().to_string(),
+                source,
+            }),
         }
     }
 }
@@ -238,6 +269,8 @@ mod tests {
         assert!(config.device.capabilities.cast_connect_supported); // default preserved
         assert_eq!(config.network.player_port, 9010);
         assert!(config.apps.contains_key("primevideo"));
+        // Per-app tables deserialize into JSON values.
+        assert_eq!(config.apps["primevideo"]["marketplace_id"], "X");
     }
 
     #[test]

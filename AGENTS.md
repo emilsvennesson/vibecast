@@ -68,14 +68,17 @@ endpoint, and routes `LAUNCH`/`LOAD` to bundled app providers. A player bridge
 serves an embedded Shaka Player page over HTTP/WebSocket and proxies DRM license
 + DASH/HLS manifest requests (with normalization).
 
-The receiver binary is `vibecast-cli` (binary name `vibecast`). It wires the
-portable core crates into a runnable server: CastV2 TLS listener, device hub,
-player bridge, mDNS + eureka discovery, TOML config, certificate rotation, and
-graceful shutdown.
+The compose/orchestration logic — assemble certs + hub + bridge + eureka +
+tasks, then start/observe/stop — lives in `vibecast-platform`, shared by two
+platform bindings: `vibecast-cli` (binary name `vibecast`; the desktop
+Linux/macOS server, mDNS discovery, TOML config, Ctrl-C lifecycle) and
+`vibecast-ffi` (a `cdylib` + UniFFI facade generating Kotlin/Swift/… bindings
+for native Android/iOS frontends; discovery is delegated to the frontend, e.g.
+Android `NsdManager`). See `android/` for the Android TV frontend.
 
 ## Workspace layout
 
-Cargo workspace of 13 focused crates under `crates/`. Layering is strict:
+Cargo workspace of 16 focused crates under `crates/`. Layering is strict:
 
 ```
 vibecast-proto        CastV2 protobuf + length-prefixed framing          (leaf)
@@ -87,12 +90,17 @@ vibecast-bridge       Player bridge: WebSocket relay + DRM/manifest proxy (messa
 vibecast-sdk          Stable app-author SDK                              (messages)
 vibecast-apps-*       Bundled apps (SVT Play, TV4 Play, Viaplay, Prime)  (sdk ONLY)
 vibecast-core         Receiver runtime: device hub + coordinator         (cast, messages, bridge, sdk)
-vibecast-cli          Platform binary: wires everything into a server    (all)
+vibecast-platform     Shared compose/run() orchestration + Config        (core, cast, bridge, discovery, sdk, apps)
+vibecast-cli          Desktop binding: args + mDNS + Ctrl-C lifecycle    (platform)
+vibecast-ffi          cdylib + UniFFI facade (Kotlin/Swift/…)            (platform)
+uniffi-bindgen        Version-locked uniffi-bindgen CLI (dev tool)       (uniffi[cli])
 ```
 
 **App crates depend ONLY on `vibecast-sdk`.** No transport, TLS, or bridge
 types leak into app code. To add an app, model it on `vibecast-apps-svtplay`
-(the reference app) and register it in `crates/vibecast-cli/src/main.rs::apps`.
+(the reference app) and register it in
+`crates/vibecast-platform/src/lib.rs::build_app_providers` (both bindings then
+pick it up automatically).
 
 ## Build, run, test
 
@@ -119,15 +127,29 @@ CLI flags (override `config.toml`): `--certs`, `--data-dir`, `--name`, `--model`
 `{data_dir}/certs.json`. Player bridge defaults to `:8010`, eureka HTTP `:8008`,
 eureka HTTPS `:8443`, CastV2 TLS `:8009`.
 
+```sh
+# Android (Android TV) frontend — needs cargo-ndk + NDK r28+ + JDK 17.
+# Cross-compiles vibecast-ffi per ABI, generates UniFFI Kotlin bindings, builds the APK.
+cargo ndk -t arm64-v8a -t x86_64 -P 24 build --release -p vibecast-ffi   # .so per ABI
+cd android && ./gradlew :app:assembleDebug lintDebug ktlintCheck detekt   # app + lint gate
+```
+
+See `android/README.md` for cert provisioning and on-device validation over adb.
+
 ## Invariants
 
-- **`#![forbid(unsafe_code)]`** in every library crate. Do not relax this.
+- **`#![forbid(unsafe_code)]`** in every library crate. Do not relax this. The
+  sole exception is `vibecast-ffi`: `uniffi::setup_scaffolding!()` emits
+  `unsafe extern "C"` scaffolding, so it uses `#![deny(unsafe_code)]` instead
+  (still forbids hand-written unsafe; the generated code carries its own
+  `#[allow]`). No hand-written `unsafe` is permitted anywhere.
 - **No secrets in logs/tracing.** Never log tokens, license challenges/responses,
   cert private keys, or device-auth signatures. Tracing fields must be non-sensitive.
 - **`thiserror` per crate** for error enums. Apps may hand-roll `Display`+`Error`
   for dynamic-message errors, but prefer `thiserror` where the message is static.
 - **Errors are useful and typed.** No stringly-typed errors; use the crate's error
-  enum. `anyhow` is confined to the CLI binary (the platform layer).
+  enum (`vibecast-platform` exposes `PlatformError`; `vibecast-ffi` maps it to the
+  UniFFI `ReceiverError`). `anyhow` is confined to the `vibecast-cli` binary.
 - **Tests validate real behavior** — protocol round-trips, state transitions, error
   paths, regressions. Do not write tests that assert log output or that a specific
   private helper was called.
@@ -137,7 +159,7 @@ eureka HTTPS `:8443`, CastV2 TLS `:8009`.
 
 ## Conventions
 
-- Edition 2021, `rust-version = "1.85"`, `max_width = 100` (rustfmt).
+- Edition 2021, `rust-version = "1.87"` (UniFFI 0.32 floor), `max_width = 100` (rustfmt).
 - Workspace deps declared once in the root `[workspace.dependencies]`; crates
   inherit via `xxx.workspace = true`. Add new deps there, not per-crate.
 - `publish = false` workspace-wide (unpublished internal crates).
