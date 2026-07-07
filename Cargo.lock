@@ -3225,9 +3225,9 @@ dependencies = [
  "tokio-tungstenite",
  "tower",
  "tracing",
- "url",
  "vibecast-messages",
- "xot",
+ "vibecast-player-api",
+ "vibecast-sdk",
 ]
 
 [[package]]
@@ -3277,9 +3277,9 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
- "vibecast-bridge",
  "vibecast-cast",
  "vibecast-messages",
+ "vibecast-player-api",
  "vibecast-proto",
  "vibecast-sdk",
  "vibecast-security",
@@ -3352,8 +3352,24 @@ dependencies = [
  "vibecast-core",
  "vibecast-discovery",
  "vibecast-messages",
+ "vibecast-player-api",
+ "vibecast-receiver",
  "vibecast-sdk",
  "vibecast-security",
+]
+
+[[package]]
+name = "vibecast-player-api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "http",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "url",
+ "vibecast-messages",
+ "xot",
 ]
 
 [[package]]
@@ -3367,6 +3383,24 @@ dependencies = [
  "protox",
  "thiserror 2.0.18",
  "tokio-util",
+]
+
+[[package]]
+name = "vibecast-receiver"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "vibecast-cast",
+ "vibecast-core",
+ "vibecast-discovery",
+ "vibecast-messages",
+ "vibecast-player-api",
+ "vibecast-sdk",
+ "vibecast-security",
 ]
 
 [[package]]

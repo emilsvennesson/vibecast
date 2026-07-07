@@ -8,8 +8,12 @@ use vibecast_messages::{IdleReason, MediaImage, PlayerState, StreamType};
 pub enum DrmSystem {
     /// Google Widevine (`com.widevine.alpha`).
     Widevine,
+    /// Microsoft PlayReady (`com.microsoft.playready`).
+    PlayReady,
     /// W3C ClearKey (`org.w3.clearkey`).
     ClearKey,
+    /// Apple FairPlay Streaming (`com.apple.fps`).
+    FairPlay,
 }
 
 /// DRM configuration for a protected stream.

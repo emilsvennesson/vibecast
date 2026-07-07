@@ -1,10 +1,11 @@
 //! vibecast receiver binary.
 //!
 //! The desktop platform binding. It sources settings (TOML + CLI overrides),
-//! resolves the data dir, certificate path, and device id, then hands the
-//! shared [`vibecast_platform`] compose logic a fully-typed config and runs
-//! until Ctrl-C. All receiver assembly lives in `vibecast-platform`, shared
-//! verbatim with the Android/iOS FFI binding.
+//! resolves the data dir and certificate path, then hands the shared
+//! [`vibecast_platform`] compose logic a fully-typed config and runs until
+//! Ctrl-C. Players register over the bridge and each is given its own Cast
+//! receiver (advertised over mDNS from Rust). All assembly lives in
+//! `vibecast-platform`, shared verbatim with the Android/iOS FFI binding.
 
 use std::path::PathBuf;
 
@@ -28,11 +29,7 @@ struct Args {
     #[arg(long)]
     data_dir: Option<PathBuf>,
 
-    /// Override the configured friendly name.
-    #[arg(long)]
-    name: Option<String>,
-
-    /// Override the configured device model.
+    /// Override the configured device model (reported by every player's receiver).
     #[arg(long)]
     model: Option<String>,
 
@@ -40,13 +37,9 @@ struct Args {
     #[arg(long)]
     bind_host: Option<String>,
 
-    /// Override the CastV2 TLS port (standard 8009); advertised over mDNS.
+    /// Override the player-bridge port (players connect here to register).
     #[arg(long)]
-    cast_port: Option<u16>,
-
-    /// Stable device id (default: a random UUID).
-    #[arg(long)]
-    device_id: Option<String>,
+    player_port: Option<u16>,
 
     /// Log level (`trace|debug|info|warn|error`); overrides `RUST_LOG`.
     #[arg(long)]
@@ -69,43 +62,33 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let mut config = Config::load(&data_dir)?;
 
     // CLI flags override config.
-    if let Some(name) = args.name.clone() {
-        config.device.friendly_name = name;
-    }
     if let Some(model) = args.model.clone() {
         config.device.model = model;
     }
     if let Some(bind_host) = args.bind_host.clone() {
         config.network.bind_host = bind_host;
     }
-    if let Some(cast_port) = args.cast_port {
-        config.network.cast_port = cast_port;
+    if let Some(player_port) = args.player_port {
+        config.network.player_port = player_port;
     }
 
     let certs_path = resolve_certs_path(&args, &config, &data_dir);
-    let device_id = match &args.device_id {
-        Some(id) => id.clone(),
-        None => vibecast_platform::load_or_create_device_id(&data_dir),
-    };
 
     let inputs = PlatformInputs {
         data_dir,
         certs_path,
-        device_id,
         advertise_mdns: true,
     };
 
-    let friendly_name = config.device.friendly_name.clone();
     let receiver = vibecast_platform::run(config, inputs, None)
         .await
         .context("starting receiver")?;
 
     tracing::info!(
-        name = %friendly_name,
         ip = %receiver.local_ip,
-        cast_port = receiver.cast_port,
-        player = format_args!("http://{}:{}/", receiver.local_ip, receiver.player_port),
-        "vibecast receiver started"
+        register = format_args!("ws://{}:{}/player", receiver.local_ip, receiver.player_port),
+        web = format_args!("http://{}:{}/", receiver.local_ip, receiver.player_port),
+        "vibecast server started; waiting for players to register"
     );
 
     tokio::signal::ctrl_c()
@@ -148,24 +131,19 @@ mod tests {
 
     #[test]
     fn parses_optional_overrides() {
-        let args = Args::try_parse_from([
-            "vibecast",
-            "--certs",
-            "/certs.json",
-            "--name",
-            "Living Room",
-        ])
-        .unwrap();
+        let args =
+            Args::try_parse_from(["vibecast", "--certs", "/certs.json", "--model", "Nest Hub"])
+                .unwrap();
         assert_eq!(args.certs, Some(PathBuf::from("/certs.json")));
-        assert_eq!(args.name.as_deref(), Some("Living Room"));
-        assert_eq!(args.model, None);
+        assert_eq!(args.model.as_deref(), Some("Nest Hub"));
+        assert_eq!(args.bind_host, None);
     }
 
     #[test]
     fn no_args_is_valid() {
         let args = Args::try_parse_from(["vibecast"]).unwrap();
         assert_eq!(args.certs, None);
-        assert_eq!(args.name, None);
+        assert_eq!(args.model, None);
     }
 
     #[test]

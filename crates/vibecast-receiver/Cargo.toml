@@ -1,0 +1,24 @@
+[package]
+name = "vibecast-receiver"
+description = "Generic Cast receiver composition: bind + supervise one receiver instance (hub + CastV2 TLS + eureka + mDNS) independent of any app set or player"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+vibecast-cast = { path = "../vibecast-cast" }
+vibecast-core = { path = "../vibecast-core" }
+vibecast-discovery = { path = "../vibecast-discovery" }
+vibecast-messages = { path = "../vibecast-messages" }
+vibecast-player-api = { path = "../vibecast-player-api" }
+vibecast-sdk = { path = "../vibecast-sdk" }
+vibecast-security = { path = "../vibecast-security" }
+
+tokio = { workspace = true }
+tokio-util = { workspace = true, features = ["rt"] }
+reqwest = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

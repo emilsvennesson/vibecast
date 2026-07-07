@@ -62,12 +62,14 @@ pub struct Config {
 }
 
 /// `[device]` section.
+///
+/// The per-player friendly name and output resolution are no longer configured
+/// here: each player supplies its own name (vibecast appends `[vibecast]`) and
+/// its capabilities (including max resolution) when it registers.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DeviceConfig {
-    /// Friendly name advertised to senders.
-    pub friendly_name: String,
-    /// Device model string.
+    /// Device model string (reported by every player's receiver).
     pub model: String,
     /// Manufacturer reported in eureka_info.
     pub manufacturer: String,
@@ -77,10 +79,6 @@ pub struct DeviceConfig {
     pub country_code: String,
     /// Certificate bundle path (relative paths resolve from the data dir).
     pub certs: String,
-    /// Output display width in pixels.
-    pub display_width: u32,
-    /// Output display height in pixels.
-    pub display_height: u32,
     /// Eureka device-capability flags (reused from the discovery crate).
     pub capabilities: DeviceCapabilities,
 }
@@ -88,34 +86,27 @@ pub struct DeviceConfig {
 impl Default for DeviceConfig {
     fn default() -> Self {
         Self {
-            friendly_name: "vibecast".into(),
             model: "Chromecast".into(),
             manufacturer: "Google Inc.".into(),
             locale: "en-US".into(),
             country_code: "US".into(),
             certs: "certs.json".into(),
-            display_width: 1920,
-            display_height: 1080,
             capabilities: DeviceCapabilities::default(),
         }
     }
 }
 
 /// `[network]` section.
+///
+/// Each per-player receiver binds OS-assigned CastV2/eureka ports (advertised
+/// over mDNS), so only the shared player-bridge port is configured here.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct NetworkConfig {
     /// Host/interface to bind all listeners to.
     pub bind_host: String,
-    /// CastV2 TLS port advertised over mDNS (standard is 8009; change to avoid
-    /// clashing with a platform Cast receiver).
-    pub cast_port: u16,
-    /// Player bridge port.
+    /// Player bridge port (players connect here to register).
     pub player_port: u16,
-    /// Eureka discovery HTTP port.
-    pub eureka_http_port: u16,
-    /// Eureka discovery HTTPS port.
-    pub eureka_https_port: u16,
     /// HTTP client timeout (seconds).
     pub http_timeout: f64,
     /// Certificate-rotation poll interval (seconds).
@@ -126,10 +117,7 @@ impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
             bind_host: "0.0.0.0".into(),
-            cast_port: 8009,
             player_port: 8010,
-            eureka_http_port: 8008,
-            eureka_https_port: 8443,
             http_timeout: 15.0,
             cert_rotation_poll: 60.0,
         }
@@ -241,7 +229,7 @@ mod tests {
     #[test]
     fn empty_config_is_all_defaults() {
         let config: Config = toml::from_str("").unwrap();
-        assert_eq!(config.device.friendly_name, "vibecast");
+        assert_eq!(config.device.model, "Chromecast");
         assert_eq!(config.network.player_port, 8010);
         assert_eq!(config.volume.level, 1.0);
         assert!(config.cast.user_agent.contains("CrKey"));
@@ -253,7 +241,7 @@ mod tests {
         let config: Config = toml::from_str(
             r#"
             [device]
-            friendly_name = "Living Room"
+            model = "Nest Hub"
             [device.capabilities]
             multizone_supported = false
             [network]
@@ -263,8 +251,8 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(config.device.friendly_name, "Living Room");
-        assert_eq!(config.device.model, "Chromecast"); // default preserved
+        assert_eq!(config.device.model, "Nest Hub");
+        assert_eq!(config.device.manufacturer, "Google Inc."); // default preserved
         assert!(!config.device.capabilities.multizone_supported); // overridden
         assert!(config.device.capabilities.cast_connect_supported); // default preserved
         assert_eq!(config.network.player_port, 9010);

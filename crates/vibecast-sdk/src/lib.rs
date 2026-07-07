@@ -80,12 +80,14 @@
 
 #![forbid(unsafe_code)]
 
+mod capabilities;
 mod config;
 mod context;
 mod error;
 mod license;
 mod types;
 
+pub use capabilities::{DrmCapability, DrmSecurityLevel, Platform, PlayerCapabilities, Resolution};
 pub use config::{AppConfig, AppConfigError};
 pub use context::{AppContext, NoopSenderChannel, ReceiverContext, SenderChannel};
 pub use error::{LaunchError, MediaResolveCode, MediaResolveError};

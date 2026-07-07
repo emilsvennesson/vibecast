@@ -151,7 +151,69 @@
 
   function wsUrl() {
     const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
-    return wsProtocol + "://" + window.location.host + "/player?role=primary";
+    return wsProtocol + "://" + window.location.host + "/player";
+  }
+
+  // ---------------------------------------------------------------------------
+  // Registration: announce this player's identity + capabilities on connect.
+  // ---------------------------------------------------------------------------
+
+  function playerId() {
+    let id = null;
+    try {
+      id = window.localStorage.getItem("vibecast_player_id");
+    } catch {
+      id = null;
+    }
+    if (!id) {
+      id =
+        window.crypto && window.crypto.randomUUID
+          ? window.crypto.randomUUID()
+          : "browser-" + Math.random().toString(16).slice(2);
+      try {
+        window.localStorage.setItem("vibecast_player_id", id);
+      } catch {
+        /* storage unavailable: fall back to an ephemeral id */
+      }
+    }
+    return id;
+  }
+
+  function detectVideoCodecs() {
+    const checks = [
+      ["h264", 'video/mp4; codecs="avc1.640028"'],
+      ["hevc", 'video/mp4; codecs="hvc1.1.6.L93.B0"'],
+      ["vp9", 'video/webm; codecs="vp9"'],
+      ["av1", 'video/mp4; codecs="av01.0.05M.08"'],
+    ];
+    const ms = window.MediaSource;
+    const out = [];
+    for (const [name, mime] of checks) {
+      if (ms && ms.isTypeSupported && ms.isTypeSupported(mime)) out.push(name);
+    }
+    return out.length ? out : ["h264"];
+  }
+
+  function buildRegisterFrame() {
+    const screen = window.screen || {};
+    return {
+      type: "register",
+      playerId: playerId(),
+      name: "Browser",
+      capabilities: {
+        platform: "browser",
+        drm: [{ system: "com.widevine.alpha" }, { system: "org.w3.clearkey" }],
+        videoCodecs: detectVideoCodecs(),
+        audioCodecs: ["aac", "opus"],
+        maxResolution: {
+          width: screen.width || 1920,
+          height: screen.height || 1080,
+        },
+        hdrFormats: [],
+        frameRates: [24, 25, 30, 50, 60],
+        subtitleFormats: ["vtt", "ttml"],
+      },
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -257,7 +319,7 @@
     sessionEl.textContent = "-";
     titleEl.textContent = "Waiting for LOAD";
     subtitleEl.textContent =
-      "Open this page on your playback device. It listens on /player?role=primary.";
+      "Open this page on your playback device. It registers over /player.";
     stateEl.textContent = "IDLE";
   }
 
@@ -601,6 +663,11 @@
 
     socket.addEventListener("open", () => {
       pushLog("info", "WebSocket connected: " + url);
+      try {
+        socket.send(JSON.stringify(buildRegisterFrame()));
+      } catch (err) {
+        pushLog("err", "Failed to send register frame: " + err);
+      }
       setConnected(true);
     });
 

@@ -18,7 +18,6 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use vibecast_bridge::{PlayerCommand, PlayerReport, Renderer};
 use vibecast_cast::{namespace as ns, ConnectionHandle, ServerEvent};
 use vibecast_messages::{
     extract_request_id, ApplicationStatus, CastNamespace, ConnectionMessage, DeviceInfoResponse,
@@ -27,16 +26,19 @@ use vibecast_messages::{
     MultizoneGetStatusRequest, MultizoneStatusResponse, PlayerState, QueueItemIdsResponse,
     ReceiverRequest, ReceiverStatus, ReceiverStatusResponse, SetupRequest, SetupResponse, Volume,
 };
+use vibecast_player_api::{Player, PlayerCommand, PlayerReport};
 use vibecast_proto::CastMessage;
 use vibecast_sdk::{
     AppContext, AppSession, LaunchCredentials, MediaResolveError, MessageDisposition,
-    NoopSenderChannel, PlaybackMedia, PlaybackState, ReceiverContext, SenderChannel,
+    NoopSenderChannel, PlaybackMedia, PlaybackState, PlayerCapabilities, ReceiverContext,
+    SenderChannel,
 };
 
 use crate::coordinator::{loading_media_info, media_info, Coordinator};
 use crate::identity::DeviceIdentity;
 use crate::proxy::{collect_routes, rewrite_streams, to_payload, SessionProxy};
-use crate::registry::{AppRegistry, ProxyRegistrar};
+use crate::registry::AppRegistry;
+use vibecast_player_api::ProxyRegistrar;
 
 const RECEIVER_0: &str = "receiver-0";
 
@@ -77,7 +79,7 @@ impl SenderChannel for HubSender {
 enum HubEvent {
     /// A transport event from the Cast TLS server.
     Server(ServerEvent),
-    /// A player report from the renderer bridge.
+    /// A player report from the player bridge.
     Report(PlayerReport),
     /// The result of an app's `resolve_media` (internal feedback).
     MediaResolved(MediaResolved),
@@ -120,7 +122,7 @@ impl DeviceHubHandle {
             .map_err(|_| HubClosed)
     }
 
-    /// Deliver a renderer player report.
+    /// Deliver a player player report.
     ///
     /// # Errors
     /// Returns [`HubClosed`] if the hub has stopped.
@@ -209,8 +211,8 @@ pub struct HubConfig {
     pub identity: DeviceIdentity,
     /// App registry.
     pub registry: AppRegistry,
-    /// Renderer commands sink (the player bridge).
-    pub renderer: Arc<dyn Renderer>,
+    /// Player commands sink (the player bridge).
+    pub player: Arc<dyn Player>,
     /// Session proxy registration (the player bridge).
     pub proxy: Arc<dyn ProxyRegistrar>,
     /// Shared HTTP client for apps and the license/manifest proxy.
@@ -223,25 +225,22 @@ pub struct HubConfig {
     pub user_agent: String,
     /// `CAST-DEVICE-CAPABILITIES` header value for app sessions.
     pub cast_device_capabilities: String,
-    /// Output display width for app sessions.
-    pub display_width: u32,
-    /// Output display height for app sessions.
-    pub display_height: u32,
+    /// Capabilities of the player bound to this receiver.
+    pub capabilities: PlayerCapabilities,
 }
 
 /// The device hub actor.
 pub struct DeviceHub {
     identity: DeviceIdentity,
     registry: AppRegistry,
-    renderer: Arc<dyn Renderer>,
+    player: Arc<dyn Player>,
     proxy: Arc<dyn ProxyRegistrar>,
     http: reqwest::Client,
     data_dir: PathBuf,
     volume: Volume,
     user_agent: String,
     cast_device_capabilities: String,
-    display_width: u32,
-    display_height: u32,
+    capabilities: PlayerCapabilities,
     connections: HashMap<u64, ConnectionHandle>,
     /// `(connection, sender)` -> transport id.
     subscriptions: HashMap<(u64, String), String>,
@@ -260,15 +259,14 @@ impl DeviceHub {
         Self {
             identity: config.identity,
             registry: config.registry,
-            renderer: config.renderer,
+            player: config.player,
             proxy: config.proxy,
             http: config.http,
             data_dir: config.data_dir,
             volume: config.volume,
             user_agent: config.user_agent,
             cast_device_capabilities: config.cast_device_capabilities,
-            display_width: config.display_width,
-            display_height: config.display_height,
+            capabilities: config.capabilities,
             connections: HashMap::new(),
             subscriptions: HashMap::new(),
             sessions: HashMap::new(),
@@ -277,7 +275,7 @@ impl DeviceHub {
         }
     }
 
-    /// A handle for feeding the hub Cast transport events and renderer reports.
+    /// A handle for feeding the hub Cast transport events and player reports.
     #[must_use]
     pub fn handle(&self) -> DeviceHubHandle {
         DeviceHubHandle {
@@ -467,8 +465,7 @@ impl DeviceHub {
                 data_dir,
                 user_agent: self.user_agent.clone(),
                 cast_device_capabilities: self.cast_device_capabilities.clone(),
-                display_width: self.display_width,
-                display_height: self.display_height,
+                capabilities: self.capabilities.clone(),
             },
             Arc::new(NoopSenderChannel),
         );
@@ -540,7 +537,7 @@ impl DeviceHub {
         };
         tracing::info!(session_id = %session_id, app_key = %session.app_key, "stopping session");
         if session.coordinator.playback_media.is_some() {
-            self.renderer
+            self.player
                 .send(PlayerCommand::Stop {
                     session_id: session_id.to_string(),
                 })
@@ -685,7 +682,7 @@ impl DeviceHub {
                     c.idle_reason = None;
                 })
                 .await;
-                self.renderer
+                self.player
                     .send(PlayerCommand::Play {
                         session_id: transport.to_string(),
                     })
@@ -699,7 +696,7 @@ impl DeviceHub {
                     c.idle_reason = None;
                 })
                 .await;
-                self.renderer
+                self.player
                     .send(PlayerCommand::Pause {
                         session_id: transport.to_string(),
                     })
@@ -714,7 +711,7 @@ impl DeviceHub {
                     c.idle_reason = None;
                 })
                 .await;
-                self.renderer
+                self.player
                     .send(PlayerCommand::Seek {
                         session_id: transport.to_string(),
                         position,
@@ -728,7 +725,7 @@ impl DeviceHub {
                     c.set_idle(Some(IdleReason::Cancelled));
                 })
                 .await;
-                self.renderer
+                self.player
                     .send(PlayerCommand::Stop {
                         session_id: transport.to_string(),
                     })
@@ -755,7 +752,7 @@ impl DeviceHub {
                     None => return,
                 };
                 self.broadcast(transport, ns::MEDIA, &response).await;
-                self.renderer
+                self.player
                     .send(PlayerCommand::Volume {
                         session_id: transport.to_string(),
                         level,
@@ -795,7 +792,7 @@ impl DeviceHub {
     }
 
     /// Apply a coordinator mutation and broadcast the resulting status. The
-    /// caller then drives the renderer and notifies the app.
+    /// caller then drives the player and notifies the app.
     async fn transition(
         &mut self,
         transport: &str,
@@ -931,7 +928,7 @@ impl DeviceHub {
         self.broadcast(&session_id, ns::MEDIA, &loading).await;
         self.broadcast(&session_id, ns::MEDIA, &buffering).await;
 
-        self.renderer
+        self.player
             .send(PlayerCommand::Load {
                 session_id: session_id.clone(),
                 media: to_payload(&media),
@@ -1008,7 +1005,7 @@ impl DeviceHub {
         self.notify_app(session_id).await;
     }
 
-    // -- renderer reports ---------------------------------------------------
+    // -- player reports ---------------------------------------------------
 
     async fn on_report(&mut self, report: PlayerReport) {
         let session_id = report.session_id().to_string();

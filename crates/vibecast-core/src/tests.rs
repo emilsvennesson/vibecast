@@ -1,5 +1,5 @@
 //! End-to-end tests: a real Cast connection + hub driving a fake app,
-//! fake renderer, and fake proxy registrar over an in-memory duplex stream.
+//! fake player, and fake proxy registrar over an in-memory duplex stream.
 
 use std::sync::{Arc, Mutex};
 
@@ -10,13 +10,14 @@ use tokio::io::DuplexStream;
 use tokio::sync::mpsc;
 use tokio_util::codec::Framed;
 
-use vibecast_bridge::{LicenseHandler, ManifestHandler, PlayerCommand, PlayerReport, Renderer};
 use vibecast_cast::{message, namespace as ns, run_connection, AuthMaterial, ServerEvent};
 use vibecast_messages::{PlayerState, Volume};
+use vibecast_player_api::{LicenseHandler, ManifestHandler, Player, PlayerCommand, PlayerReport};
 use vibecast_proto::CastCodec;
 use vibecast_sdk::{
     AppContext, AppProvider, AppSession, LaunchCredentials, LaunchError, LoadRequest,
-    MediaResolveError, PlaybackMedia, PlaybackStream, ReceiverContext, StreamType,
+    MediaResolveError, PlaybackMedia, PlaybackStream, PlayerCapabilities, ReceiverContext,
+    StreamType,
 };
 use vibecast_security::CertificateBundle;
 
@@ -25,18 +26,18 @@ use crate::{AppRegistry, DeviceHub, DeviceHubHandle, DeviceIdentity, HubConfig, 
 // -- fakes -----------------------------------------------------------------
 
 #[derive(Default)]
-struct FakeRenderer {
+struct FakePlayer {
     commands: Mutex<Vec<PlayerCommand>>,
 }
 
 #[async_trait]
-impl Renderer for FakeRenderer {
+impl Player for FakePlayer {
     async fn send(&self, command: PlayerCommand) {
         self.commands.lock().unwrap().push(command);
     }
 }
 
-impl FakeRenderer {
+impl FakePlayer {
     fn commands(&self) -> Vec<PlayerCommand> {
         self.commands.lock().unwrap().clone()
     }
@@ -170,7 +171,7 @@ fn dummy_auth() -> AuthMaterial {
 struct Harness {
     client: Framed<DuplexStream, CastCodec>,
     hub: DeviceHubHandle,
-    renderer: Arc<FakeRenderer>,
+    player: Arc<FakePlayer>,
     proxy: Arc<FakeProxy>,
 }
 
@@ -194,20 +195,19 @@ async fn setup() -> Harness {
         events_tx,
     ));
 
-    let renderer = Arc::new(FakeRenderer::default());
+    let player = Arc::new(FakePlayer::default());
     let proxy = Arc::new(FakeProxy::default());
     let hub = DeviceHub::new(HubConfig {
         identity: DeviceIdentity::new("Living Room".into(), "Chromecast".into(), "dev-1".into()),
         registry: AppRegistry::new(vec![Arc::new(FakeApp)]).expect("registry"),
-        renderer: renderer.clone(),
+        player: player.clone(),
         proxy: proxy.clone(),
         http: reqwest::Client::new(),
         data_dir: std::env::temp_dir().join("vibecast-core-tests"),
         volume: attenuation_volume(),
         user_agent: String::new(),
         cast_device_capabilities: String::new(),
-        display_width: 1920,
-        display_height: 1080,
+        capabilities: PlayerCapabilities::default(),
     });
     let hub_handle = hub.handle();
     {
@@ -225,7 +225,7 @@ async fn setup() -> Harness {
     Harness {
         client: Framed::new(client_end, CastCodec),
         hub: hub_handle,
-        renderer,
+        player,
         proxy,
     }
 }
@@ -335,8 +335,8 @@ async fn launch_load_and_play_end_to_end() {
     assert_eq!(playing["status"][0]["playerState"], "PLAYING");
     assert_eq!(playing["status"][0]["supportedMediaCommands"], 15);
 
-    // The renderer received Load then Play; the manifest proxy was registered.
-    let commands = harness.renderer.commands();
+    // The player received Load then Play; the manifest proxy was registered.
+    let commands = harness.player.commands();
     assert!(matches!(commands.first(), Some(PlayerCommand::Load { .. })));
     assert!(matches!(commands.last(), Some(PlayerCommand::Play { .. })));
     if let Some(PlayerCommand::Load { media, .. }) = commands.first() {
@@ -406,7 +406,7 @@ async fn primary_player_report_broadcasts_status() {
         transport
     };
 
-    // A player state report from the renderer bridge.
+    // A player state report from the player bridge.
     harness
         .hub
         .send_player_report(PlayerReport::State {
@@ -500,7 +500,7 @@ async fn app_resolve_license_override_is_used() {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    use vibecast_bridge::{LicenseHandler, LicenseRequest as WireLicenseRequest, RouteId};
+    use vibecast_player_api::{LicenseHandler, LicenseRequest as WireLicenseRequest, RouteId};
 
     use crate::proxy::{LicenseRoute, SessionProxy};
 

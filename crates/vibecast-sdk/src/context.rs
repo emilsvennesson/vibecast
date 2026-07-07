@@ -7,6 +7,8 @@ use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::capabilities::PlayerCapabilities;
+
 /// Sends custom-namespace messages on behalf of an app callback.
 ///
 /// The coordinator supplies a per-callback implementation that writes directly
@@ -44,14 +46,12 @@ pub struct ReceiverContext {
     pub user_agent: String,
     /// Cast device-capabilities header value.
     pub cast_device_capabilities: String,
-    /// Display width in pixels.
-    pub display_width: u32,
-    /// Display height in pixels.
-    pub display_height: u32,
+    /// Capabilities of the player bound to this receiver.
+    pub capabilities: PlayerCapabilities,
 }
 
 impl ReceiverContext {
-    /// Build a receiver context with default display and empty header hints.
+    /// Build a receiver context with default capabilities and empty header hints.
     #[must_use]
     pub fn new(
         friendly_name: impl Into<String>,
@@ -66,8 +66,7 @@ impl ReceiverContext {
             data_dir,
             user_agent: String::new(),
             cast_device_capabilities: String::new(),
-            display_width: 1920,
-            display_height: 1080,
+            capabilities: PlayerCapabilities::default(),
         }
     }
 }

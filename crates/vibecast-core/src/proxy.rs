@@ -14,10 +14,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use http::{HeaderMap, HeaderName, HeaderValue};
-use vibecast_bridge::headers::{
+use vibecast_player_api::headers::{
     filter_upstream_headers, filter_upstream_response_headers, HOP_BY_HOP_REQUEST_HEADERS,
 };
-use vibecast_bridge::{
+use vibecast_player_api::{
     default_manifest_content_type, infer_manifest_kind, manifest_route_suffix,
     normalize_manifest_bytes, DrmPayload, DrmSystem as WireDrmSystem, LicenseHandler,
     LicenseRequest as WireLicenseRequest, LicenseResponse as WireLicenseResponse, ManifestHandler,
@@ -356,7 +356,7 @@ pub(crate) fn collect_routes(
 ///
 /// `media_session_id` is appended to each manifest proxy URL as a cache-buster
 /// (`?v=...`). Without it, two LOADs against the same session produce identical
-/// proxy URLs (`/manifest/{session}/m0.mpd`), and renderers (browser Shaka,
+/// proxy URLs (`/manifest/{session}/m0.mpd`), and players (browser Shaka,
 /// Kodi InputStream) serve the first stream's cached manifest for every
 /// subsequent stream switch. Bumping the version per load makes each load a
 /// distinct resource so the manifest is always re-fetched.
@@ -386,7 +386,7 @@ pub(crate) fn rewrite_streams(
     }
 }
 
-/// Convert SDK media into the bridge's renderer wire payload.
+/// Convert SDK media into the bridge's player wire payload.
 pub(crate) fn to_payload(media: &PlaybackMedia) -> PlaybackMediaPayload {
     PlaybackMediaPayload {
         streams: media
@@ -398,7 +398,9 @@ pub(crate) fn to_payload(media: &PlaybackMedia) -> PlaybackMediaPayload {
                 drm: stream.drm.as_ref().map(|drm| DrmPayload {
                     system: match drm.system {
                         DrmSystem::Widevine => WireDrmSystem::Widevine,
+                        DrmSystem::PlayReady => WireDrmSystem::PlayReady,
                         DrmSystem::ClearKey => WireDrmSystem::ClearKey,
+                        DrmSystem::FairPlay => WireDrmSystem::FairPlay,
                     },
                     license_url: drm.license_url.clone(),
                     headers: drm.headers.clone(),

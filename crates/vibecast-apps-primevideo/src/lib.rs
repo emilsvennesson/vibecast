@@ -22,7 +22,7 @@ use vibecast_sdk::{
     normalize_stream_type, AppConfig, AppConfigError, AppContext, AppProvider, AppSession, DrmInfo,
     DrmSystem, LaunchCredentials, LaunchError, LicenseForwarder, LicenseRequest, LicenseResponse,
     LicenseRoute, LoadRequest, MediaMetadata, MediaResolveCode, MediaResolveError,
-    MessageDisposition, PlaybackMedia, PlaybackStream, StreamType,
+    MessageDisposition, PlaybackMedia, PlaybackStream, PlayerCapabilities, StreamType,
 };
 
 use crate::api::{
@@ -38,18 +38,16 @@ const APP_IDS: &[&str] = &["17608BC8"];
 const ICON_URL: &str = "https://lh3.googleusercontent.com/QYGuZRR5YakSPcLFA65pr9BSwrvCpOjcsWiRaMN58t8374iv1HxlRs1mNQm3o0MEq5jmwMtEarN2CLI";
 
 /// Prime Video app configuration from `[apps.primevideo]`.
+///
+/// Device-capability fields (codecs, resolution, HDCP, HDR, frame rates,
+/// subtitles) are no longer configured here — they are derived from the
+/// selected player's [`PlayerCapabilities`] at launch.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PrimeVideoConfig {
     pub marketplace_id: String,
     pub locale: String,
     pub auth_base_url: String,
-    pub hdcp_level: String,
-    pub max_video_resolution: String,
-    pub supported_codecs: Vec<String>,
-    pub dynamic_range_formats: Vec<String>,
-    pub supported_frame_rates: Vec<String>,
-    pub supported_subtitle_formats: Vec<String>,
 }
 
 impl Default for PrimeVideoConfig {
@@ -58,30 +56,88 @@ impl Default for PrimeVideoConfig {
             marketplace_id: "A3K6Y4MI8GDYMT".to_string(),
             locale: "en_US".to_string(),
             auth_base_url: "https://api.amazon.co.uk".to_string(),
-            hdcp_level: "1.4".to_string(),
-            max_video_resolution: "1080p".to_string(),
-            supported_codecs: vec!["H265".to_string(), "H264".to_string()],
-            dynamic_range_formats: vec!["None".to_string()],
-            supported_frame_rates: vec!["Standard".to_string(), "High".to_string()],
-            supported_subtitle_formats: vec!["TTMLv2".to_string(), "DFXP".to_string()],
         }
     }
 }
 
 impl PrimeVideoConfig {
-    fn api_config(&self, display_width: u32, display_height: u32) -> PrimeApiConfig {
+    /// Build the Prime API config, translating the player's neutral
+    /// capabilities into Amazon's request vocabulary.
+    fn api_config(&self, caps: &PlayerCapabilities) -> PrimeApiConfig {
         PrimeApiConfig {
             auth_base_url: self.auth_base_url.clone(),
-            display_width,
-            display_height,
-            hdcp_level: self.hdcp_level.clone(),
-            max_video_resolution: self.max_video_resolution.clone(),
-            supported_codecs: self.supported_codecs.clone(),
-            dynamic_range_formats: self.dynamic_range_formats.clone(),
-            supported_frame_rates: self.supported_frame_rates.clone(),
-            supported_subtitle_formats: self.supported_subtitle_formats.clone(),
+            display_width: caps.max_resolution.width,
+            display_height: caps.max_resolution.height,
+            hdcp_level: caps.hdcp_level.clone().unwrap_or_else(|| "1.4".to_string()),
+            max_video_resolution: amazon_max_resolution(caps.max_resolution.height),
+            supported_codecs: amazon_codecs(&caps.video_codecs),
+            dynamic_range_formats: amazon_dynamic_range(&caps.hdr_formats),
+            supported_frame_rates: amazon_frame_rates(&caps.frame_rates),
+            supported_subtitle_formats: vec!["TTMLv2".to_string(), "DFXP".to_string()],
             ..PrimeApiConfig::default()
         }
+    }
+}
+
+/// Map a max output height to Amazon's `maxVideoResolution` label.
+fn amazon_max_resolution(height: u32) -> String {
+    match height {
+        0..=576 => "SD",
+        577..=720 => "720p",
+        721..=1080 => "1080p",
+        _ => "UHD",
+    }
+    .to_string()
+}
+
+/// Map neutral video-codec tokens to Amazon's codec vocabulary, preserving order.
+fn amazon_codecs(video_codecs: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for codec in video_codecs {
+        let mapped = match codec.as_str() {
+            "hevc" | "h265" => "H265",
+            "h264" | "avc" => "H264",
+            _ => continue,
+        };
+        let mapped = mapped.to_string();
+        if !out.contains(&mapped) {
+            out.push(mapped);
+        }
+    }
+    if out.is_empty() {
+        out.push("H264".to_string());
+    }
+    out
+}
+
+/// Map neutral HDR tokens to Amazon's `dynamicRangeFormats`; SDR reports `None`.
+fn amazon_dynamic_range(hdr_formats: &[String]) -> Vec<String> {
+    if hdr_formats.is_empty() {
+        return vec!["None".to_string()];
+    }
+    let mut out = Vec::new();
+    for format in hdr_formats {
+        let mapped = match format.as_str() {
+            "hdr10" => "Hdr10",
+            "hdr10plus" => "Hdr10Plus",
+            "dolbyvision" => "DolbyVision",
+            "hlg" => "Hlg",
+            _ => continue,
+        };
+        out.push(mapped.to_string());
+    }
+    if out.is_empty() {
+        out.push("None".to_string());
+    }
+    out
+}
+
+/// Map available frame rates to Amazon's `frameRates` tiers.
+fn amazon_frame_rates(frame_rates: &[u32]) -> Vec<String> {
+    if frame_rates.iter().any(|fps| *fps > 30) {
+        vec!["Standard".to_string(), "High".to_string()]
+    } else {
+        vec!["Standard".to_string()]
     }
 }
 
@@ -142,8 +198,7 @@ impl AppProvider for PrimeVideo {
         Ok(Arc::new(PrimeSession {
             api: PrimeVideoApi::new(
                 ctx.http.clone(),
-                self.config
-                    .api_config(ctx.receiver.display_width, ctx.receiver.display_height),
+                self.config.api_config(&ctx.receiver.capabilities),
             ),
             state: Mutex::new(PrimeState {
                 marketplace_id: self.config.marketplace_id.clone(),
@@ -742,6 +797,60 @@ mod tests {
             ),
             sender,
         )
+    }
+
+    #[test]
+    fn api_config_is_derived_from_player_capabilities() {
+        use vibecast_sdk::{DrmCapability, DrmSecurityLevel, Platform, Resolution};
+
+        // A 1080p SDR player with hardware Widevine L1 (the SHIELD-on-1080p case).
+        let caps = PlayerCapabilities {
+            platform: Platform::Android,
+            drm: vec![DrmCapability::new(
+                DrmSystem::Widevine,
+                Some(DrmSecurityLevel::L1),
+            )],
+            video_codecs: vec!["hevc".to_string(), "h264".to_string()],
+            audio_codecs: vec!["aac".to_string(), "eac3".to_string()],
+            max_resolution: Resolution::new(1920, 1080),
+            hdr_formats: Vec::new(),
+            frame_rates: vec![24, 30, 60],
+            subtitle_formats: vec!["ttml".to_string()],
+            hdcp_level: Some("2.2".to_string()),
+        };
+
+        let api = PrimeVideoConfig::default().api_config(&caps);
+        assert_eq!(api.display_width, 1920);
+        assert_eq!(api.display_height, 1080);
+        assert_eq!(api.max_video_resolution, "1080p");
+        assert_eq!(api.hdcp_level, "2.2");
+        assert_eq!(api.supported_codecs, vec!["H265", "H264"]);
+        assert_eq!(api.dynamic_range_formats, vec!["None"]); // SDR
+        assert_eq!(api.supported_frame_rates, vec!["Standard", "High"]); // 60fps present
+    }
+
+    #[test]
+    fn capability_mappings_cover_edge_cases() {
+        assert_eq!(amazon_max_resolution(480), "SD");
+        assert_eq!(amazon_max_resolution(720), "720p");
+        assert_eq!(amazon_max_resolution(1080), "1080p");
+        assert_eq!(amazon_max_resolution(2160), "UHD");
+
+        // Unknown codecs are dropped; empty falls back to H264.
+        assert_eq!(amazon_codecs(&["vp9".to_string()]), vec!["H264"]);
+        assert_eq!(
+            amazon_codecs(&["h264".to_string(), "hevc".to_string()]),
+            vec!["H264", "H265"]
+        );
+
+        assert_eq!(amazon_dynamic_range(&[]), vec!["None"]);
+        assert_eq!(
+            amazon_dynamic_range(&["hdr10".to_string(), "dolbyvision".to_string()]),
+            vec!["Hdr10", "DolbyVision"]
+        );
+
+        assert_eq!(amazon_frame_rates(&[24, 30]), vec!["Standard"]);
+        assert_eq!(amazon_frame_rates(&[24, 50]), vec!["Standard", "High"]);
     }
 
     fn media(

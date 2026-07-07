@@ -14,6 +14,8 @@ vibecast-security = { path = "../vibecast-security" }
 vibecast-discovery = { path = "../vibecast-discovery" }
 vibecast-bridge = { path = "../vibecast-bridge" }
 vibecast-core = { path = "../vibecast-core" }
+vibecast-player-api = { path = "../vibecast-player-api" }
+vibecast-receiver = { path = "../vibecast-receiver" }
 vibecast-sdk = { path = "../vibecast-sdk" }
 vibecast-messages = { path = "../vibecast-messages" }
 vibecast-apps-svtplay = { path = "../vibecast-apps-svtplay" }

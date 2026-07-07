@@ -24,12 +24,13 @@ import uniffi.vibecast_ffi.TxtEntry
 import java.util.concurrent.Executors
 
 /**
- * `connectedDevice` foreground service hosting the vibecast receiver.
+ * `connectedDevice` foreground service hosting the vibecast server.
  *
  * It owns the blocking [ReceiverHandle] lifecycle (driven off the main thread),
  * a [WifiManager.WifiLock] to keep the radio awake while serving, and — as the
- * [ReceiverObserver] — the `NsdManager` service registration (re-registered on
- * certificate rotation). The Rust core advertises nothing itself
+ * [ReceiverObserver] — one `NsdManager` service registration **per player** that
+ * registers over the bridge (re-registered on certificate rotation, torn down
+ * when the player disconnects). The Rust core advertises nothing itself
  * (`advertise_mdns = false`); discovery is entirely this layer's job.
  */
 class CastReceiverService :
@@ -51,13 +52,17 @@ class CastReceiverService :
 
     @Volatile
     private var wifiLock: WifiManager.WifiLock? = null
-    private var registrationListener: NsdManager.RegistrationListener? = null
 
-    @Volatile
-    private var instanceName: String? = null
+    // Per-player NSD registrations, keyed by player id. Touched only on the main
+    // looper (registerPlayer / unregisterPlayer are always posted there).
+    private val registrations = HashMap<String, PlayerRegistration>()
 
-    @Volatile
-    private var castPort: Int = 0
+    private class PlayerRegistration(
+        val listener: NsdManager.RegistrationListener,
+        val name: String,
+        val instanceName: String,
+        val castPort: Int,
+    )
 
     override fun onCreate() {
         super.onCreate()
@@ -96,14 +101,9 @@ class CastReceiverService :
             ServerConfig(
                 dataDir = filesDir.absolutePath,
                 certsPath = certs,
-                friendlyName = settings.friendlyName,
                 model = settings.model,
                 bindHost = "0.0.0.0",
-                castPort = settings.castPort,
-                eurekaHttpPort = settings.eurekaHttpPort,
-                eurekaHttpsPort = settings.eurekaHttpsPort,
                 playerPort = settings.playerPort,
-                deviceId = null,
                 appsConfigJson = null,
             )
         ReceiverState.update("Starting…")
@@ -111,6 +111,9 @@ class CastReceiverService :
         handle = newHandle
         try {
             newHandle.start(config, this)
+            // start() is blocking; returning without error means the bridge is
+            // listening. No Cast device exists until a player registers.
+            mainHandler.post { refreshRunningState() }
         } catch (error: Exception) {
             // Clear the handle so the `handle != null` guard above doesn't wedge
             // a later retry; the failed handle never started, so nothing to stop.
@@ -124,29 +127,50 @@ class CastReceiverService :
 
     // --- ReceiverObserver: invoked from Rust/Tokio worker threads ---
 
-    override fun onStarted(
+    override fun onPlayerStarted(
+        playerId: String,
+        name: String,
+        instanceName: String,
         castPort: UShort,
         eurekaHttpPort: UShort,
-        instanceName: String,
         txt: List<TxtEntry>,
     ) {
-        mainHandler.post { registerService(instanceName, castPort.toInt(), txt) }
-        ReceiverState.update("Running", "cast=$castPort eureka=$eurekaHttpPort · $instanceName")
-        Log.i(TAG, "receiver started: $instanceName cast=$castPort")
+        mainHandler.post {
+            registerPlayer(playerId, name, instanceName, castPort.toInt(), txt)
+            refreshRunningState()
+        }
+        Log.i(TAG, "player started: $name id=$playerId cast=$castPort")
     }
 
-    override fun onTxtChanged(txt: List<TxtEntry>) {
+    override fun onPlayerTxtChanged(
+        playerId: String,
+        txt: List<TxtEntry>,
+    ) {
         mainHandler.post {
-            val name = instanceName ?: return@post
-            Log.i(TAG, "TXT changed (cert rotation); re-registering NSD")
-            unregisterService()
-            registerService(name, castPort, txt)
+            val existing = registrations[playerId] ?: return@post
+            Log.i(TAG, "TXT changed (cert rotation); re-registering NSD for $playerId")
+            registerPlayer(playerId, existing.name, existing.instanceName, existing.castPort, txt)
         }
     }
 
-    override fun onStopped() {
-        ReceiverState.update("Stopped")
-        Log.i(TAG, "receiver stopped")
+    override fun onPlayerStopped(playerId: String) {
+        mainHandler.post {
+            unregisterPlayer(playerId)
+            refreshRunningState()
+        }
+        Log.i(TAG, "player stopped: $playerId")
+    }
+
+    /** Reflect the running server + current player count in the UI. */
+    private fun refreshRunningState() {
+        val detail =
+            if (registrations.isEmpty()) {
+                "Waiting for players…"
+            } else {
+                val names = registrations.values.joinToString(", ") { it.name }
+                "${registrations.size} player(s): $names"
+            }
+        ReceiverState.update("Running", detail)
     }
 
     override fun onError(message: String) {
@@ -154,18 +178,20 @@ class CastReceiverService :
         Log.e(TAG, "receiver error: $message")
     }
 
-    // --- NsdManager registration ---
+    // --- NsdManager registration (one service per player) ---
 
-    private fun registerService(
+    private fun registerPlayer(
+        playerId: String,
         name: String,
+        instanceName: String,
         port: Int,
         txt: List<TxtEntry>,
     ) {
-        instanceName = name
-        castPort = port
+        // Re-registration (cert rotation): drop the previous registration first.
+        unregisterPlayer(playerId)
         val info =
             NsdServiceInfo().apply {
-                serviceName = name
+                serviceName = instanceName
                 serviceType = SERVICE_TYPE
                 setPort(port)
                 txt.forEach { entry -> setAttribute(entry.key, entry.value) }
@@ -196,19 +222,18 @@ class CastReceiverService :
                     Log.e(TAG, "NSD unregistration failed: $errorCode")
                 }
             }
-        registrationListener = listener
+        registrations[playerId] = PlayerRegistration(listener, name, instanceName, port)
         nsdManager.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
     }
 
-    private fun unregisterService() {
-        registrationListener?.let { listener ->
+    private fun unregisterPlayer(playerId: String) {
+        registrations.remove(playerId)?.let { registration ->
             try {
-                nsdManager.unregisterService(listener)
+                nsdManager.unregisterService(registration.listener)
             } catch (error: IllegalArgumentException) {
                 Log.w(TAG, "NSD listener was not registered", error)
             }
         }
-        registrationListener = null
     }
 
     // --- Wi-Fi lock ---
@@ -276,7 +301,8 @@ class CastReceiverService :
     override fun onDestroy() {
         // Cancel any queued (re-)registration before tearing down NSD.
         mainHandler.removeCallbacksAndMessages(null)
-        unregisterService()
+        registrations.keys.toList().forEach { unregisterPlayer(it) }
+        ReceiverState.update("Stopped")
         val stopping = handle
         handle = null
         val lock = wifiLock

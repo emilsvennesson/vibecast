@@ -3,10 +3,10 @@
 //! Only two files ship with the receiver, so they are compiled into the binary
 //! with `include_str!` rather than read from disk at runtime.
 
-/// The browser renderer HTML page (Shaka Player host).
+/// The browser player HTML page (Shaka Player host).
 pub const PLAYER_HTML: &str = include_str!("../assets/player.html");
 
-/// The browser renderer JavaScript (Shaka Player + WebSocket client).
+/// The browser player JavaScript (Shaka Player + WebSocket client).
 pub const PLAYER_JS: &str = include_str!("../assets/player.js");
 
 /// Content type served for [`PLAYER_HTML`].

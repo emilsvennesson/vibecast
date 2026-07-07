@@ -2,8 +2,13 @@
 
 Kodi service add-on that bridges Kodi playback to a vibecast receiver.
 
-It connects to vibecast's player WebSocket endpoint (`/player?role=primary`),
-executes playback commands, and reports Kodi playback state back to vibecast.
+It connects to vibecast's player WebSocket endpoint (`/player`), **registers**
+its identity and capabilities (name, platform, codecs, resolution, DRM), then
+executes playback commands and reports Kodi playback state back to vibecast.
+vibecast gives this player its own Cast device named `<player name> [vibecast]`
+(the `[vibecast]` suffix is added by the server; the base name defaults to
+`Kodi` and is configurable under the add-on's **Player** settings, along with
+resolution, codecs, HDR, and Widevine level — all auto-detected by default).
 
 ## Requirements
 
