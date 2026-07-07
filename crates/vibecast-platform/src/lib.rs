@@ -258,11 +258,13 @@ pub async fn run(
             port: eureka_http_port,
             source,
         })?;
-    let eureka_https_listener = std::net::TcpListener::bind((bind_host.as_str(), eureka_https_port))
-        .map_err(|source| PlatformError::Bind {
-            what: "eureka https",
-            port: eureka_https_port,
-            source,
+    let eureka_https_listener =
+        std::net::TcpListener::bind((bind_host.as_str(), eureka_https_port)).map_err(|source| {
+            PlatformError::Bind {
+                what: "eureka https",
+                port: eureka_https_port,
+                source,
+            }
         })?;
     eureka_https_listener
         .set_nonblocking(true)
