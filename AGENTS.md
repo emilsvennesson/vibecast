@@ -193,9 +193,11 @@ See `android/README.md` for cert provisioning and on-device validation over adb.
 - `RUSTSEC-2024-0370` (proc-macro-error) is ignored in `deny.toml` — it's a
   build-time-only transitive dep of `xot` (manifest normalization), never linked
   into the shipped binary.
-- Commit messages: concise, match repo style (e.g. `Add TV4 Play app provider`,
-  `Fix slow Viaplay LOAD`). Do not commit unless explicitly asked.
-- PR title format: `<area>: <summary>` (e.g. `Rust port: finalize as sole implementation`).
+- Commit messages follow [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/):
+  `<type>(<scope>): <description>` (e.g. `feat(svtplay): add app provider`,
+  `fix(viaplay): slow LOAD`, `refactor(bridge)!: split routing` = breaking).
+  Scope is the crate/area. Do not commit unless explicitly asked.
+- PR titles mirror this format; squash-merging yields one conventional commit.
 
 ## Kodi add-on
 
