@@ -49,6 +49,10 @@ pub struct ServerConfig {
     pub bind_host: String,
     /// Player-bridge port where players connect to register (e.g. 8010).
     pub player_port: u16,
+    /// LAN IP the receiver reports to senders (eureka `ip_address`). Supply the
+    /// frontend's Wi‑Fi interface address (Android: `WifiManager`); `None`
+    /// falls back to the routed-interface heuristic.
+    pub local_ip: Option<String>,
     /// Per-app config as a JSON object string (`{"<app_key>": { ... }}`).
     pub apps_config_json: Option<String>,
 }
@@ -281,6 +285,7 @@ fn build_config(config: ServerConfig) -> Result<(Config, PlatformInputs), Receiv
         // API using the per-player facts from `on_player_started` — never via
         // mDNS from Rust.
         advertise_mdns: false,
+        local_ip: config.local_ip.filter(|ip| !ip.trim().is_empty()),
     };
     Ok((platform_config, inputs))
 }
@@ -361,6 +366,7 @@ mod tests {
             model: "Chromecast".to_owned(),
             bind_host: "127.0.0.1".to_owned(),
             player_port: 9010,
+            local_ip: None,
             apps_config_json: None,
         }
     }
@@ -371,7 +377,21 @@ mod tests {
         assert_eq!(config.device.model, "Chromecast");
         assert_eq!(config.network.player_port, 9010);
         assert!(!inputs.advertise_mdns);
+        assert_eq!(inputs.local_ip, None);
         let _ = inputs.certs_path;
+    }
+
+    #[test]
+    fn build_config_threads_local_ip_and_treats_blank_as_absent() {
+        let mut sc = base_config();
+        sc.local_ip = Some("192.168.1.42".to_owned());
+        let (_, inputs) = build_config(sc).unwrap();
+        assert_eq!(inputs.local_ip.as_deref(), Some("192.168.1.42"));
+
+        let mut sc = base_config();
+        sc.local_ip = Some("   ".to_owned());
+        let (_, inputs) = build_config(sc).unwrap();
+        assert_eq!(inputs.local_ip, None);
     }
 
     #[test]

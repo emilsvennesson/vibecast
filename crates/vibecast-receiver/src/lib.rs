@@ -100,12 +100,44 @@ pub enum ReceiverError {
     },
 }
 
+/// Bundles the portable advertisement identity with the optional live mDNS
+/// responder driving it.
+///
+/// The identity is always present — its TXT/instance are reported to a frontend
+/// that owns discovery. The responder exists only when this build both compiles
+/// the `mdns` feature and was asked to advertise from Rust.
+struct Advertiser {
+    advertisement: CastAdvertisement,
+    #[cfg(feature = "mdns")]
+    responder: Option<vibecast_discovery::MdnsResponder>,
+}
+
+impl Advertiser {
+    /// Re-announce after the advertisement's TXT changed, if a responder is live.
+    fn refresh(&mut self) {
+        #[cfg(feature = "mdns")]
+        if let Some(responder) = &mut self.responder {
+            if let Err(error) = responder.refresh(&self.advertisement) {
+                tracing::error!(%error, "failed to re-announce mDNS advertisement");
+            }
+        }
+    }
+
+    /// Stop advertising (a no-op without a live responder).
+    fn stop(&mut self) {
+        #[cfg(feature = "mdns")]
+        if let Some(responder) = &mut self.responder {
+            responder.stop();
+        }
+    }
+}
+
 /// A cheaply-cloneable handle for pushing certificate-rotation updates into a
 /// running receiver from an external rotation loop.
 #[derive(Clone)]
 pub struct RotationHandle {
     cast_server: Arc<CastServer>,
-    advertisement: Arc<tokio::sync::Mutex<CastAdvertisement>>,
+    advertiser: Arc<tokio::sync::Mutex<Advertiser>>,
 }
 
 impl RotationHandle {
@@ -116,11 +148,11 @@ impl RotationHandle {
 
     /// Update the advertised certificate digest; returns the new TXT pairs.
     pub async fn update_cert_digest(&self, digest: &str) -> Vec<(String, String)> {
-        let mut advertisement = self.advertisement.lock().await;
-        if let Err(error) = advertisement.update_cert_digest(digest) {
-            tracing::error!(%error, "failed to update advertised certificate digest");
+        let mut advertiser = self.advertiser.lock().await;
+        if advertiser.advertisement.update_cert_digest(digest) {
+            advertiser.refresh();
         }
-        txt_pairs(&advertisement)
+        txt_pairs(&advertiser.advertisement)
     }
 }
 
@@ -130,7 +162,7 @@ pub struct RunningReceiver {
     tasks: TaskTracker,
     hub_handle: DeviceHubHandle,
     cast_server: Arc<CastServer>,
-    advertisement: Arc<tokio::sync::Mutex<CastAdvertisement>>,
+    advertiser: Arc<tokio::sync::Mutex<Advertiser>>,
     /// CastV2 TLS port actually bound.
     pub cast_port: u16,
     /// Eureka HTTP port actually bound.
@@ -149,14 +181,14 @@ impl RunningReceiver {
     pub fn rotation_handle(&self) -> RotationHandle {
         RotationHandle {
             cast_server: self.cast_server.clone(),
-            advertisement: self.advertisement.clone(),
+            advertiser: self.advertiser.clone(),
         }
     }
 
     /// Cooperatively tear this receiver down: stop advertising, stop app
     /// sessions cleanly, then cancel and await the supervised tasks.
     pub async fn shutdown(self) {
-        self.advertisement.lock().await.stop();
+        self.advertiser.lock().await.stop();
         let _ = tokio::time::timeout(Duration::from_secs(5), self.hub_handle.shutdown()).await;
         self.shutdown.cancel();
         self.tasks.close();
@@ -339,8 +371,10 @@ pub async fn spawn(params: ReceiverParams) -> Result<RunningReceiver, ReceiverEr
         });
     }
 
-    // mDNS advertisement (always computed; only started when advertising from Rust).
-    let mut advertisement = CastAdvertisement::new(
+    // Advertisement identity is always computed (its instance/TXT are reported
+    // to a frontend that owns discovery). The mDNS responder is only started
+    // when this build compiles the `mdns` feature and was asked to advertise.
+    let advertisement = CastAdvertisement::new(
         &adv_name,
         &adv_model,
         &adv_id,
@@ -348,19 +382,35 @@ pub async fn spawn(params: ReceiverParams) -> Result<RunningReceiver, ReceiverEr
         &bundle.cert_digest_md5(),
         app_ids,
     );
+
+    #[cfg(feature = "mdns")]
+    let responder = if advertise_mdns {
+        Some(vibecast_discovery::MdnsResponder::start(&advertisement)?)
+    } else {
+        None
+    };
+    #[cfg(not(feature = "mdns"))]
     if advertise_mdns {
-        advertisement.start()?;
+        tracing::debug!(
+            "advertise_mdns is set but the `mdns` feature is not compiled in; \
+             relying on frontend-owned discovery"
+        );
     }
+
     let instance_name = advertisement.instance().to_string();
     let txt = txt_pairs(&advertisement);
-    let advertisement = Arc::new(tokio::sync::Mutex::new(advertisement));
+    let advertiser = Arc::new(tokio::sync::Mutex::new(Advertiser {
+        advertisement,
+        #[cfg(feature = "mdns")]
+        responder,
+    }));
 
     Ok(RunningReceiver {
         shutdown,
         tasks,
         hub_handle,
         cast_server,
-        advertisement,
+        advertiser,
         cast_port,
         eureka_http_port,
         eureka_https_port,
