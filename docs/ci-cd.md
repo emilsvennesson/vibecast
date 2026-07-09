@@ -9,7 +9,7 @@ in separate workflows so they never entangle.
 | Workflow | File | Triggers | Purpose |
 | --- | --- | --- | --- |
 | **CI** | `.github/workflows/ci.yml` | `pull_request`; `push` to `main` | Format, lint, test, MSRV, supply chain, Android, Docker recipe. Path-filtered. |
-| **Release** | `.github/workflows/release.yml` | `push` to `main` (via release-please); `workflow_dispatch` (test builds) | Build + publish binaries, APK, container images, and the Homebrew formula. |
+| **Release** | `.github/workflows/release.yml` | `push` to `main` (via release-please) | Build + publish binaries, APK, container images, and the Homebrew formula. |
 | **Security audit** | `.github/workflows/audit.yml` | weekly `schedule`; `workflow_dispatch` | Re-run `cargo deny check advisories bans` independent of code changes. |
 
 Actions are **pinned to commit SHAs** (with a `# vX.Y.Z` comment) and kept
@@ -92,13 +92,6 @@ commit footer. The initial release is pinned to `0.1.0` via `release-as` in the
 config; remove that key after `0.1.0` ships so subsequent versions compute from
 commits.
 
-### Test builds (dispatch)
-
-Run **Release → Run workflow** with a `version` like `0.0.0-test.1`. It builds
-the exact same artifacts and publishes a **prerelease only** — never `:latest`,
-never the tap `main` formula. Always tear a test release down afterwards
-(runbook below). `0.0.0-test.*` is reserved for pipeline testing.
-
 ## Required secrets & configuration
 
 Repo settings:
@@ -149,20 +142,22 @@ docker run --rm --network host \
   ghcr.io/emilsvennesson/vibecast:latest --data-dir /data
 ```
 
-## Tearing down a failed or test release
+## Retrying / tearing down a failed release
 
-Run these (substitute the tag, e.g. `v0.0.0-test.1`) so no inconsistent state
-lingers. Real releases stay hidden until promotion, so a failed real release is
-usually just a leftover draft + tag to delete.
+A failed release never promotes: it stays a hidden **draft** and neither
+`:latest` nor the Homebrew tap move. To retry, delete the draft + tag and let
+release-please re-open the release PR — merging it rebuilds with the current
+workflow:
 
 ```sh
-TAG=v0.0.0-test.1
-# GitHub release + git tag
-gh release delete "$TAG" --yes --cleanup-tag
-# GHCR: list versions, delete the ones tagged for this release
+TAG=v0.1.0
+gh release delete "$TAG" --yes --cleanup-tag   # remove the draft release + tag
+# (optional) drop the version-tagged GHCR image that was pushed before the
+# failure; needs a token with delete:packages scope:
 gh api "/users/emilsvennesson/packages/container/vibecast/versions" \
   --jq '.[] | select(.metadata.container.tags[]? | test("^'"${TAG#v}"'$|^sha-")) | .id'
 # gh api -X DELETE "/users/emilsvennesson/packages/container/vibecast/versions/<id>"
-# Homebrew tap (only if a bad formula reached main)
-# git -C tap revert --no-edit HEAD && git -C tap push
 ```
+
+Then push (or re-run the `release-please` job) so it re-creates the release PR;
+merge it to rebuild.

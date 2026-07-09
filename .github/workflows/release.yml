@@ -1,28 +1,19 @@
 name: Release
 
-# Two entry points, one pipeline:
+# Release publishing, driven entirely by release-please (kept separate from CI).
 #
-#   push to main      -> release-please maintains a release PR; merging it cuts a
-#                        DRAFT GitHub release + tag, which triggers the build/
-#                        publish/promote jobs. The release is only made visible
-#                        (undrafted, marked latest) + :latest / Homebrew updated
-#                        once EVERY artifact succeeds -> no partial releases.
+# Every push to main updates a release PR. Merging it cuts a DRAFT release + tag,
+# which fans out to the build jobs. Assets are attached and the release is only
+# made visible (undrafted, marked latest) + :latest / Homebrew updated once every
+# artifact succeeds — so a failed build never leaves a visible, partial release.
 #
-#   workflow_dispatch -> builds the exact same artifacts for an arbitrary test
-#                        version and publishes a PRERELEASE only (never :latest,
-#                        never the Homebrew main formula). Used to validate the
-#                        pipeline without burning real semver. Tear the test
-#                        release down afterwards (see docs/ci-cd.md).
+# To retry a failed release: delete the draft release + tag
+# (`gh release delete <tag> --yes --cleanup-tag`), then re-run release-please
+# (it re-opens the release PR); merging it rebuilds with the current workflow.
 
 on:
   push:
     branches: [main]
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Test version (e.g. 0.0.0-test.1). Publishes a PRERELEASE only."
-        required: true
-        type: string
 
 # Never cancel an in-flight release; overlapping releases would race on tags/tap.
 concurrency:
@@ -38,31 +29,25 @@ env:
   IMAGE_NAME: ghcr.io/${{ github.repository }}
 
 jobs:
-  # --- Version management (real releases only) ------------------------------
   release-please:
-    # Always runs (even on dispatch, where the action step is skipped) so it is
-    # never a "skipped" node in the needs graph — a skipped release-please would
-    # transitively skip setup's dependents regardless of their own `if`.
     runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
     outputs:
       release_created: ${{ steps.rp.outputs.release_created }}
-      tag_name: ${{ steps.rp.outputs.tag_name }}
+      tag: ${{ steps.rp.outputs.tag_name }}
       version: ${{ steps.rp.outputs.version }}
     steps:
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: rp
-        if: github.event_name == 'push'
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-      # release-please bumps [workspace.package].version via the toml updater,
-      # but cannot update Cargo.lock's member entries (the cargo-workspace
-      # plugin chokes on `version.workspace = true`). Let cargo itself sync the
-      # lockfile on the release PR branch — authoritative and touches only the
-      # workspace members (no external-dep churn).
+      # release-please bumps [workspace.package].version via the toml updater but
+      # cannot update Cargo.lock's member entries (the cargo-workspace plugin
+      # rejects `version.workspace = true`). Let cargo sync the lockfile on the
+      # release PR branch — authoritative, touches only workspace members.
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         if: steps.rp.outputs.pr
         with:
@@ -85,43 +70,10 @@ jobs:
           git commit -m "chore: sync Cargo.lock for release"
           git push
 
-  # --- Resolve version + whether this run promotes (real) or is a test ------
-  setup:
-    needs: [release-please]
-    if: |
-      always() &&
-      (
-        (github.event_name == 'push' && needs.release-please.outputs.release_created == 'true') ||
-        github.event_name == 'workflow_dispatch'
-      )
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.v.outputs.version }}
-      tag: ${{ steps.v.outputs.tag }}
-      promote: ${{ steps.v.outputs.promote }}
-    steps:
-      - id: v
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            ver='${{ inputs.version }}'
-            promote=false
-          else
-            ver='${{ needs.release-please.outputs.version }}'
-            promote=true
-          fi
-          {
-            echo "version=$ver"
-            echo "tag=v$ver"
-            echo "promote=$promote"
-          } >> "$GITHUB_OUTPUT"
-          echo "Resolved version=$ver tag=v$ver promote=$promote"
-
   # --- Standalone Linux binaries (native runners; no cross-compile) ---------
   build-linux:
-    needs: setup
-    # Explicit condition: `setup` runs via always() (release-please is skipped on
-    # dispatch), so the implicit success() would otherwise propagate that skip.
-    if: needs.setup.result == 'success'
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
     strategy:
       fail-fast: true
       matrix:
@@ -150,7 +102,7 @@ jobs:
         run: cargo build -p vibecast-cli --release --locked --target ${{ matrix.target }}
       - name: Package
         run: |
-          name="vibecast-${{ needs.setup.outputs.tag }}-${{ matrix.target }}"
+          name="vibecast-${{ needs.release-please.outputs.tag }}-${{ matrix.target }}"
           mkdir -p "dist/$name"
           cp "target/${{ matrix.target }}/release/vibecast" "dist/$name/vibecast"
           cp LICENSE README.md "dist/$name/"
@@ -166,8 +118,8 @@ jobs:
 
   # --- Standalone macOS binary (Apple Silicon only) -------------------------
   build-macos:
-    needs: setup
-    if: needs.setup.result == 'success'
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
     runs-on: macos-14
     permissions:
       contents: read
@@ -184,7 +136,7 @@ jobs:
         run: cargo build -p vibecast-cli --release --locked --target aarch64-apple-darwin
       - name: Package
         run: |
-          name="vibecast-${{ needs.setup.outputs.tag }}-aarch64-apple-darwin"
+          name="vibecast-${{ needs.release-please.outputs.tag }}-aarch64-apple-darwin"
           mkdir -p "dist/$name"
           cp "target/aarch64-apple-darwin/release/vibecast" "dist/$name/vibecast"
           cp LICENSE README.md "dist/$name/"
@@ -200,8 +152,8 @@ jobs:
 
   # --- Signed Android APK ---------------------------------------------------
   build-android:
-    needs: setup
-    if: needs.setup.result == 'success'
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -243,10 +195,9 @@ jobs:
       - name: Verify signature + package
         run: |
           apk=$(find android/app/build/outputs/apk/release -name '*.apk' | head -n1)
-          buildtools="$ANDROID_SDK_ROOT/build-tools/36.0.0"
-          "$buildtools/apksigner" verify --verbose "$apk"
+          "$ANDROID_SDK_ROOT/build-tools/36.0.0/apksigner" verify --verbose "$apk"
           mkdir -p dist
-          out="dist/vibecast-${{ needs.setup.outputs.tag }}.apk"
+          out="dist/vibecast-${{ needs.release-please.outputs.tag }}.apk"
           cp "$apk" "$out"
           (cd dist && sha256sum "$(basename "$out")" > "$(basename "$out").sha256")
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -259,8 +210,8 @@ jobs:
 
   # --- Multi-arch container image (assembled from prebuilt binaries) --------
   docker:
-    needs: [setup, build-linux]
-    if: needs.setup.result == 'success' && needs.build-linux.result == 'success'
+    needs: [release-please, build-linux]
+    if: needs.release-please.outputs.release_created == 'true' && needs.build-linux.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -276,7 +227,7 @@ jobs:
       - name: Stage binaries + Dockerfile into a clean build context (no recompile)
         run: |
           set -euo pipefail
-          tag='${{ needs.setup.outputs.tag }}'
+          tag='${{ needs.release-please.outputs.tag }}'
           for arch in amd64 arm64; do
             case "$arch" in
               amd64) triple=x86_64-unknown-linux-gnu ;;
@@ -293,17 +244,17 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build + push version-tagged image
+      - name: Build + push image (version + semver + sha tags)
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: ctx
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ needs.setup.outputs.version }}
-            ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
           provenance: false
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ needs.release-please.outputs.version }}
+            ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
       - name: Attest image provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
@@ -311,13 +262,14 @@ jobs:
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
-  # --- Attach assets, attest, then (real releases only) promote -------------
+  # --- Attach assets, attest, then promote (visible release + :latest) ------
   publish:
-    needs: [setup, build-linux, build-macos, build-android, docker]
-    # All artifacts must exist before we touch the release — this is the
-    # atomicity gate: any build failure means no assets, no promote, no tap.
+    needs: [release-please, build-linux, build-macos, build-android, docker]
+    # All artifacts must exist before we touch the release — the atomicity gate:
+    # any build failure means no assets, no promote, no tap, and the release
+    # stays a hidden draft.
     if: >-
-      needs.setup.result == 'success' &&
+      needs.release-please.outputs.release_created == 'true' &&
       needs.build-linux.result == 'success' &&
       needs.build-macos.result == 'success' &&
       needs.build-android.result == 'success' &&
@@ -336,7 +288,7 @@ jobs:
       - name: Collect release assets + checksums
         run: |
           set -euo pipefail
-          tag='${{ needs.setup.outputs.tag }}'
+          tag='${{ needs.release-please.outputs.tag }}'
           mkdir -p release
           find artifacts -type f \( -name '*.tar.gz' -o -name '*.apk' \) -exec cp {} release/ \;
           (cd release && sha256sum -- *.tar.gz *.apk > "vibecast-$tag-SHA256SUMS.txt")
@@ -347,28 +299,15 @@ jobs:
           subject-path: |
             release/*.tar.gz
             release/*.apk
-      - name: Upload assets to the release
+      - name: Upload assets, add :latest + semver tag, publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag='${{ needs.setup.outputs.tag }}'
-          if [ '${{ needs.setup.outputs.promote }}' != 'true' ]; then
-            # Test path: release-please did not create anything — make a prerelease.
-            gh release view "$tag" >/dev/null 2>&1 || \
-              gh release create "$tag" --draft --prerelease --target "$GITHUB_SHA" \
-                --title "$tag (pipeline test)" --notes "Pipeline test build — do not use."
-          fi
-          gh release upload "$tag" release/* --clobber
-      - name: Promote — :latest, semver tag, undraft (real releases only)
-        if: needs.setup.outputs.promote == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          tag='${{ needs.setup.outputs.tag }}'
-          version='${{ needs.setup.outputs.version }}'
+          tag='${{ needs.release-please.outputs.tag }}'
+          version='${{ needs.release-please.outputs.version }}'
           minor="${version%.*}"
+          gh release upload "$tag" release/* --clobber
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
           docker buildx imagetools create \
             -t "$IMAGE_NAME:latest" \
@@ -376,10 +315,10 @@ jobs:
             "$IMAGE_NAME:$version"
           gh release edit "$tag" --draft=false --latest
 
-  # --- Update the public Homebrew tap (real releases only) ------------------
+  # --- Update the public Homebrew tap ---------------------------------------
   homebrew:
-    needs: [setup, publish]
-    if: needs.setup.outputs.promote == 'true' && needs.publish.result == 'success'
+    needs: [release-please, publish]
+    if: needs.release-please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -390,8 +329,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag='${{ needs.setup.outputs.tag }}'
-          version='${{ needs.setup.outputs.version }}'
+          tag='${{ needs.release-please.outputs.tag }}'
+          version='${{ needs.release-please.outputs.version }}'
           gh release download "$tag" -p '*SHA256SUMS.txt' -D sums
           sums="sums/vibecast-$tag-SHA256SUMS.txt"
           get() { awk -v f="$1" '$2 ~ f {print $1}' "$sums"; }
@@ -424,5 +363,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if git diff --quiet; then echo "formula unchanged"; exit 0; fi
           git add Formula/vibecast.rb
-          git commit -m "vibecast ${{ needs.setup.outputs.version }}"
+          git commit -m "vibecast ${{ needs.release-please.outputs.version }}"
           git push
