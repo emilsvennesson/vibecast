@@ -1,6 +1,6 @@
 [package]
 name = "vibecast-player-api"
-description = "Neutral seam between the generic Cast receiver and a concrete player: wire protocol, renderer/proxy traits, manifest normalization"
+description = "Neutral seam between the generic Cast receiver and a concrete player: wire protocol, player/proxy traits, manifest normalization"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

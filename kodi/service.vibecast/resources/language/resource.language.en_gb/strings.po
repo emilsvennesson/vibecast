@@ -100,5 +100,5 @@ msgid "HDR supported"
 msgstr ""
 
 msgctxt "#30027"
-msgid "Widevine security level (auto, L1, L3)"
+msgid "Widevine security level (auto, L1, L2, L3)"
 msgstr ""

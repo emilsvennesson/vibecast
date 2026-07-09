@@ -416,11 +416,18 @@ class VibecastService:
 
     def _on_ws_open(self, ws: websocket.WebSocketApp) -> None:
         # The first frame must be the registration announcing this player's
-        # identity + capabilities, before any state report.
+        # identity + capabilities, before any state report. The server drops any
+        # socket whose first frame isn't a valid `register`, so a failed send
+        # means the connection is unusable: close it and let the loop reconnect
+        # rather than marking it connected and sending reports into the void.
         try:
             ws.send(json.dumps(self._build_register_frame(), separators=(",", ":")))
         except (OSError, websocket.WebSocketException) as exc:
             log(f"failed to send register frame: {exc}", xbmc.LOGWARNING)
+            with self._ws_lock:
+                self._last_ws_error = str(exc)
+            ws.close()
+            return
         with self._ws_lock:
             self._ws_connected = True
             self._last_ws_error = None

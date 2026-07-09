@@ -147,9 +147,17 @@ fn parse_register(text: &str) -> Option<PlayerRegistration> {
     if frame.frame_type != "register" {
         return None;
     }
+    // The player id keys the orchestrator's receiver map and the name becomes an
+    // advertised friendly name, so reject empty/whitespace values rather than let
+    // them collide or advertise a device named " [vibecast]".
+    let player_id = frame.player_id.trim().to_string();
+    let name = frame.name.trim().to_string();
+    if player_id.is_empty() || name.is_empty() {
+        return None;
+    }
     Some(PlayerRegistration {
-        player_id: frame.player_id,
-        name: frame.name,
+        player_id,
+        name,
         capabilities: frame.capabilities.into_sdk(),
     })
 }
@@ -728,6 +736,29 @@ mod tests {
             }
         })
         .to_string()
+    }
+
+    #[test]
+    fn parse_register_trims_values_and_rejects_empty_identity() {
+        let parsed = parse_register(
+            &json!({ "type": "register", "playerId": "  p-1  ", "name": "  Kodi  " }).to_string(),
+        )
+        .expect("valid registration");
+        assert_eq!(parsed.player_id, "p-1");
+        assert_eq!(parsed.name, "Kodi");
+
+        for bad in [
+            json!({ "type": "register", "playerId": "", "name": "Kodi" }),
+            json!({ "type": "register", "playerId": "   ", "name": "Kodi" }),
+            json!({ "type": "register", "playerId": "p-1", "name": "" }),
+            json!({ "type": "register", "playerId": "p-1", "name": "  " }),
+            json!({ "type": "hello", "playerId": "p-1", "name": "Kodi" }),
+        ] {
+            assert!(
+                parse_register(&bad.to_string()).is_none(),
+                "should reject: {bad}"
+            );
+        }
     }
 
     async fn connect(bridge: &PlayerBridge) -> WebSocketStream<MaybeTlsStream<TcpStream>> {

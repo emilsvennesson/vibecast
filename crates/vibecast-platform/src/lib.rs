@@ -140,10 +140,19 @@ pub struct RunningReceiver {
 impl RunningReceiver {
     /// Cooperatively tear everything down: cancel the orchestrator (which stops
     /// every per-player receiver), then stop the shared bridge.
-    pub async fn shutdown(self) {
+    pub async fn shutdown(mut self) {
         self.shutdown.cancel();
         // The manager drains and shuts down every per-player receiver on cancel.
-        let _ = tokio::time::timeout(Duration::from_secs(15), self.manager).await;
+        // Await by reference so a timeout doesn't just detach the task: if it
+        // overruns, abort it so orphaned per-player receivers can't keep running
+        // on the (long-lived, FFI) runtime after `shutdown()` returns.
+        if tokio::time::timeout(Duration::from_secs(15), &mut self.manager)
+            .await
+            .is_err()
+        {
+            tracing::warn!("orchestrator did not stop within 15s; aborting it");
+            self.manager.abort();
+        }
         // Bound: the bridge's graceful shutdown awaits in-flight connections, and
         // a long-lived `/player` WebSocket would otherwise never drain.
         let _ = tokio::time::timeout(Duration::from_secs(5), self.bridge.stop()).await;
