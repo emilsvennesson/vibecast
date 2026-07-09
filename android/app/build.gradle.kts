@@ -18,6 +18,23 @@ val cargo: String = File(cargoBinDir, "cargo").absolutePath
 val androidApiLevel = 24
 val rustAbis = listOf("arm64-v8a", "x86_64")
 
+// Single source of truth for the app version; release-please bumps the literal
+// below on release (see release-please-config.json extra-files).
+val appVersionName = "0.1.0" // x-release-please-version
+
+// Derive a monotonic versionCode from the semver name
+// (MAJOR*10000 + MINOR*100 + PATCH), ignoring any prerelease suffix. Floored at
+// 1 so pipeline test builds (e.g. 0.0.0-test.N) still yield a valid code.
+fun versionCodeFrom(name: String): Int {
+    val (major, minor, patch) =
+        name
+            .substringBefore('-')
+            .split('.')
+            .map { it.toIntOrNull() ?: 0 }
+            .let { Triple(it.getOrElse(0) { 0 }, it.getOrElse(1) { 0 }, it.getOrElse(2) { 0 }) }
+    return maxOf(1, major * 10000 + minor * 100 + patch)
+}
+
 val rustJniLibsDir = layout.buildDirectory.dir("rustJniLibs")
 val uniffiGenDir = layout.buildDirectory.dir("generated/uniffi")
 
@@ -117,8 +134,8 @@ android {
         applicationId = "com.vibecast.receiver"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = versionCodeFrom(appVersionName)
+        versionName = appVersionName
         ndk { abiFilters += rustAbis }
     }
 
@@ -130,10 +147,26 @@ android {
         jvmTarget = "17"
     }
 
+    // Release signing is wired only when the keystore env vars are present (CI
+    // release builds inject them from secrets). Local/dev release builds fall
+    // back to no signing config → an unsigned APK, which is fine for testing.
+    val keystoreFile: String? = System.getenv("ANDROID_KEYSTORE_FILE")
+    signingConfigs {
+        if (keystoreFile != null) {
+            create("release") {
+                storeFile = file(keystoreFile)
+                storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("ANDROID_KEY_ALIAS")
+                keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.findByName("release")
         }
     }
 
