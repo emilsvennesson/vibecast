@@ -77,12 +77,16 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
+        # Build on the OLDEST supported runners (glibc 2.35) so the binaries run
+        # on older distros AND on the distroless/cc-debian12 image (glibc 2.36).
+        # Building on ubuntu-latest (24.04, glibc 2.39) makes binaries that need
+        # GLIBC_2.38, which the runtime image lacks.
         include:
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
             arch: amd64
           - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-22.04-arm
             arch: arm64
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -361,7 +365,8 @@ jobs:
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet; then echo "formula unchanged"; exit 0; fi
           git add Formula/vibecast.rb
+          # --cached so a brand-new (untracked) formula is detected too.
+          if git diff --cached --quiet; then echo "formula unchanged"; exit 0; fi
           git commit -m "vibecast ${{ needs.release-please.outputs.version }}"
           git push
