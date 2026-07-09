@@ -6,11 +6,16 @@
   "tag-separator": "-",
   "packages": {
     ".": {
-      "release-type": "rust",
+      "release-type": "simple",
       "component": "vibecast",
       "changelog-path": "CHANGELOG.md",
       "draft": true,
       "extra-files": [
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.package.version"
+        },
         {
           "type": "generic",
           "path": "android/app/build.gradle.kts"
@@ -18,9 +23,6 @@
       ]
     }
   },
-  "plugins": [
-    "cargo-workspace"
-  ],
   "changelog-sections": [
     { "type": "feat", "section": "Features" },
     { "type": "fix", "section": "Bug Fixes" },

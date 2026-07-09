@@ -55,6 +55,32 @@ jobs:
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+      # release-please bumps [workspace.package].version via the toml updater,
+      # but cannot update Cargo.lock's member entries (the cargo-workspace
+      # plugin chokes on `version.workspace = true`). Let cargo itself sync the
+      # lockfile on the release PR branch — authoritative and touches only the
+      # workspace members (no external-dep churn).
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        if: steps.rp.outputs.pr
+        with:
+          ref: ${{ fromJSON(steps.rp.outputs.pr).headBranchName }}
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        if: steps.rp.outputs.pr
+        with:
+          toolchain: stable
+      - name: Sync Cargo.lock on the release PR
+        if: steps.rp.outputs.pr
+        run: |
+          cargo update --workspace
+          if git diff --quiet Cargo.lock; then
+            echo "Cargo.lock already in sync"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "chore: sync Cargo.lock for release"
+          git push
 
   # --- Resolve version + whether this run promotes (real) or is a test ------
   setup:
