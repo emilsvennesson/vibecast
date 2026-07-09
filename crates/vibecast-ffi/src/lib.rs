@@ -49,9 +49,10 @@ pub struct ServerConfig {
     pub bind_host: String,
     /// Player-bridge port where players connect to register (e.g. 8010).
     pub player_port: u16,
-    /// LAN IP the receiver reports to senders (eureka `ip_address`). Supply the
-    /// frontend's Wi‑Fi interface address (Android: `WifiManager`); `None`
-    /// falls back to the routed-interface heuristic.
+    /// LAN IP the receiver reports to senders (eureka `ip_address`). Supply
+    /// the frontend's LAN address (Android: first site-local IPv4 resolved
+    /// from `NetworkInterface` enumeration); `None` falls back to the
+    /// routed-interface heuristic.
     pub local_ip: Option<String>,
     /// Per-app config as a JSON object string (`{"<app_key>": { ... }}`).
     pub apps_config_json: Option<String>,

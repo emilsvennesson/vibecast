@@ -70,9 +70,10 @@ pub struct PlatformInputs {
     pub advertise_mdns: bool,
     /// LAN IP the receiver reports to senders (eureka `ip_address`). When
     /// `None`, it is derived from the routed interface via [`detect_local_ip`]
-    /// — a desktop-oriented heuristic. Frontends that already know their LAN
-    /// address (e.g. Android's Wi‑Fi interface) should supply it explicitly so
-    /// a multi-interface host reports the right one.
+    /// — a desktop-oriented heuristic. Frontends that resolve their own LAN
+    /// address (e.g. Android, by enumerating `NetworkInterface`s for the first
+    /// site-local IPv4) should supply it explicitly rather than relying on the
+    /// heuristic.
     pub local_ip: Option<String>,
 }
 
