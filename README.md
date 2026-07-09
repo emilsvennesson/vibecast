@@ -1,5 +1,8 @@
 # vibecast
 
+[![CI](https://github.com/emilsvennesson/vibecast/actions/workflows/ci.yml/badge.svg)](https://github.com/emilsvennesson/vibecast/actions/workflows/ci.yml)
+[![Release](https://github.com/emilsvennesson/vibecast/actions/workflows/release.yml/badge.svg)](https://github.com/emilsvennesson/vibecast/actions/workflows/release.yml)
+
 Turn any computer into a Chromecast. vibecast is a native Google Cast
 receiver — it impersonates a Chromecast on your network so the Cast button in
 supported apps works against a PC, HTPC, or media server instead of a dongle.
@@ -22,6 +25,23 @@ shows up in nearby Cast senders. Drop a `--name` flag or set
 You'll need a Cast device-auth certificate bundle (`certs.json`) in the data
 directory (`$HOME/.vibecast` by default). Vibecast uses pre-harvested static
 signatures for device auth — no runtime RSA signing.
+
+## Install
+
+Prebuilt artifacts are published on each [release](https://github.com/emilsvennesson/vibecast/releases).
+
+```sh
+# Homebrew (macOS Apple Silicon + Linux)
+brew install emilsvennesson/vibecast/vibecast
+
+# Docker / GHCR (multi-arch). mDNS needs host networking; mount a data dir.
+docker run --rm --network host \
+  -v "$HOME/.vibecast:/data" \
+  ghcr.io/emilsvennesson/vibecast:latest --data-dir /data
+```
+
+Or grab a binary tarball / the Android APK directly from the release assets.
+Build, CI, and release details live in [`docs/ci-cd.md`](docs/ci-cd.md).
 
 ## Bundled apps
 
