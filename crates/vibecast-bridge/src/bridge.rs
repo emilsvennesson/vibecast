@@ -13,7 +13,7 @@
 //! (session ids are globally unique), shared across all players' receivers.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -53,6 +53,12 @@ pub struct PlayerRegistration {
 }
 
 /// Lifecycle events emitted by the bridge as players connect and disconnect.
+///
+/// Both variants carry an `epoch`: a per-connection token, unique across the
+/// bridge's lifetime, that distinguishes two sockets sharing the same
+/// `player_id` (two browser tabs, or an overlapping reconnect). The orchestrator
+/// uses it so a stale connection's [`Disconnected`](Self::Disconnected) can't
+/// tear down the newer receiver that replaced it.
 pub enum PlayerEvent {
     /// A player registered. Carries its command sink and report stream so the
     /// orchestrator can bind it to a dedicated Cast receiver.
@@ -64,11 +70,17 @@ pub enum PlayerEvent {
         player: Arc<dyn Player>,
         /// Playback reports from this player.
         reports: mpsc::Receiver<PlayerReport>,
+        /// Per-connection token identifying the socket this registration came
+        /// from.
+        epoch: u64,
     },
     /// The player with this id disconnected; its receiver should be torn down.
     Disconnected {
         /// The player id from its registration.
         player_id: String,
+        /// The epoch of the socket that disconnected (matches its
+        /// [`Registered`](Self::Registered) epoch).
+        epoch: u64,
     },
 }
 
@@ -213,6 +225,8 @@ struct BridgeState {
     resolved_host: Arc<str>,
     configured_port: u16,
     port: Arc<AtomicU16>,
+    /// Monotonic counter handing each socket a unique per-connection epoch.
+    epochs: Arc<AtomicU64>,
 }
 
 impl BridgeState {
@@ -266,6 +280,7 @@ impl PlayerBridge {
             resolved_host: Arc::from(resolved_host.as_str()),
             configured_port: port,
             port: Arc::new(AtomicU16::new(0)),
+            epochs: Arc::new(AtomicU64::new(0)),
         };
 
         Self {
@@ -453,6 +468,9 @@ async fn handle_socket(socket: WebSocket, state: BridgeState) {
     };
 
     let player_id = registration.player_id.clone();
+    // A per-connection epoch so a stale socket's Disconnected can't tear down a
+    // newer receiver that reused the same player_id.
+    let epoch = state.epochs.fetch_add(1, Ordering::Relaxed);
     let (out_tx, mut out_rx) = mpsc::channel::<String>(64);
     let (reports_tx, reports_rx) = mpsc::channel::<PlayerReport>(64);
     let player: Arc<dyn Player> = Arc::new(PlayerSink { out: out_tx });
@@ -463,6 +481,7 @@ async fn handle_socket(socket: WebSocket, state: BridgeState) {
             registration: Box::new(registration),
             player,
             reports: reports_rx,
+            epoch,
         })
         .await
         .is_err()
@@ -505,6 +524,7 @@ async fn handle_socket(socket: WebSocket, state: BridgeState) {
         .events
         .send(PlayerEvent::Disconnected {
             player_id: player_id.clone(),
+            epoch,
         })
         .await;
     tracing::info!(player_id = %player_id, "player disconnected");
@@ -757,6 +777,7 @@ mod tests {
                 registration,
                 player,
                 reports,
+                ..
             } => (registration, player, reports),
             PlayerEvent::Disconnected { .. } => panic!("expected Registered"),
         };
@@ -818,7 +839,7 @@ mod tests {
             .expect("event");
         assert!(matches!(
             event,
-            PlayerEvent::Disconnected { player_id } if player_id == "player-1"
+            PlayerEvent::Disconnected { player_id, .. } if player_id == "player-1"
         ));
 
         bridge.stop().await;
@@ -842,6 +863,76 @@ mod tests {
 
         let event = tokio::time::timeout(Duration::from_millis(300), events.recv()).await;
         assert!(event.is_err(), "no event should be emitted");
+        bridge.stop().await;
+    }
+
+    fn register_frame_with_id(player_id: &str) -> String {
+        json!({ "type": "register", "playerId": player_id, "name": "Dup Player" }).to_string()
+    }
+
+    async fn recv_event(events: &mut mpsc::Receiver<PlayerEvent>) -> PlayerEvent {
+        tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("event within timeout")
+            .expect("event")
+    }
+
+    #[tokio::test]
+    async fn duplicate_player_id_gets_distinct_epochs() {
+        let (bridge, mut events) = bridge();
+        bridge.start().await.expect("start");
+
+        // Two sockets reuse the same player_id (e.g. two browser tabs, or an
+        // overlapping reconnect).
+        let mut ws1 = connect(&bridge).await;
+        ws1.send(WsMessage::Text(register_frame_with_id("dup").into()))
+            .await
+            .expect("register ws1");
+        // Retain the command sink + report stream so the socket stays open
+        // (dropping the sink closes the socket, as a real orchestrator holds it).
+        let (epoch1, _player1, _reports1) = match recv_event(&mut events).await {
+            PlayerEvent::Registered {
+                registration,
+                player,
+                reports,
+                epoch,
+            } => {
+                assert_eq!(registration.player_id, "dup");
+                (epoch, player, reports)
+            }
+            PlayerEvent::Disconnected { .. } => panic!("expected Registered"),
+        };
+
+        let mut ws2 = connect(&bridge).await;
+        ws2.send(WsMessage::Text(register_frame_with_id("dup").into()))
+            .await
+            .expect("register ws2");
+        let (epoch2, _player2, _reports2) = match recv_event(&mut events).await {
+            PlayerEvent::Registered {
+                player,
+                reports,
+                epoch,
+                ..
+            } => (epoch, player, reports),
+            PlayerEvent::Disconnected { .. } => panic!("expected Registered"),
+        };
+
+        // Each connection is tagged with a distinct epoch.
+        assert_ne!(epoch1, epoch2);
+
+        // Closing the *older* socket reports its own epoch, so the orchestrator
+        // can tell it apart from the newer connection that replaced it and avoid
+        // tearing down the newer receiver.
+        ws1.close(None).await.ok();
+        match recv_event(&mut events).await {
+            PlayerEvent::Disconnected { player_id, epoch } => {
+                assert_eq!(player_id, "dup");
+                assert_eq!(epoch, epoch1);
+            }
+            PlayerEvent::Registered { .. } => panic!("expected Disconnected"),
+        }
+
+        drop(ws2);
         bridge.stop().await;
     }
 

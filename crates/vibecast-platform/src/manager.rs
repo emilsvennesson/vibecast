@@ -86,10 +86,19 @@ pub(crate) struct ManagerConfig {
     pub observer: Option<Arc<dyn PlayerObserver>>,
 }
 
+/// A live per-player receiver tagged with the epoch of the connection that
+/// spawned it. The epoch lets a stale/duplicate connection's `Disconnected`
+/// (two browser tabs, or an overlapping reconnect) be ignored so it can't tear
+/// down the newer receiver that replaced it.
+struct TrackedReceiver {
+    epoch: u64,
+    receiver: ReceiverInstance,
+}
+
 pub(crate) struct PlayerManager {
     config: ManagerConfig,
     bundle: vibecast_security::CertificateBundle,
-    receivers: HashMap<String, ReceiverInstance>,
+    receivers: HashMap<String, TrackedReceiver>,
 }
 
 impl PlayerManager {
@@ -117,19 +126,19 @@ impl PlayerManager {
                 () = shutdown.cancelled() => break,
                 _ = ticker.tick() => self.rotate_certificates().await,
                 event = events.recv() => match event {
-                    Some(PlayerEvent::Registered { registration, player, reports }) => {
-                        self.on_registered(*registration, player, reports).await;
+                    Some(PlayerEvent::Registered { registration, player, reports, epoch }) => {
+                        self.on_registered(epoch, *registration, player, reports).await;
                     }
-                    Some(PlayerEvent::Disconnected { player_id }) => {
-                        self.on_disconnected(&player_id).await;
+                    Some(PlayerEvent::Disconnected { player_id, epoch }) => {
+                        self.on_disconnected(&player_id, epoch).await;
                     }
                     None => break,
                 },
             }
         }
 
-        for (player_id, receiver) in self.receivers.drain() {
-            receiver.shutdown().await;
+        for (player_id, tracked) in self.receivers.drain() {
+            tracked.receiver.shutdown().await;
             if let Some(observer) = &self.config.observer {
                 observer.on_player_stopped(&player_id);
             }
@@ -138,6 +147,7 @@ impl PlayerManager {
 
     async fn on_registered(
         &mut self,
+        epoch: u64,
         registration: PlayerRegistration,
         player: Arc<dyn Player>,
         reports: mpsc::Receiver<PlayerReport>,
@@ -146,7 +156,7 @@ impl PlayerManager {
 
         // Reconnect / duplicate id: replace the previous receiver.
         if let Some(existing) = self.receivers.remove(&player_id) {
-            existing.shutdown().await;
+            existing.receiver.shutdown().await;
         }
 
         let device_id = uuid::Uuid::new_v4().to_string();
@@ -209,12 +219,19 @@ impl PlayerManager {
             });
         }
 
-        self.receivers.insert(player_id, receiver);
+        self.receivers
+            .insert(player_id, TrackedReceiver { epoch, receiver });
     }
 
-    async fn on_disconnected(&mut self, player_id: &str) {
-        if let Some(receiver) = self.receivers.remove(player_id) {
-            receiver.shutdown().await;
+    async fn on_disconnected(&mut self, player_id: &str, epoch: u64) {
+        // A stale/duplicate connection's disconnect must not tear down a newer
+        // receiver that already replaced it: only remove when the epoch matches
+        // the currently-tracked connection.
+        if self.receivers.get(player_id).map(|t| t.epoch) != Some(epoch) {
+            return;
+        }
+        if let Some(tracked) = self.receivers.remove(player_id) {
+            tracked.receiver.shutdown().await;
             tracing::info!(player_id = %player_id, "stopped receiver for player");
             if let Some(observer) = &self.config.observer {
                 observer.on_player_stopped(player_id);
@@ -239,12 +256,19 @@ impl PlayerManager {
         self.bundle = rotated.clone();
         let crl = rotated.crl.clone().or_else(|| self.config.crl.clone());
         let digest = rotated.cert_digest_md5();
-        for (player_id, receiver) in &self.receivers {
-            receiver.rotation_handle().update_auth(AuthMaterial {
-                bundle: rotated.clone(),
-                crl: crl.clone(),
-            });
-            let txt = receiver.rotation_handle().update_cert_digest(&digest).await;
+        for (player_id, tracked) in &self.receivers {
+            tracked
+                .receiver
+                .rotation_handle()
+                .update_auth(AuthMaterial {
+                    bundle: rotated.clone(),
+                    crl: crl.clone(),
+                });
+            let txt = tracked
+                .receiver
+                .rotation_handle()
+                .update_cert_digest(&digest)
+                .await;
             if let Some(observer) = &self.config.observer {
                 observer.on_player_txt_changed(player_id, txt);
             }
