@@ -252,7 +252,8 @@ class CastReceiverService :
      */
     private fun localIpAddress(): String? =
         try {
-            NetworkInterface.getNetworkInterfaces()
+            NetworkInterface
+                .getNetworkInterfaces()
                 .asSequence()
                 .filter { it.isUp && !it.isLoopback }
                 .flatMap { it.inetAddresses.asSequence() }

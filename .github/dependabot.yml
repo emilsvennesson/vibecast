@@ -1,0 +1,30 @@
+version: 2
+updates:
+  # GitHub Actions — keeps SHA-pinned actions current (Dependabot bumps the pin
+  # and its `# vX.Y.Z` comment together).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Rust workspace.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-patch:
+        update-types: [minor, patch]
+
+  # Android / Gradle (version catalog, plugins, and the Gradle wrapper).
+  - package-ecosystem: gradle
+    directory: /android
+    schedule:
+      interval: weekly
+    groups:
+      gradle:
+        patterns: ["*"]

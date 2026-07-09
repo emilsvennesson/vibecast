@@ -1,0 +1,20 @@
+# Keep the build context small + reproducible. The builder only needs the Cargo
+# workspace sources; everything below is irrelevant or must never enter an image.
+target/
+dist/
+android/
+kodi/
+tests/
+vibecast/
+.git/
+.github/
+.venv/
+.idea/
+.vscode/
+*.log
+capture_*.jsonl
+# Certificates / secrets — never copy into a build context.
+*.pem
+*.key
+certs/
+certs.json
