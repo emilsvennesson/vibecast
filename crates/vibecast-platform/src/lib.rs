@@ -9,8 +9,9 @@
 //! That composition lives here so the two bindings never drift. What stays in
 //! each binding is only what is genuinely platform-specific: argument/settings
 //! sourcing, the async runtime, the tracing sink, and *discovery advertisement*
-//! (mDNS on desktop via [`CastAdvertisement`], `NsdManager` on Android — hence
-//! [`PlatformInputs::advertise_mdns`] and the [`TxtObserver`] hook).
+//! (mDNS on desktop via [`CastAdvertisement`](vibecast_discovery::CastAdvertisement),
+//! `NsdManager` on Android — hence [`PlatformInputs::advertise_mdns`] and the
+//! [`PlayerObserver`] hook).
 //!
 //! [`vibecast-cli`]: ../vibecast_cli/index.html
 
@@ -67,6 +68,13 @@ pub struct PlatformInputs {
     /// `true`; Android sets `false` and registers via `NsdManager` per player,
     /// consuming the facts delivered to [`PlayerObserver::on_player_started`].
     pub advertise_mdns: bool,
+    /// LAN IP the receiver reports to senders (eureka `ip_address`). When
+    /// `None`, it is derived from the routed interface via [`detect_local_ip`]
+    /// — a desktop-oriented heuristic. Frontends that resolve their own LAN
+    /// address (e.g. Android, by enumerating `NetworkInterface`s for the first
+    /// site-local IPv4) should supply it explicitly rather than relying on the
+    /// heuristic.
+    pub local_ip: Option<String>,
 }
 
 /// Errors assembling or starting the receiver.
@@ -126,7 +134,7 @@ impl From<ReceiverError> for PlatformError {
 
 /// A running vibecast server: the shared player bridge plus the per-player
 /// orchestrator. No Cast device exists until a player registers; each registered
-/// player gets its own receiver (see [`PlayerManager`](manager::PlayerManager)).
+/// player gets its own receiver (see the per-player orchestrator, `PlayerManager`).
 pub struct RunningReceiver {
     shutdown: CancellationToken,
     manager: tokio::task::JoinHandle<()>,
@@ -173,11 +181,12 @@ pub async fn run(
         data_dir,
         certs_path,
         advertise_mdns,
+        local_ip,
     } = inputs;
 
     let model = config.device.model.clone();
     let bind_host = config.network.bind_host.clone();
-    let local_ip = detect_local_ip(&bind_host);
+    let local_ip = local_ip.unwrap_or_else(|| detect_local_ip(&bind_host));
 
     // --- certificates (shared across every per-player receiver) ---
     let store = CertificateStore::from_manifest_path(&certs_path)?;
@@ -390,5 +399,24 @@ mod tests {
     fn wildcard_bind_resolves_to_a_valid_ip() {
         let ip = detect_local_ip("0.0.0.0");
         assert!(ip.parse::<IpAddr>().is_ok(), "not an IP: {ip}");
+    }
+
+    #[test]
+    fn injected_local_ip_is_used_verbatim_else_heuristic() {
+        // Mirrors how `run` resolves the reported IP from `PlatformInputs`.
+        fn resolve(local_ip: Option<String>, bind_host: &str) -> String {
+            local_ip.unwrap_or_else(|| detect_local_ip(bind_host))
+        }
+
+        // A frontend-supplied address is used as-is (even one the routing
+        // heuristic would never pick), so a multi-interface host reports it.
+        assert_eq!(
+            resolve(Some("10.42.0.7".to_string()), "0.0.0.0"),
+            "10.42.0.7"
+        );
+
+        // `None` falls back to the heuristic, which yields a valid IP.
+        let fallback = resolve(None, "0.0.0.0");
+        assert!(fallback.parse::<IpAddr>().is_ok(), "not an IP: {fallback}");
     }
 }

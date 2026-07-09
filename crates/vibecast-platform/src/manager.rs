@@ -2,7 +2,7 @@
 //!
 //! The [`PlayerManager`] consumes [`PlayerEvent`]s from the shared player bridge
 //! and, for each player that registers, spins up a dedicated Cast receiver with
-//! its own identity ("<name> [vibecast]"), fresh device id, dynamically-assigned
+//! its own identity (`<name> [vibecast]`), fresh device id, dynamically-assigned
 //! ports, and the player's reported capabilities. When a player disconnects its
 //! receiver is torn down (ephemeral lifecycle). The manager also owns the single
 //! certificate-rotation loop, hot-swapping every live receiver on rotation.

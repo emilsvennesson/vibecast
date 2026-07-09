@@ -21,6 +21,9 @@ import uniffi.vibecast_ffi.ReceiverHandle
 import uniffi.vibecast_ffi.ReceiverObserver
 import uniffi.vibecast_ffi.ServerConfig
 import uniffi.vibecast_ffi.TxtEntry
+import java.net.Inet4Address
+import java.net.NetworkInterface
+import java.net.SocketException
 import java.util.concurrent.Executors
 
 /**
@@ -104,6 +107,10 @@ class CastReceiverService :
                 model = settings.model,
                 bindHost = "0.0.0.0",
                 playerPort = settings.playerPort,
+                // Report this device's LAN address (bindHost is the wildcard, so
+                // the Rust routing heuristic can't be trusted on a multi-interface
+                // phone); null falls back to that heuristic.
+                localIp = localIpAddress(),
                 appsConfigJson = null,
             )
         ReceiverState.update("Starting…")
@@ -235,6 +242,27 @@ class CastReceiverService :
             }
         }
     }
+
+    // --- Networking ---
+
+    /**
+     * This device's site-local IPv4 address, reported to senders as the eureka
+     * `ip_address`. Returns `null` (letting the Rust core fall back to its
+     * routed-interface heuristic) if none can be resolved.
+     */
+    private fun localIpAddress(): String? =
+        try {
+            NetworkInterface.getNetworkInterfaces()
+                .asSequence()
+                .filter { it.isUp && !it.isLoopback }
+                .flatMap { it.inetAddresses.asSequence() }
+                .filterIsInstance<Inet4Address>()
+                .firstOrNull { it.isSiteLocalAddress }
+                ?.hostAddress
+        } catch (error: SocketException) {
+            Log.w(TAG, "failed to resolve local IP; using core heuristic", error)
+            null
+        }
 
     // --- Wi-Fi lock ---
 

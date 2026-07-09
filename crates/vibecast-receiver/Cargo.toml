@@ -8,6 +8,11 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# Advertise each receiver over mDNS from Rust (desktop). Platforms with native
+# discovery omit this and register via their own API, so `mdns-sd` is not linked.
+mdns = ["vibecast-discovery/mdns"]
+
 [dependencies]
 vibecast-cast = { path = "../vibecast-cast" }
 vibecast-core = { path = "../vibecast-core" }

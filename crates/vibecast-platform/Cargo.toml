@@ -8,6 +8,12 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# Advertise each per-player receiver over mDNS from Rust. Off by default so
+# bindings with native discovery (the FFI facade) never link `mdns-sd`; the
+# desktop `vibecast-cli` opts in.
+mdns = ["vibecast-receiver/mdns"]
+
 [dependencies]
 vibecast-cast = { path = "../vibecast-cast" }
 vibecast-security = { path = "../vibecast-security" }

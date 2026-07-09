@@ -100,7 +100,7 @@ Cargo workspace of 18 focused crates under `crates/`. Layering is strict:
 vibecast-proto        CastV2 protobuf + length-prefixed framing          (leaf)
 vibecast-security     Device-auth material + TLS cert rotation           (leaf)
 vibecast-cast         CastV2 TLS transport: connection actor             (proto, security)
-vibecast-discovery    mDNS advertisement + eureka HTTP/HTTPS             (security)
+vibecast-discovery    Cast identity/TXT + eureka HTTP/HTTPS; mDNS (feat) (security)
 vibecast-messages     Cast JSON message models (serde)                   (leaf)
 vibecast-player-api   Player/proxy seams + wire protocol + manifest utils (messages)
 vibecast-sdk          Stable app-author SDK (+ PlayerCapabilities)       (messages)
@@ -119,6 +119,13 @@ sink and `ProxyRegistrar` proxy seams live in `vibecast-player-api`, so the
 generic runtime is decoupled from the concrete Shaka/Kodi bridge.
 `vibecast-receiver` is the app-agnostic "one Cast receiver" composition and can
 be reused independently of vibecast's apps/bridge/branding.
+
+`vibecast-discovery` always exposes the portable `CastAdvertisement`
+identity/TXT + eureka endpoints; the `mdns-sd` responder (`MdnsResponder`) is
+behind an `mdns` cargo feature that only `vibecast-cli` enables, so the
+`vibecast-ffi` cdylib never links `mdns-sd` (it advertises via `PlayerObserver`
+facts). The reported LAN IP is injected via `PlatformInputs.local_ip`
+(`None` = derive from the routed interface).
 
 **App crates depend ONLY on `vibecast-sdk`.** No transport, TLS, or bridge
 types leak into app code. To add an app, model it on `vibecast-apps-svtplay`

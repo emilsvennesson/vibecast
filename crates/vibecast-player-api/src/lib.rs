@@ -1,7 +1,7 @@
 //! The neutral API between the generic Cast receiver runtime and a concrete
 //! player implementation.
 //!
-//! The receiver core ([`vibecast-core`]) drives playback purely through the
+//! The receiver core (`vibecast-core`) drives playback purely through the
 //! seams defined here — it hands media to a [`Player`] and registers
 //! DRM-license / manifest proxy handlers through a [`ProxyRegistrar`] — without
 //! depending on any particular player (the bundled Shaka bridge, a native

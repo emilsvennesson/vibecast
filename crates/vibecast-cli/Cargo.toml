@@ -13,7 +13,8 @@ name = "vibecast"
 path = "src/main.rs"
 
 [dependencies]
-vibecast-platform = { path = "../vibecast-platform" }
+# Desktop advertises each receiver over mDNS from Rust (enables `mdns-sd`).
+vibecast-platform = { path = "../vibecast-platform", features = ["mdns"] }
 
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 clap = { workspace = true }

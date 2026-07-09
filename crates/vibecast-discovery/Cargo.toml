@@ -8,13 +8,19 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# The mDNS responder (mdns-sd). Desktop enables it; platforms with native
+# discovery (Android NsdManager, iOS NWListener) omit it so mdns-sd is not
+# linked. The portable advertisement identity + eureka endpoints are always on.
+mdns = ["dep:mdns-sd"]
+
 [dependencies]
 vibecast-security = { path = "../vibecast-security" }
 tokio.workspace = true
 axum.workspace = true
 axum-server.workspace = true
 rustls.workspace = true
-mdns-sd.workspace = true
+mdns-sd = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 base64.workspace = true

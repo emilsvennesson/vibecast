@@ -78,6 +78,8 @@ async fn run(args: Args) -> anyhow::Result<()> {
         data_dir,
         certs_path,
         advertise_mdns: true,
+        // Desktop derives the reported LAN IP from the routed interface.
+        local_ip: None,
     };
 
     let receiver = vibecast_platform::run(config, inputs, None)
