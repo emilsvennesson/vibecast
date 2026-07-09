@@ -72,14 +72,25 @@ Linux binaries (`docker/release.Dockerfile`) rather than recompiling.
 
 ### Versioning
 
-- One version drives everything: `[workspace.package] version` in `Cargo.toml`
-  (all crates inherit it), `Cargo.lock`, and Android `versionName` in
-  `android/app/build.gradle.kts` (annotated `// x-release-please-version`).
-- Android `versionCode` is derived deterministically from the name
-  (`MAJOR*10000 + MINOR*100 + PATCH`).
-- Commit → bump mapping (Conventional Commits): `fix:` → patch, `feat:` →
-  minor, `!`/`BREAKING CHANGE:` → major.
-- Force a specific version with a `Release-As: X.Y.Z` commit footer.
+One version drives everything, kept in sync by release-please:
+
+- `[workspace.package] version` in `Cargo.toml` — all crates inherit it via
+  `version.workspace = true`. release-please bumps it with a `toml` updater
+  (`jsonpath: $.workspace.package.version`).
+- `Cargo.lock` — the workspace-member entries are re-synced by
+  `cargo update --workspace` on the release PR branch (a step in the
+  `release-please` job). The `cargo-workspace` plugin can't be used because it
+  rejects `version.workspace = true`, so cargo itself is the source of truth.
+- Android `versionName` in `android/app/build.gradle.kts` — bumped by a
+  `generic` updater keyed on the `// x-release-please-version` annotation;
+  `versionCode` is derived from it (`MAJOR*10000 + MINOR*100 + PATCH`).
+
+Because all crates share one version, `release-type` is `simple` (not `rust`).
+Commit → bump mapping (Conventional Commits): `fix:` → patch, `feat:` → minor,
+`!`/`BREAKING CHANGE:` → major. Force a version with a `Release-As: X.Y.Z`
+commit footer. The initial release is pinned to `0.1.0` via `release-as` in the
+config; remove that key after `0.1.0` ships so subsequent versions compute from
+commits.
 
 ### Test builds (dispatch)
 
