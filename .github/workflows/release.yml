@@ -77,16 +77,16 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        # Build on the OLDEST supported runners (glibc 2.35) so the binaries run
-        # on older distros AND on the distroless/cc-debian12 image (glibc 2.36).
-        # Building on ubuntu-latest (24.04, glibc 2.39) makes binaries that need
-        # GLIBC_2.38, which the runtime image lacks.
+        # aws-lc-rs requires glibc >= 2.38 to link (its objects reference
+        # __isoc23_* symbols), so we build on 24.04 and run on the matching
+        # distroless/cc-debian13 image (glibc 2.41). The binaries therefore need
+        # a glibc >= 2.38 host (Ubuntu 24.04+/Debian 13+).
         include:
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-22.04
+            runner: ubuntu-latest
             arch: amd64
           - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-22.04-arm
+            runner: ubuntu-24.04-arm
             arch: arm64
     runs-on: ${{ matrix.runner }}
     permissions:

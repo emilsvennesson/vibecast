@@ -24,7 +24,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.0"
 edition = "2021"
 # UniFFI 0.32 (vibecast-ffi) sets the workspace floor at 1.87.
 rust-version = "1.87"

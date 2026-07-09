@@ -17,7 +17,7 @@ COPY . .
 # Release profile already strips + thin-LTOs (see workspace Cargo.toml).
 RUN cargo build -p vibecast-cli --release --locked
 
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian13:nonroot
 LABEL org.opencontainers.image.source="https://github.com/emilsvennesson/vibecast"
 LABEL org.opencontainers.image.description="Native Google Cast receiver"
 LABEL org.opencontainers.image.licenses="MIT"

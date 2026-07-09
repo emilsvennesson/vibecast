@@ -8,7 +8,7 @@
 # Runtime is distroless/cc (glibc + libgcc/libstdc++), which satisfies the
 # glibc-linked, aws-lc-rs-static binary.
 
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian13:nonroot
 ARG TARGETARCH
 LABEL org.opencontainers.image.source="https://github.com/emilsvennesson/vibecast"
 LABEL org.opencontainers.image.description="Native Google Cast receiver"
