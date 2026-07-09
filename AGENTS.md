@@ -150,6 +150,7 @@ cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo deny check                                  # advisories + licenses + bans
 cargo doc --no-deps --all-features                # rustdoc build (must be warning-free)
+actionlint .github/workflows/*.yml                # lint GitHub Actions (brew install actionlint)
 ```
 
 CLI flags (override `config.toml`): `--certs`, `--data-dir`, `--model`,
