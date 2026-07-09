@@ -22,9 +22,11 @@ rest, so unrelated edits skip irrelevant work:
 
 - **rust** — `crates/**`, `Cargo.*`, `deny.toml`, `rustfmt.toml`,
   `rust-toolchain.toml`, `.config/nextest.toml`.
-- **android** — `android/**`, `crates/**` **except** `crates/vibecast-cli/**`
-  (the desktop CLI binary is not part of the FFI cdylib / APK), and `Cargo.*`.
-  So a docs-only, Kodi-only, or CLI-only change does **not** run Android.
+- **android** — `android/**`, `crates/**`, and `Cargo.*`. The Android app
+  bundles the whole workspace via the FFI cdylib, so any crate change can affect
+  it. Docs-only, Kodi-only, and other non-code changes skip Android. (We can't
+  cleanly exclude `vibecast-cli` here: dorny/paths-filter ORs its patterns, so a
+  `!exclude` would match nearly everything.)
 - **docker** — `Dockerfile`, `docker/**`, `.dockerignore` only (the release
   image is built from prebuilt binaries; the Rust jobs already prove the code
   compiles).

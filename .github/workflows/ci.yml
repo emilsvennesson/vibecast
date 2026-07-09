@@ -49,10 +49,13 @@ jobs:
               - 'rust-toolchain.toml'
               - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
+            # Android bundles the whole Rust workspace via the FFI cdylib, so any
+            # crate change can affect the APK/bindings. (dorny/paths-filter uses
+            # OR semantics, so a '!exclude' pattern would match nearly everything
+            # — don't use one here.)
             android:
               - 'android/**'
               - 'crates/**'
-              - '!crates/vibecast-cli/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
