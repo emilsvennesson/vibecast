@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/emilsvennesson/vibecast/compare/v0.1.0...v0.1.1) (2026-07-09)
+
+
+### Bug Fixes
+
+* **release:** build Linux binaries on glibc 2.35 for portability ([#64](https://github.com/emilsvennesson/vibecast/issues/64)) ([af00ac1](https://github.com/emilsvennesson/vibecast/commit/af00ac14ebc18a7975c1c29677fce3bf4df1025d))
+
 ## [0.1.0](https://github.com/emilsvennesson/vibecast/releases/tag/v0.1.0) (2026-07-09)
 
 Initial release of **vibecast** — a native Google Cast receiver written in Rust
