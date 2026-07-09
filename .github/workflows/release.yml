@@ -116,6 +116,9 @@ jobs:
   # --- Standalone Linux binaries (native runners; no cross-compile) ---------
   build-linux:
     needs: setup
+    # Explicit condition: `setup` runs via always() (release-please is skipped on
+    # dispatch), so the implicit success() would otherwise propagate that skip.
+    if: needs.setup.result == 'success'
     strategy:
       fail-fast: true
       matrix:
@@ -161,6 +164,7 @@ jobs:
   # --- Standalone macOS binary (Apple Silicon only) -------------------------
   build-macos:
     needs: setup
+    if: needs.setup.result == 'success'
     runs-on: macos-14
     permissions:
       contents: read
@@ -194,6 +198,7 @@ jobs:
   # --- Signed Android APK ---------------------------------------------------
   build-android:
     needs: setup
+    if: needs.setup.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -252,6 +257,7 @@ jobs:
   # --- Multi-arch container image (assembled from prebuilt binaries) --------
   docker:
     needs: [setup, build-linux]
+    if: needs.setup.result == 'success' && needs.build-linux.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -305,6 +311,14 @@ jobs:
   # --- Attach assets, attest, then (real releases only) promote -------------
   publish:
     needs: [setup, build-linux, build-macos, build-android, docker]
+    # All artifacts must exist before we touch the release — this is the
+    # atomicity gate: any build failure means no assets, no promote, no tap.
+    if: >-
+      needs.setup.result == 'success' &&
+      needs.build-linux.result == 'success' &&
+      needs.build-macos.result == 'success' &&
+      needs.build-android.result == 'success' &&
+      needs.docker.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -362,7 +376,7 @@ jobs:
   # --- Update the public Homebrew tap (real releases only) ------------------
   homebrew:
     needs: [setup, publish]
-    if: needs.setup.outputs.promote == 'true'
+    if: needs.setup.outputs.promote == 'true' && needs.publish.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read
