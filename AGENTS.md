@@ -150,6 +150,7 @@ cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo deny check                                  # advisories + licenses + bans
 cargo doc --no-deps --all-features                # rustdoc build (must be warning-free)
+actionlint .github/workflows/*.yml                # lint GitHub Actions (brew install actionlint)
 ```
 
 CLI flags (override `config.toml`): `--certs`, `--data-dir`, `--model`,
@@ -167,6 +168,26 @@ cd android && ./gradlew :app:assembleDebug lintDebug ktlintCheck detekt   # app 
 ```
 
 See `android/README.md` for cert provisioning and on-device validation over adb.
+
+## CI/CD
+
+Two workflows (details in `docs/ci-cd.md`):
+
+- **`ci.yml`** — PR + push-to-main. Path-filtered (`rust`/`android`/`docker`) so
+  unrelated changes skip; a single always-run `ci-success` job is the required
+  status check.
+- **`release.yml`** — release-please cuts a **draft** release on merge of its
+  release PR, then builds Linux (x86_64/aarch64) + macOS (arm64) binaries, a
+  signed APK, and a multi-arch GHCR image (assembled from the prebuilt binaries),
+  and only promotes (`:latest`, undraft, Homebrew tap) once every artifact
+  succeeds — atomic, no partial releases.
+
+Releasing is automatic: land Conventional Commits (`fix`→patch, `feat`→minor,
+`!`→major), then merge the release PR release-please opens. One version drives
+`[workspace.package].version` (toml updater), `Cargo.lock` (`cargo update
+--workspace`), and Android `versionName`. Third-party actions are SHA-pinned;
+don't unpin. Linux binaries need glibc ≥ 2.38 (aws-lc-rs), hence the
+distroless-debian13 runtime.
 
 ## Invariants
 
