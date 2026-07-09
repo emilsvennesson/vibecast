@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
@@ -12,6 +14,7 @@ import websocket
 import xbmc
 import xbmcaddon
 import xbmcgui
+import xbmcvfs
 
 ADDON_ID = "service.vibecast"
 ADDON_NAME = "vibecast"
@@ -87,6 +90,37 @@ def _parse_port(value: str, default: int) -> int:
     return parsed
 
 
+def _parse_int(value: str, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _detect_platform() -> str:
+    checks = (
+        ("System.Platform.Android", "android"),
+        ("System.Platform.Windows", "windows"),
+        ("System.Platform.OSX", "macos"),
+        ("System.Platform.IOS", "ios"),
+        ("System.Platform.Linux", "linux"),
+    )
+    for condition, name in checks:
+        if xbmc.getCondVisibility(condition):
+            return name
+    return "linux"
+
+
+def _detect_resolution() -> tuple[int, int]:
+    width = _parse_int(xbmc.getInfoLabel("System.ScreenWidth"), 0)
+    height = _parse_int(xbmc.getInfoLabel("System.ScreenHeight"), 0)
+    return width, height
+
+
 def _coerce_float(value: Any, *, default: float | None = None) -> float | None:
     if isinstance(value, bool):
         return default
@@ -123,6 +157,14 @@ class ServiceConfig:
     rewrite_loopback_urls: bool
     show_notifications: bool
     debug_logging: bool
+    player_name: str
+    platform: str
+    max_width: int
+    max_height: int
+    video_codecs: list[str]
+    audio_codecs: list[str]
+    hdr_enabled: bool
+    widevine_level: str
 
     @classmethod
     def from_addon(cls, addon: xbmcaddon.Addon) -> ServiceConfig:
@@ -147,6 +189,21 @@ class ServiceConfig:
         if ping_interval <= ping_timeout:
             ping_interval = ping_timeout + 1.0
 
+        # Player identity + capabilities: auto-detect, overridable in settings.
+        detected_width, detected_height = _detect_resolution()
+        platform = _setting_string(addon, "platform", "auto")
+        if platform in ("", "auto"):
+            platform = _detect_platform()
+        max_width = _parse_int(_setting_string(addon, "max_width", "0"), 0) or detected_width
+        max_height = _parse_int(_setting_string(addon, "max_height", "0"), 0) or detected_height
+        video_codecs = _parse_csv(_setting_string(addon, "video_codecs", "h264,hevc"))
+        audio_codecs = _parse_csv(
+            _setting_string(addon, "audio_codecs", "aac,ac3,eac3")
+        )
+        widevine_level = _setting_string(addon, "widevine_level", "auto")
+        if widevine_level in ("", "auto"):
+            widevine_level = "L1" if platform == "android" else "L3"
+
         return cls(
             host=host,
             port=port,
@@ -161,12 +218,20 @@ class ServiceConfig:
             ),
             show_notifications=_setting_bool(addon, "show_notifications", True),
             debug_logging=_setting_bool(addon, "debug_logging", False),
+            player_name=_setting_string(addon, "player_name", "Kodi"),
+            platform=platform,
+            max_width=max_width or 1920,
+            max_height=max_height or 1080,
+            video_codecs=video_codecs or ["h264"],
+            audio_codecs=audio_codecs or ["aac"],
+            hdr_enabled=_setting_bool(addon, "hdr", False),
+            widevine_level=widevine_level,
         )
 
     @property
     def ws_url(self) -> str:
         scheme = "wss" if self.use_tls else "ws"
-        return f"{scheme}://{self.host}:{self.port}/player?role=primary"
+        return f"{scheme}://{self.host}:{self.port}/player"
 
 
 class VibecastPlayer(xbmc.Player):
@@ -206,6 +271,7 @@ class VibecastService:
     def __init__(self) -> None:
         self._addon = xbmcaddon.Addon(id=ADDON_ID)
         self._config = ServiceConfig.from_addon(self._addon)
+        self._player_id = self._ensure_player_id()
         self._monitor = xbmc.Monitor()
         self._player = VibecastPlayer(self)
 
@@ -301,13 +367,77 @@ class VibecastService:
             if self._stop_event.wait(self._config.reconnect_seconds):
                 break
 
-    def _on_ws_open(self, _ws: websocket.WebSocketApp) -> None:
+    def _ensure_player_id(self) -> str:
+        """Load a stable player id from the add-on profile, creating one once."""
+        profile = xbmcvfs.translatePath(self._addon.getAddonInfo("profile"))
+        try:
+            os.makedirs(profile, exist_ok=True)
+        except OSError:
+            pass
+        path = os.path.join(profile, "player_id")
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                existing = handle.read().strip()
+            if existing:
+                return existing
+        except OSError:
+            pass
+        new_id = str(uuid.uuid4())
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(new_id)
+        except OSError:
+            log("could not persist player id", xbmc.LOGWARNING)
+        return new_id
+
+    def _build_register_frame(self) -> dict[str, Any]:
+        cfg = self._config
+        return {
+            "type": "register",
+            "playerId": self._player_id,
+            "name": cfg.player_name or "Kodi",
+            "capabilities": {
+                "platform": cfg.platform,
+                "drm": [
+                    {
+                        "system": "com.widevine.alpha",
+                        "securityLevel": cfg.widevine_level,
+                    },
+                    {"system": "org.w3.clearkey"},
+                ],
+                "videoCodecs": cfg.video_codecs,
+                "audioCodecs": cfg.audio_codecs,
+                "maxResolution": {"width": cfg.max_width, "height": cfg.max_height},
+                "hdrFormats": ["hdr10"] if cfg.hdr_enabled else [],
+                "frameRates": [24, 25, 30, 50, 60],
+                "subtitleFormats": ["ttml", "vtt"],
+            },
+        }
+
+    def _on_ws_open(self, ws: websocket.WebSocketApp) -> None:
+        # The first frame must be the registration announcing this player's
+        # identity + capabilities, before any state report. The server drops any
+        # socket whose first frame isn't a valid `register`, so a failed send
+        # means the connection is unusable: close it and let the loop reconnect
+        # rather than marking it connected and sending reports into the void.
+        try:
+            ws.send(json.dumps(self._build_register_frame(), separators=(",", ":")))
+        except (OSError, websocket.WebSocketException) as exc:
+            log(f"failed to send register frame: {exc}", xbmc.LOGWARNING)
+            with self._ws_lock:
+                self._last_ws_error = str(exc)
+            ws.close()
+            return
         with self._ws_lock:
             self._ws_connected = True
             self._last_ws_error = None
         self._enqueue_internal_event("ws_open")
         if self._config.debug_logging:
-            log("websocket connected", xbmc.LOGDEBUG)
+            log(
+                f"websocket connected; registered as "
+                f"{self._config.player_name or 'Kodi'} ({self._player_id})",
+                xbmc.LOGDEBUG,
+            )
 
     def _on_ws_message(self, _ws: websocket.WebSocketApp, message: Any) -> None:
         if not isinstance(message, str):

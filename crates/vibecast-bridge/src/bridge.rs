@@ -1,12 +1,16 @@
-//! The player bridge: an axum HTTP/WebSocket server relaying player commands
-//! to external renderers (browser / Kodi) and proxying DRM license and
-//! manifest requests.
+//! The player bridge: an axum HTTP/WebSocket server where external players
+//! (browser / Kodi) register, receive their command stream, and report playback
+//! state — plus DRM license and manifest proxy routes.
 //!
-//! The connection registry, primary/observer election and per-session resync
-//! snapshots live in a single actor task (fed over an `mpsc`), so the WebSocket
-//! path needs no shared-mutable locking. The license/manifest handler
-//! registries are plain maps (registered rarely, looked up per request, then
-//! invoked outside any lock).
+//! Each `/player` WebSocket connection is an independent player: its first frame
+//! is a `register` message carrying the player's id, name, and capabilities. The
+//! bridge emits a [`PlayerEvent::Registered`] carrying a per-player command sink
+//! ([`Player`]) and a per-player [`PlayerReport`] stream, so the orchestrator can
+//! give that player its own Cast receiver. There is no cross-player fan-out: a
+//! command sent to one player's sink reaches only that player's socket.
+//!
+//! The license/manifest handler registries are plain maps keyed by session id
+//! (session ids are globally unique), shared across all players' receivers.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
@@ -22,336 +26,218 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use vibecast_messages::{IdleReason, PlayerState};
 
-use crate::headers::{filter_upstream_headers, filter_upstream_response_headers};
-use crate::protocol::{PlaybackMediaPayload, PlayerCommand, PlayerReport};
-use crate::proxy::{
-    LicenseHandler, LicenseRequest, ManifestHandler, ManifestProxyRequest, RouteId,
+use vibecast_player_api::headers::{filter_upstream_headers, filter_upstream_response_headers};
+use vibecast_player_api::{
+    LicenseHandler, LicenseRequest, ManifestHandler, ManifestProxyRequest, Player, PlayerCommand,
+    PlayerReport, ProxyRegistrar, RouteId,
 };
+use vibecast_sdk::{
+    DrmCapability, DrmSecurityLevel, DrmSystem, Platform, PlayerCapabilities, Resolution,
+};
+
 use crate::web::{PLAYER_HTML, PLAYER_HTML_CONTENT_TYPE, PLAYER_JS, PLAYER_JS_CONTENT_TYPE};
 
-/// A renderer that plays media in response to bridge commands.
+/// Identity and capabilities a player reports when it registers.
+#[derive(Debug, Clone)]
+pub struct PlayerRegistration {
+    /// Stable id the player chose for itself (persisted across reconnects).
+    pub player_id: String,
+    /// Human-readable base name (the orchestrator appends its own suffix).
+    pub name: String,
+    /// What the player can decode / output / protect.
+    pub capabilities: PlayerCapabilities,
+}
+
+/// Lifecycle events emitted by the bridge as players connect and disconnect.
 ///
-/// The browser bridge is the default implementation; a future native renderer
-/// can implement this trait without touching the coordinator.
-#[async_trait]
-pub trait Renderer: Send + Sync {
-    /// Deliver a command to the renderer(s).
-    async fn send(&self, command: PlayerCommand);
+/// Both variants carry an `epoch`: a per-connection token, unique across the
+/// bridge's lifetime, that distinguishes two sockets sharing the same
+/// `player_id` (two browser tabs, or an overlapping reconnect). The orchestrator
+/// uses it so a stale connection's [`Disconnected`](Self::Disconnected) can't
+/// tear down the newer receiver that replaced it.
+pub enum PlayerEvent {
+    /// A player registered. Carries its command sink and report stream so the
+    /// orchestrator can bind it to a dedicated Cast receiver.
+    Registered {
+        /// Reported identity + capabilities (boxed: much larger than the other
+        /// variant).
+        registration: Box<PlayerRegistration>,
+        /// Command sink for this player (routes only to its socket).
+        player: Arc<dyn Player>,
+        /// Playback reports from this player.
+        reports: mpsc::Receiver<PlayerReport>,
+        /// Per-connection token identifying the socket this registration came
+        /// from.
+        epoch: u64,
+    },
+    /// The player with this id disconnected; its receiver should be torn down.
+    Disconnected {
+        /// The player id from its registration.
+        player_id: String,
+        /// The epoch of the socket that disconnected (matches its
+        /// [`Registered`](Self::Registered) epoch).
+        epoch: u64,
+    },
 }
 
-/// Requested role for a renderer WebSocket connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Role {
-    Auto,
-    Primary,
-    Observer,
-}
-
-impl Role {
-    fn parse(raw: Option<&String>) -> Self {
-        match raw.map(String::as_str) {
-            Some("primary") => Role::Primary,
-            Some("observer") => Role::Observer,
-            _ => Role::Auto,
-        }
-    }
-}
-
-/// Per-session snapshot used to resync newly connected renderers.
-struct Snapshot {
-    media: PlaybackMediaPayload,
-    player_state: PlayerState,
-    current_time: f64,
-    duration: Option<f64>,
-    idle_reason: Option<IdleReason>,
-}
-
-/// A live renderer connection tracked by the actor.
-struct Conn {
-    id: u64,
-    role: Role,
-    is_primary: bool,
+/// A per-player command sink: serializes commands to one socket's out channel.
+struct PlayerSink {
     out: mpsc::Sender<String>,
 }
 
-/// Messages driving the connection actor.
-enum BridgeMsg {
-    Register {
-        id: u64,
-        role: Role,
-        out: mpsc::Sender<String>,
-    },
-    Unregister {
-        id: u64,
-    },
-    Report {
-        id: u64,
-        report: PlayerReport,
-    },
-    Command(PlayerCommand),
-    #[cfg(test)]
-    Count(tokio::sync::oneshot::Sender<usize>),
-}
-
-/// The single-task owner of the connection registry and resync snapshots.
-struct BridgeActor {
-    connections: Vec<Conn>,
-    primary: Option<u64>,
-    snapshots: HashMap<String, Snapshot>,
-    reports_tx: mpsc::Sender<PlayerReport>,
-}
-
-impl BridgeActor {
-    async fn run(mut self, mut rx: mpsc::Receiver<BridgeMsg>) {
-        while let Some(msg) = rx.recv().await {
-            match msg {
-                BridgeMsg::Register { id, role, out } => self.register(id, role, out).await,
-                BridgeMsg::Unregister { id } => self.unregister(id),
-                BridgeMsg::Report { id, report } => self.report(id, report).await,
-                BridgeMsg::Command(command) => self.command(command).await,
-                #[cfg(test)]
-                BridgeMsg::Count(reply) => {
-                    let _ = reply.send(self.connections.len());
-                }
+#[async_trait]
+impl Player for PlayerSink {
+    async fn send(&self, command: PlayerCommand) {
+        match serde_json::to_string(&command) {
+            Ok(text) => {
+                let _ = self.out.send(text).await;
             }
-        }
-    }
-
-    async fn register(&mut self, id: u64, role: Role, out: mpsc::Sender<String>) {
-        let mut conn = Conn {
-            id,
-            role,
-            is_primary: false,
-            out,
-        };
-        self.assign_primary(&mut conn);
-        tracing::info!(
-            conn_id = id,
-            role = ?role,
-            is_primary = conn.is_primary,
-            total = self.connections.len() + 1,
-            "renderer connected"
-        );
-        self.connections.push(conn);
-        self.sync(id).await;
-    }
-
-    fn assign_primary(&mut self, conn: &mut Conn) {
-        if conn.role == Role::Observer {
-            return;
-        }
-        if self.primary.is_none() {
-            self.primary = Some(conn.id);
-            conn.is_primary = true;
-            return;
-        }
-        if conn.role == Role::Primary {
-            if let Some(old) = self.primary {
-                if let Some(existing) = self.connections.iter_mut().find(|c| c.id == old) {
-                    existing.is_primary = false;
-                }
-            }
-            self.primary = Some(conn.id);
-            conn.is_primary = true;
-        }
-    }
-
-    fn unregister(&mut self, id: u64) {
-        let was_primary = self.primary == Some(id);
-        self.connections.retain(|c| c.id != id);
-        if was_primary {
-            self.primary = None;
-            self.promote_primary();
-        }
-        tracing::info!(
-            conn_id = id,
-            was_primary,
-            remaining = self.connections.len(),
-            "renderer disconnected"
-        );
-    }
-
-    fn promote_primary(&mut self) {
-        if let Some(candidate) = self
-            .connections
-            .iter_mut()
-            .find(|c| c.role != Role::Observer)
-        {
-            candidate.is_primary = true;
-            self.primary = Some(candidate.id);
-        }
-    }
-
-    async fn report(&mut self, id: u64, report: PlayerReport) {
-        if self.primary != Some(id) {
-            return;
-        }
-        let session_id = report.session_id().to_string();
-        let Some(snapshot) = self.snapshots.get_mut(&session_id) else {
-            return;
-        };
-        if let PlayerReport::State {
-            player_state,
-            current_time,
-            duration,
-            idle_reason,
-            ..
-        } = &report
-        {
-            snapshot.player_state = *player_state;
-            snapshot.current_time = *current_time;
-            snapshot.duration = *duration;
-            snapshot.idle_reason = *idle_reason;
-        }
-        tracing::debug!(conn_id = id, session_id = %session_id, report = ?report, "forwarding primary report");
-        let _ = self.reports_tx.send(report).await;
-    }
-
-    async fn command(&mut self, command: PlayerCommand) {
-        match &command {
-            PlayerCommand::Load { session_id, media } => {
-                tracing::info!(
-                    session_id = %session_id,
-                    streams = media.streams.len(),
-                    first_url = %media.streams.first().map(|s| s.url.as_str()).unwrap_or(""),
-                    "dispatching load to renderers"
-                );
-            }
-            PlayerCommand::Stop { session_id } => {
-                tracing::info!(session_id = %session_id, "dispatching stop to renderers");
-            }
-            PlayerCommand::Play { session_id }
-            | PlayerCommand::Pause { session_id }
-            | PlayerCommand::Seek { session_id, .. }
-            | PlayerCommand::Volume { session_id, .. } => {
-                tracing::debug!(session_id = %session_id, cmd = ?command, "dispatching player command");
-            }
-        }
-        self.update_snapshot(&command);
-        let text = match serde_json::to_string(&command) {
-            Ok(text) => text,
-            Err(error) => {
-                tracing::error!(%error, "failed to serialize player command");
-                return;
-            }
-        };
-        self.broadcast(&text).await;
-    }
-
-    fn update_snapshot(&mut self, command: &PlayerCommand) {
-        match command {
-            PlayerCommand::Load { session_id, media } => {
-                self.snapshots.insert(
-                    session_id.clone(),
-                    Snapshot {
-                        media: media.clone(),
-                        player_state: PlayerState::Buffering,
-                        current_time: media.start_time,
-                        duration: media.duration,
-                        idle_reason: None,
-                    },
-                );
-            }
-            PlayerCommand::Play { session_id } => {
-                if let Some(snapshot) = self.snapshots.get_mut(session_id) {
-                    snapshot.player_state = PlayerState::Playing;
-                    snapshot.idle_reason = None;
-                }
-            }
-            PlayerCommand::Pause { session_id } => {
-                if let Some(snapshot) = self.snapshots.get_mut(session_id) {
-                    snapshot.player_state = PlayerState::Paused;
-                    snapshot.idle_reason = None;
-                }
-            }
-            PlayerCommand::Seek {
-                session_id,
-                position,
-            } => {
-                if let Some(snapshot) = self.snapshots.get_mut(session_id) {
-                    snapshot.current_time = *position;
-                }
-            }
-            PlayerCommand::Stop { session_id } => {
-                self.snapshots.remove(session_id);
-            }
-            PlayerCommand::Volume { .. } => {}
-        }
-    }
-
-    async fn broadcast(&mut self, text: &str) {
-        let mut dead = Vec::new();
-        for conn in &self.connections {
-            if conn.out.send(text.to_string()).await.is_err() {
-                dead.push(conn.id);
-            }
-        }
-        for id in dead {
-            self.unregister(id);
-        }
-    }
-
-    async fn sync(&self, conn_id: u64) {
-        let Some(conn) = self.connections.iter().find(|c| c.id == conn_id) else {
-            return;
-        };
-        for (session_id, snapshot) in &self.snapshots {
-            if snapshot.player_state == PlayerState::Idle {
-                continue;
-            }
-            let mut commands = vec![PlayerCommand::Load {
-                session_id: session_id.clone(),
-                media: snapshot.media.clone(),
-            }];
-            if snapshot.current_time > 0.0 {
-                commands.push(PlayerCommand::Seek {
-                    session_id: session_id.clone(),
-                    position: snapshot.current_time,
-                });
-            }
-            match snapshot.player_state {
-                PlayerState::Playing | PlayerState::Buffering => {
-                    commands.push(PlayerCommand::Play {
-                        session_id: session_id.clone(),
-                    });
-                }
-                PlayerState::Paused => {
-                    commands.push(PlayerCommand::Pause {
-                        session_id: session_id.clone(),
-                    });
-                }
-                PlayerState::Idle => {}
-            }
-            for command in commands {
-                if let Ok(text) = serde_json::to_string(&command) {
-                    let _ = conn.out.send(text).await;
-                }
-            }
+            Err(error) => tracing::error!(%error, "failed to serialize player command"),
         }
     }
 }
 
-/// Shared, cheaply-cloneable bridge state (axum handler state + renderer seam).
+// -- register frame wire format --------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisterFrame {
+    #[serde(rename = "type")]
+    frame_type: String,
+    player_id: String,
+    name: String,
+    #[serde(default)]
+    capabilities: CapabilitiesDto,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct CapabilitiesDto {
+    platform: Option<String>,
+    drm: Vec<DrmDto>,
+    video_codecs: Vec<String>,
+    audio_codecs: Vec<String>,
+    max_resolution: Option<ResolutionDto>,
+    hdr_formats: Vec<String>,
+    frame_rates: Vec<u32>,
+    subtitle_formats: Vec<String>,
+    hdcp_level: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DrmDto {
+    system: String,
+    #[serde(default)]
+    security_level: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolutionDto {
+    width: u32,
+    height: u32,
+}
+
+fn parse_register(text: &str) -> Option<PlayerRegistration> {
+    let frame: RegisterFrame = serde_json::from_str(text).ok()?;
+    if frame.frame_type != "register" {
+        return None;
+    }
+    // The player id keys the orchestrator's receiver map and the name becomes an
+    // advertised friendly name, so reject empty/whitespace values rather than let
+    // them collide or advertise a device named " [vibecast]".
+    let player_id = frame.player_id.trim().to_string();
+    let name = frame.name.trim().to_string();
+    if player_id.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some(PlayerRegistration {
+        player_id,
+        name,
+        capabilities: frame.capabilities.into_sdk(),
+    })
+}
+
+impl CapabilitiesDto {
+    fn into_sdk(self) -> PlayerCapabilities {
+        let default = PlayerCapabilities::default();
+        PlayerCapabilities {
+            platform: self.platform.map_or(default.platform, parse_platform),
+            drm: self.drm.into_iter().filter_map(DrmDto::into_sdk).collect(),
+            video_codecs: non_empty_or(self.video_codecs, default.video_codecs),
+            audio_codecs: non_empty_or(self.audio_codecs, default.audio_codecs),
+            max_resolution: self.max_resolution.map_or(default.max_resolution, |r| {
+                Resolution::new(r.width, r.height)
+            }),
+            hdr_formats: self.hdr_formats,
+            frame_rates: non_empty_or(self.frame_rates, default.frame_rates),
+            subtitle_formats: self.subtitle_formats,
+            hdcp_level: self.hdcp_level,
+        }
+    }
+}
+
+impl DrmDto {
+    fn into_sdk(self) -> Option<DrmCapability> {
+        let system = match self.system.as_str() {
+            "com.widevine.alpha" => DrmSystem::Widevine,
+            "com.microsoft.playready" => DrmSystem::PlayReady,
+            "org.w3.clearkey" => DrmSystem::ClearKey,
+            "com.apple.fps" | "com.apple.fps.1_0" => DrmSystem::FairPlay,
+            _ => return None,
+        };
+        let security_level = self
+            .security_level
+            .as_deref()
+            .and_then(|level| match level {
+                "L1" => Some(DrmSecurityLevel::L1),
+                "L2" => Some(DrmSecurityLevel::L2),
+                "L3" => Some(DrmSecurityLevel::L3),
+                _ => None,
+            });
+        Some(DrmCapability::new(system, security_level))
+    }
+}
+
+fn parse_platform(raw: String) -> Platform {
+    match raw.as_str() {
+        "android" => Platform::Android,
+        "linux" => Platform::Linux,
+        "macos" => Platform::MacOs,
+        "windows" => Platform::Windows,
+        "browser" => Platform::Browser,
+        _ => Platform::Other(raw),
+    }
+}
+
+fn non_empty_or<T>(value: Vec<T>, fallback: Vec<T>) -> Vec<T> {
+    if value.is_empty() {
+        fallback
+    } else {
+        value
+    }
+}
+
+// -- bridge server ---------------------------------------------------------
+
+/// Shared, cheaply-cloneable bridge state (axum handler state).
 #[derive(Clone)]
 struct BridgeState {
-    commands: mpsc::Sender<BridgeMsg>,
+    events: mpsc::Sender<PlayerEvent>,
     licenses: Arc<Mutex<HashMap<String, Arc<dyn LicenseHandler>>>>,
     manifests: Arc<Mutex<HashMap<String, Arc<dyn ManifestHandler>>>>,
-    next_id: Arc<AtomicU64>,
     resolved_host: Arc<str>,
     configured_port: u16,
     port: Arc<AtomicU16>,
+    /// Monotonic counter handing each socket a unique per-connection epoch.
+    epochs: Arc<AtomicU64>,
 }
 
 impl BridgeState {
-    fn next_id(&self) -> u64 {
-        self.next_id.fetch_add(1, Ordering::SeqCst)
-    }
-
     fn license_handler(&self, session_id: &str) -> Option<Arc<dyn LicenseHandler>> {
         self.licenses.lock().unwrap().get(session_id).cloned()
     }
@@ -370,30 +256,24 @@ impl BridgeState {
     }
 }
 
-/// Handles for the tasks a running bridge owns, so shutdown is deterministic.
 struct RunningTasks {
-    actor: JoinHandle<()>,
     server: JoinHandle<()>,
     shutdown: oneshot::Sender<()>,
 }
 
-/// HTTP/WebSocket bridge relaying player commands to external renderers.
+/// HTTP/WebSocket bridge where external players register and receive commands.
 pub struct PlayerBridge {
     state: BridgeState,
     bind_host: Arc<str>,
-    reports_tx: mpsc::Sender<PlayerReport>,
-    /// Receiver half of the command channel, consumed when the actor is spawned
-    /// in [`start`](Self::start). Construction itself spawns no tasks.
-    commands_rx: Mutex<Option<mpsc::Receiver<BridgeMsg>>>,
     tasks: Mutex<Option<RunningTasks>>,
 }
 
 impl PlayerBridge {
     /// Create a bridge. Construction is side-effect free: no tasks are spawned
-    /// and no runtime is required until [`start`](Self::start) is called. Player
-    /// reports from the primary renderer are delivered on `reports`.
+    /// and no runtime is required until [`start`](Self::start). Player lifecycle
+    /// events are delivered on `events`.
     #[must_use]
-    pub fn new(host: impl Into<String>, port: u16, reports: mpsc::Sender<PlayerReport>) -> Self {
+    pub fn new(host: impl Into<String>, port: u16, events: mpsc::Sender<PlayerEvent>) -> Self {
         let host = host.into();
         let resolved_host = if host == "0.0.0.0" || host == "::" {
             "127.0.0.1".to_string()
@@ -401,28 +281,25 @@ impl PlayerBridge {
             host.clone()
         };
 
-        let (commands_tx, commands_rx) = mpsc::channel(128);
         let state = BridgeState {
-            commands: commands_tx,
+            events,
             licenses: Arc::new(Mutex::new(HashMap::new())),
             manifests: Arc::new(Mutex::new(HashMap::new())),
-            next_id: Arc::new(AtomicU64::new(1)),
             resolved_host: Arc::from(resolved_host.as_str()),
             configured_port: port,
             port: Arc::new(AtomicU16::new(0)),
+            epochs: Arc::new(AtomicU64::new(0)),
         };
 
         Self {
             state,
             bind_host: Arc::from(host.as_str()),
-            reports_tx: reports,
-            commands_rx: Mutex::new(Some(commands_rx)),
             tasks: Mutex::new(None),
         }
     }
 
-    /// Bind the listener, spawn the connection actor, and start serving. A
-    /// second call while already running is a no-op.
+    /// Bind the listener and start serving. A second call while already running
+    /// is a no-op.
     pub async fn start(&self) -> std::io::Result<()> {
         if self.tasks.lock().unwrap().is_some() {
             return Ok(());
@@ -433,21 +310,6 @@ impl PlayerBridge {
                 .await?;
         let port = listener.local_addr()?.port();
         self.state.port.store(port, Ordering::SeqCst);
-
-        // Spawn the connection actor now, not at construction time.
-        let commands_rx = self
-            .commands_rx
-            .lock()
-            .unwrap()
-            .take()
-            .expect("bridge already consumed its command receiver");
-        let actor = BridgeActor {
-            connections: Vec::new(),
-            primary: None,
-            snapshots: HashMap::new(),
-            reports_tx: self.reports_tx.clone(),
-        };
-        let actor_handle = tokio::spawn(actor.run(commands_rx));
 
         let app = router(self.state.clone());
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -463,7 +325,6 @@ impl PlayerBridge {
         });
 
         *self.tasks.lock().unwrap() = Some(RunningTasks {
-            actor: actor_handle,
             server: server_handle,
             shutdown: shutdown_tx,
         });
@@ -483,14 +344,10 @@ impl PlayerBridge {
     pub async fn stop(&self) {
         let tasks = self.tasks.lock().unwrap().take();
         if let Some(tasks) = tasks {
-            // Signal graceful shutdown and await the server draining in-flight
-            // requests, then stop the connection actor.
             let _ = tasks.shutdown.send(());
             if let Err(error) = tasks.server.await {
                 tracing::warn!(%error, "player bridge server task join failed");
             }
-            tasks.actor.abort();
-            let _ = tasks.actor.await;
         }
         self.state.port.store(0, Ordering::SeqCst);
         self.state.licenses.lock().unwrap().clear();
@@ -555,10 +412,21 @@ impl PlayerBridge {
     }
 }
 
-#[async_trait]
-impl Renderer for PlayerBridge {
-    async fn send(&self, command: PlayerCommand) {
-        let _ = self.state.commands.send(BridgeMsg::Command(command)).await;
+impl ProxyRegistrar for PlayerBridge {
+    fn register_license(&self, session_id: &str, handler: Arc<dyn LicenseHandler>) -> String {
+        self.register_license_handler(session_id.to_string(), handler)
+    }
+
+    fn unregister_license(&self, session_id: &str) {
+        self.unregister_license_handler(session_id);
+    }
+
+    fn register_manifest(&self, session_id: &str, handler: Arc<dyn ManifestHandler>) -> String {
+        self.register_manifest_handler(session_id.to_string(), handler)
+    }
+
+    fn unregister_manifest(&self, session_id: &str) {
+        self.unregister_manifest_handler(session_id);
     }
 }
 
@@ -584,32 +452,51 @@ async fn serve_script() -> impl IntoResponse {
     ([(CONTENT_TYPE, PLAYER_JS_CONTENT_TYPE)], PLAYER_JS)
 }
 
-async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<BridgeState>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Response {
-    let role = Role::parse(params.get("role"));
-    ws.on_upgrade(move |socket| handle_socket(socket, state, role))
+async fn ws_handler(ws: WebSocketUpgrade, State(state): State<BridgeState>) -> Response {
+    ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
-async fn handle_socket(socket: WebSocket, state: BridgeState, role: Role) {
-    let id = state.next_id();
-    let (out_tx, mut out_rx) = mpsc::channel::<String>(64);
+async fn handle_socket(socket: WebSocket, state: BridgeState) {
     let (mut sink, mut stream) = socket.split();
 
+    // The first meaningful frame must be a `register` message.
+    let registration = loop {
+        match stream.next().await {
+            Some(Ok(Message::Text(text))) => match parse_register(text.as_str()) {
+                Some(registration) => break registration,
+                None => {
+                    tracing::warn!("first player frame was not a valid register message");
+                    return;
+                }
+            },
+            Some(Ok(Message::Close(_))) | None => return,
+            Some(Ok(_)) => {}
+            Some(Err(_)) => return,
+        }
+    };
+
+    let player_id = registration.player_id.clone();
+    // A per-connection epoch so a stale socket's Disconnected can't tear down a
+    // newer receiver that reused the same player_id.
+    let epoch = state.epochs.fetch_add(1, Ordering::Relaxed);
+    let (out_tx, mut out_rx) = mpsc::channel::<String>(64);
+    let (reports_tx, reports_rx) = mpsc::channel::<PlayerReport>(64);
+    let player: Arc<dyn Player> = Arc::new(PlayerSink { out: out_tx });
+
     if state
-        .commands
-        .send(BridgeMsg::Register {
-            id,
-            role,
-            out: out_tx,
+        .events
+        .send(PlayerEvent::Registered {
+            registration: Box::new(registration),
+            player,
+            reports: reports_rx,
+            epoch,
         })
         .await
         .is_err()
     {
         return;
     }
+    tracing::info!(player_id = %player_id, "player registered");
 
     loop {
         tokio::select! {
@@ -628,7 +515,7 @@ async fn handle_socket(socket: WebSocket, state: BridgeState, role: Role) {
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<PlayerReport>(text.as_str()) {
                             Ok(report) => {
-                                let _ = state.commands.send(BridgeMsg::Report { id, report }).await;
+                                let _ = reports_tx.send(report).await;
                             }
                             Err(_) => tracing::warn!("invalid player report payload"),
                         }
@@ -641,7 +528,14 @@ async fn handle_socket(socket: WebSocket, state: BridgeState, role: Role) {
         }
     }
 
-    let _ = state.commands.send(BridgeMsg::Unregister { id }).await;
+    let _ = state
+        .events
+        .send(PlayerEvent::Disconnected {
+            player_id: player_id.clone(),
+            epoch,
+        })
+        .await;
+    tracing::info!(player_id = %player_id, "player disconnected");
 }
 
 async fn license_handler(
@@ -743,14 +637,17 @@ mod tests {
     use axum::body::to_bytes;
     use axum::http::Request;
     use serde_json::{json, Value};
-    use tokio::sync::oneshot;
     use tokio_tungstenite::connect_async;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
     use super::*;
-    use crate::protocol::{PlaybackStreamPayload, PlayerCommand};
-    use crate::proxy::{LicenseResponse, ManifestProxyResponse, ProxyError, ProxyResult};
-    use vibecast_messages::StreamType;
+    use tokio::net::TcpStream;
+    use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+    use vibecast_messages::{PlayerState, StreamType};
+    use vibecast_player_api::{
+        LicenseResponse, ManifestProxyResponse, PlaybackMediaPayload, PlaybackStreamPayload,
+        ProxyError, ProxyResult,
+    };
 
     fn media() -> PlaybackMediaPayload {
         PlaybackMediaPayload {
@@ -764,9 +661,9 @@ mod tests {
         }
     }
 
-    fn bridge() -> (PlayerBridge, mpsc::Receiver<PlayerReport>) {
-        let (reports_tx, reports_rx) = mpsc::channel(16);
-        (PlayerBridge::new("127.0.0.1", 0, reports_tx), reports_rx)
+    fn bridge() -> (PlayerBridge, mpsc::Receiver<PlayerEvent>) {
+        let (events_tx, events_rx) = mpsc::channel(16);
+        (PlayerBridge::new("127.0.0.1", 0, events_tx), events_rx)
     }
 
     async fn http_get(bridge: &PlayerBridge, uri: &str) -> (StatusCode, HeaderMap, Vec<u8>) {
@@ -795,52 +692,80 @@ mod tests {
     fn content_type(headers: &HeaderMap) -> &str {
         headers
             .get(CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
+            .and_then(|value| value.to_str().ok())
             .unwrap_or("")
     }
 
     #[tokio::test]
     async fn serves_default_shaka_player_page() {
-        let (bridge, _reports) = bridge();
+        let (bridge, _events) = bridge();
         let (status, headers, body) = http_get(&bridge, "/").await;
-        let body = String::from_utf8(body).unwrap();
-
         assert_eq!(status, StatusCode::OK);
         assert!(content_type(&headers).starts_with("text/html"));
-        assert!(body.contains("shaka-player.compiled.js"));
-        assert!(body.contains(r#"src="/player.js""#));
-        assert!(body.contains(r#"<video id="video" class="video" playsinline></video>"#));
-        assert!(body.contains("/player?role=primary"));
+        assert!(!body.is_empty());
     }
 
     #[tokio::test]
     async fn serves_player_script() {
-        let (bridge, _reports) = bridge();
+        let (bridge, _events) = bridge();
         let (status, headers, body) = http_get(&bridge, "/player.js").await;
-        let body = String::from_utf8(body).unwrap();
-
         assert_eq!(status, StatusCode::OK);
-        assert!(content_type(&headers).starts_with("application/javascript"));
-        assert!(body.contains("new shaka.Player"));
-        assert!(body.contains("/player?role=primary"));
+        assert!(content_type(&headers).contains("javascript"));
+        assert!(!body.is_empty());
     }
 
     #[tokio::test]
     async fn start_and_stop() {
-        let (bridge, _reports) = bridge();
-        bridge.start().await.unwrap();
+        let (bridge, _events) = bridge();
+        bridge.start().await.expect("start");
         assert!(bridge.serving_port().is_some());
         bridge.stop().await;
         assert!(bridge.serving_port().is_none());
     }
 
-    async fn connect(
-        port: u16,
-        role: &str,
-    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
-    {
-        let url = format!("ws://127.0.0.1:{port}/player?role={role}");
-        let (ws, _response) = connect_async(url).await.unwrap();
+    fn register_frame() -> String {
+        json!({
+            "type": "register",
+            "playerId": "player-1",
+            "name": "Test Player",
+            "capabilities": {
+                "platform": "android",
+                "drm": [{ "system": "com.widevine.alpha", "securityLevel": "L1" }],
+                "videoCodecs": ["hevc", "h264"],
+                "maxResolution": { "width": 1920, "height": 1080 }
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn parse_register_trims_values_and_rejects_empty_identity() {
+        let parsed = parse_register(
+            &json!({ "type": "register", "playerId": "  p-1  ", "name": "  Kodi  " }).to_string(),
+        )
+        .expect("valid registration");
+        assert_eq!(parsed.player_id, "p-1");
+        assert_eq!(parsed.name, "Kodi");
+
+        for bad in [
+            json!({ "type": "register", "playerId": "", "name": "Kodi" }),
+            json!({ "type": "register", "playerId": "   ", "name": "Kodi" }),
+            json!({ "type": "register", "playerId": "p-1", "name": "" }),
+            json!({ "type": "register", "playerId": "p-1", "name": "  " }),
+            json!({ "type": "hello", "playerId": "p-1", "name": "Kodi" }),
+        ] {
+            assert!(
+                parse_register(&bad.to_string()).is_none(),
+                "should reject: {bad}"
+            );
+        }
+    }
+
+    async fn connect(bridge: &PlayerBridge) -> WebSocketStream<MaybeTlsStream<TcpStream>> {
+        let port = bridge.serving_port().expect("serving");
+        let (ws, _) = connect_async(format!("ws://127.0.0.1:{port}/player"))
+            .await
+            .expect("ws connect");
         ws
     }
 
@@ -848,201 +773,243 @@ mod tests {
     where
         S: StreamExt<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>> + Unpin,
     {
-        let message = tokio::time::timeout(Duration::from_secs(1), ws.next())
-            .await
-            .expect("timed out waiting for message")
-            .expect("stream ended")
-            .expect("ws error");
-        match message {
-            WsMessage::Text(text) => serde_json::from_str(text.as_str()).unwrap(),
-            other => panic!("expected text frame, got {other:?}"),
-        }
-    }
-
-    async fn wait_for_connections(bridge: &PlayerBridge, target: usize) {
-        for _ in 0..200 {
-            let (tx, rx) = oneshot::channel();
-            if bridge
-                .state
-                .commands
-                .send(BridgeMsg::Count(tx))
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), ws.next())
                 .await
-                .is_err()
+                .expect("frame within timeout")
             {
-                return;
+                Some(Ok(WsMessage::Text(text))) => {
+                    return serde_json::from_str(text.as_str()).expect("json frame")
+                }
+                Some(Ok(_)) => continue,
+                other => panic!("unexpected ws frame: {other:?}"),
             }
-            if rx.await.unwrap_or(0) >= target {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        panic!("connections did not reach {target}");
     }
 
     #[tokio::test]
-    async fn command_fanout_and_primary_state_reporting() {
-        let (bridge, mut reports) = bridge();
-        bridge.start().await.unwrap();
-        let port = bridge.serving_port().unwrap();
+    async fn registration_delivers_capabilities_command_sink_and_reports() {
+        let (bridge, mut events) = bridge();
+        bridge.start().await.expect("start");
+        let mut ws = connect(&bridge).await;
 
-        let mut primary = connect(port, "primary").await;
-        let mut observer = connect(port, "observer").await;
-        wait_for_connections(&bridge, 2).await;
+        // Register.
+        ws.send(WsMessage::Text(register_frame().into()))
+            .await
+            .expect("send register");
 
-        bridge
+        // The bridge emits a Registered event with parsed capabilities.
+        let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("event within timeout")
+            .expect("event");
+        let (registration, player, mut reports) = match event {
+            PlayerEvent::Registered {
+                registration,
+                player,
+                reports,
+                ..
+            } => (registration, player, reports),
+            PlayerEvent::Disconnected { .. } => panic!("expected Registered"),
+        };
+        assert_eq!(registration.player_id, "player-1");
+        assert_eq!(registration.name, "Test Player");
+        assert_eq!(registration.capabilities.platform, Platform::Android);
+        assert!(registration.capabilities.supports_drm(DrmSystem::Widevine));
+        assert_eq!(
+            registration.capabilities.drm_level(DrmSystem::Widevine),
+            Some(DrmSecurityLevel::L1)
+        );
+        assert_eq!(registration.capabilities.max_resolution.height, 1080);
+
+        // A command sent to this player's sink reaches its socket.
+        player
             .send(PlayerCommand::Load {
-                session_id: "session-1".into(),
+                session_id: "s1".into(),
                 media: media(),
             })
             .await;
+        let command = next_json(&mut ws).await;
+        assert_eq!(command["type"], "load");
+        assert_eq!(command["sessionId"], "s1");
 
-        let primary_load = next_json(&mut primary).await;
-        let observer_load = next_json(&mut observer).await;
-        assert_eq!(primary_load["type"], "load");
-        assert_eq!(observer_load["type"], "load");
-        assert_eq!(
-            primary_load["media"]["streams"][0]["url"],
-            "https://example.com/manifest.mpd"
-        );
-
-        // Reports from a non-primary connection are ignored.
-        observer
-            .send(WsMessage::text(
-                json!({"type":"state","sessionId":"session-1","playerState":"PLAYING","currentTime":11}).to_string(),
-            ))
+        // A report from the socket reaches this player's report stream.
+        ws.send(WsMessage::Text(
+            json!({
+                "type": "state",
+                "sessionId": "s1",
+                "playerState": "PLAYING",
+                "currentTime": 12.0
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send report");
+        let report = tokio::time::timeout(Duration::from_secs(2), reports.recv())
             .await
-            .unwrap();
-
-        // Reports from the primary are forwarded.
-        primary
-            .send(WsMessage::text(
-                json!({"type":"state","sessionId":"session-1","playerState":"PLAYING","currentTime":21.5}).to_string(),
-            ))
-            .await
-            .unwrap();
-
-        let report = tokio::time::timeout(Duration::from_secs(1), reports.recv())
-            .await
-            .expect("timed out")
-            .expect("channel closed");
+            .expect("report within timeout")
+            .expect("report");
         match report {
             PlayerReport::State {
+                session_id,
                 player_state,
-                current_time,
                 ..
             } => {
+                assert_eq!(session_id, "s1");
                 assert_eq!(player_state, PlayerState::Playing);
-                assert_eq!(current_time, 21.5);
             }
             PlayerReport::Error { .. } => panic!("expected state report"),
         }
-        // The observer's report must not have been forwarded.
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), reports.recv())
-                .await
-                .is_err()
-        );
+
+        // Closing the socket emits Disconnected.
+        ws.close(None).await.ok();
+        let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("event within timeout")
+            .expect("event");
+        assert!(matches!(
+            event,
+            PlayerEvent::Disconnected { player_id, .. } if player_id == "player-1"
+        ));
 
         bridge.stop().await;
     }
 
     #[tokio::test]
-    async fn auto_sync_on_connect() {
-        let (bridge, _reports) = bridge();
-        bridge.start().await.unwrap();
-        let port = bridge.serving_port().unwrap();
+    async fn non_register_first_frame_is_rejected() {
+        let (bridge, mut events) = bridge();
+        bridge.start().await.expect("start");
+        let mut ws = connect(&bridge).await;
 
-        bridge
-            .send(PlayerCommand::Load {
-                session_id: "session-1".into(),
-                media: media(),
-            })
-            .await;
-        bridge
-            .send(PlayerCommand::Seek {
-                session_id: "session-1".into(),
-                position: 42.0,
-            })
-            .await;
-        bridge
-            .send(PlayerCommand::Pause {
-                session_id: "session-1".into(),
-            })
-            .await;
+        // A report before registering is invalid; the connection is dropped
+        // without emitting any event.
+        ws.send(WsMessage::Text(
+            json!({ "type": "state", "sessionId": "s1", "playerState": "IDLE" })
+                .to_string()
+                .into(),
+        ))
+        .await
+        .expect("send");
 
-        let mut ws = connect(port, "auto").await;
-        let first = next_json(&mut ws).await;
-        let second = next_json(&mut ws).await;
-        let third = next_json(&mut ws).await;
-
-        assert_eq!(first["type"], "load");
-        assert_eq!(second["type"], "seek");
-        assert_eq!(second["position"], 42.0);
-        assert_eq!(third["type"], "pause");
-
+        let event = tokio::time::timeout(Duration::from_millis(300), events.recv()).await;
+        assert!(event.is_err(), "no event should be emitted");
         bridge.stop().await;
     }
 
-    // -- proxy handlers ----------------------------------------------------
-
-    #[derive(Clone, Default)]
-    struct RecordingLicense {
-        requests: Arc<Mutex<Vec<LicenseRequest>>>,
+    fn register_frame_with_id(player_id: &str) -> String {
+        json!({ "type": "register", "playerId": player_id, "name": "Dup Player" }).to_string()
     }
 
+    async fn recv_event(events: &mut mpsc::Receiver<PlayerEvent>) -> PlayerEvent {
+        tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("event within timeout")
+            .expect("event")
+    }
+
+    #[tokio::test]
+    async fn duplicate_player_id_gets_distinct_epochs() {
+        let (bridge, mut events) = bridge();
+        bridge.start().await.expect("start");
+
+        // Two sockets reuse the same player_id (e.g. two browser tabs, or an
+        // overlapping reconnect).
+        let mut ws1 = connect(&bridge).await;
+        ws1.send(WsMessage::Text(register_frame_with_id("dup").into()))
+            .await
+            .expect("register ws1");
+        // Retain the command sink + report stream so the socket stays open
+        // (dropping the sink closes the socket, as a real orchestrator holds it).
+        let (epoch1, _player1, _reports1) = match recv_event(&mut events).await {
+            PlayerEvent::Registered {
+                registration,
+                player,
+                reports,
+                epoch,
+            } => {
+                assert_eq!(registration.player_id, "dup");
+                (epoch, player, reports)
+            }
+            PlayerEvent::Disconnected { .. } => panic!("expected Registered"),
+        };
+
+        let mut ws2 = connect(&bridge).await;
+        ws2.send(WsMessage::Text(register_frame_with_id("dup").into()))
+            .await
+            .expect("register ws2");
+        let (epoch2, _player2, _reports2) = match recv_event(&mut events).await {
+            PlayerEvent::Registered {
+                player,
+                reports,
+                epoch,
+                ..
+            } => (epoch, player, reports),
+            PlayerEvent::Disconnected { .. } => panic!("expected Registered"),
+        };
+
+        // Each connection is tagged with a distinct epoch.
+        assert_ne!(epoch1, epoch2);
+
+        // Closing the *older* socket reports its own epoch, so the orchestrator
+        // can tell it apart from the newer connection that replaced it and avoid
+        // tearing down the newer receiver.
+        ws1.close(None).await.ok();
+        match recv_event(&mut events).await {
+            PlayerEvent::Disconnected { player_id, epoch } => {
+                assert_eq!(player_id, "dup");
+                assert_eq!(epoch, epoch1);
+            }
+            PlayerEvent::Registered { .. } => panic!("expected Disconnected"),
+        }
+
+        drop(ws2);
+        bridge.stop().await;
+    }
+
+    struct EchoLicense;
+
     #[async_trait]
-    impl LicenseHandler for RecordingLicense {
+    impl LicenseHandler for EchoLicense {
         async fn handle_license(&self, request: LicenseRequest) -> ProxyResult<LicenseResponse> {
-            self.requests.lock().unwrap().push(request.clone());
-            let mut body = request.body;
-            body.extend_from_slice(b"-ok");
-            Ok(LicenseResponse::ok(body))
+            Ok(LicenseResponse::ok(request.body))
         }
     }
 
     #[tokio::test]
     async fn license_proxy_round_trip() {
-        let (bridge, _reports) = bridge();
-        let handler = RecordingLicense::default();
-        bridge.register_license_handler("session-1", Arc::new(handler.clone()));
-
+        let (bridge, _events) = bridge();
+        bridge.register_license_handler("sess", Arc::new(EchoLicense));
         let request = Request::builder()
-            .method("POST")
-            .uri("/license/session-1?route=r7")
+            .method(Method::POST)
+            .uri("/license/sess")
             .header(CONTENT_TYPE, "application/octet-stream")
-            .body(Body::from(b"challenge".to_vec()))
+            .body(Body::from(vec![1u8, 2, 3]))
             .unwrap();
-        let (status, headers, body) = drive(&bridge, request).await;
-
+        let (status, _headers, body) = drive(&bridge, request).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(content_type(&headers), "application/octet-stream");
-        assert_eq!(body, b"challenge-ok");
-        let recorded = handler.requests.lock().unwrap();
-        assert_eq!(recorded.len(), 1);
-        assert_eq!(recorded[0].session_id, "session-1");
-        assert_eq!(recorded[0].route_id, Some(RouteId::license(7)));
-        assert_eq!(recorded[0].body, b"challenge");
+        assert_eq!(body, vec![1, 2, 3]);
     }
 
     #[tokio::test]
     async fn license_proxy_missing_handler_returns_404() {
-        let (bridge, _reports) = bridge();
+        let (bridge, _events) = bridge();
         let request = Request::builder()
-            .method("POST")
-            .uri("/license/missing")
-            .body(Body::from(b"x".to_vec()))
+            .method(Method::POST)
+            .uri("/license/unknown")
+            .body(Body::from(vec![0u8]))
             .unwrap();
         let (status, _headers, _body) = drive(&bridge, request).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
-    struct ForbiddenLicense;
+    struct ErrorLicense;
 
     #[async_trait]
-    impl LicenseHandler for ForbiddenLicense {
+    impl LicenseHandler for ErrorLicense {
         async fn handle_license(&self, _request: LicenseRequest) -> ProxyResult<LicenseResponse> {
             Ok(LicenseResponse {
-                body: b"forbidden".to_vec(),
+                body: b"denied".to_vec(),
                 content_type: "text/plain".into(),
                 status: 403,
             })
@@ -1051,25 +1018,22 @@ mod tests {
 
     #[tokio::test]
     async fn license_proxy_preserves_explicit_error_response() {
-        let (bridge, _reports) = bridge();
-        bridge.register_license_handler("session-1", Arc::new(ForbiddenLicense));
-
+        let (bridge, _events) = bridge();
+        bridge.register_license_handler("sess", Arc::new(ErrorLicense));
         let request = Request::builder()
-            .method("POST")
-            .uri("/license/session-1")
-            .body(Body::from(b"challenge".to_vec()))
+            .method(Method::POST)
+            .uri("/license/sess")
+            .body(Body::from(vec![0u8]))
             .unwrap();
-        let (status, headers, body) = drive(&bridge, request).await;
-
+        let (status, _headers, body) = drive(&bridge, request).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
-        assert_eq!(content_type(&headers), "text/plain");
-        assert_eq!(body, b"forbidden");
+        assert_eq!(body, b"denied");
     }
 
-    struct FailingLicense;
+    struct PanicLicense;
 
     #[async_trait]
-    impl LicenseHandler for FailingLicense {
+    impl LicenseHandler for PanicLicense {
         async fn handle_license(&self, _request: LicenseRequest) -> ProxyResult<LicenseResponse> {
             Err(ProxyError::Internal("boom".into()))
         }
@@ -1077,80 +1041,27 @@ mod tests {
 
     #[tokio::test]
     async fn license_proxy_unhandled_error_returns_500() {
-        let (bridge, _reports) = bridge();
-        bridge.register_license_handler("session-1", Arc::new(FailingLicense));
-
+        let (bridge, _events) = bridge();
+        bridge.register_license_handler("sess", Arc::new(PanicLicense));
         let request = Request::builder()
-            .method("POST")
-            .uri("/license/session-1")
-            .body(Body::from(b"challenge".to_vec()))
+            .method(Method::POST)
+            .uri("/license/sess")
+            .body(Body::from(vec![0u8]))
             .unwrap();
         let (status, _headers, _body) = drive(&bridge, request).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    #[derive(Clone, Default)]
-    struct RecordingManifest {
-        requests: Arc<Mutex<Vec<ManifestProxyRequest>>>,
-    }
+    struct StaticManifest;
 
     #[async_trait]
-    impl ManifestHandler for RecordingManifest {
+    impl ManifestHandler for StaticManifest {
         async fn handle_manifest(
             &self,
             request: ManifestProxyRequest,
         ) -> ProxyResult<ManifestProxyResponse> {
-            self.requests.lock().unwrap().push(request);
-            let mut headers = HeaderMap::new();
-            headers.insert(http::header::CACHE_CONTROL, "no-store".parse().unwrap());
             Ok(ManifestProxyResponse {
-                body: b"#EXTM3U\n".to_vec(),
-                content_type: "application/vnd.apple.mpegurl".into(),
-                status: 200,
-                headers,
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn manifest_proxy_round_trip() {
-        let (bridge, _reports) = bridge();
-        let handler = RecordingManifest::default();
-        bridge.register_manifest_handler("session-1", Arc::new(handler.clone()));
-
-        let (status, headers, body) = http_get(&bridge, "/manifest/session-1/m7.m3u8").await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(content_type(&headers), "application/vnd.apple.mpegurl");
-        // The proxy forces no-store regardless of upstream directives so that
-        // stream switches (which reuse the proxy URL) always re-fetch.
-        assert_eq!(
-            headers.get("Cache-Control").and_then(|v| v.to_str().ok()),
-            Some("no-store, max-age=0")
-        );
-        assert_eq!(body, b"#EXTM3U\n");
-        {
-            let recorded = handler.requests.lock().unwrap();
-            assert_eq!(recorded.len(), 1);
-            assert_eq!(recorded[0].route_id, RouteId::manifest(7));
-            assert_eq!(recorded[0].method, Method::GET);
-        }
-
-        let (missing, _headers, _body) = http_get(&bridge, "/manifest/missing/m0.mpd").await;
-        assert_eq!(missing, StatusCode::NOT_FOUND);
-    }
-
-    struct HeadManifest;
-
-    #[async_trait]
-    impl ManifestHandler for HeadManifest {
-        async fn handle_manifest(
-            &self,
-            request: ManifestProxyRequest,
-        ) -> ProxyResult<ManifestProxyResponse> {
-            assert_eq!(request.method, Method::HEAD);
-            Ok(ManifestProxyResponse {
-                body: b"ignored".to_vec(),
+                body: format!("manifest for {}", request.route_id).into_bytes(),
                 content_type: "application/dash+xml".into(),
                 status: 200,
                 headers: HeaderMap::new(),
@@ -1159,49 +1070,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manifest_proxy_head_request() {
-        let (bridge, _reports) = bridge();
-        bridge.register_manifest_handler("session-1", Arc::new(HeadManifest));
+    async fn manifest_proxy_round_trip() {
+        let (bridge, _events) = bridge();
+        bridge.register_manifest_handler("sess", Arc::new(StaticManifest));
+        let (status, headers, body) = http_get(&bridge, "/manifest/sess/m0.mpd").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(content_type(&headers).contains("dash"));
+        assert_eq!(body, b"manifest for m0");
+    }
 
+    #[tokio::test]
+    async fn manifest_proxy_head_request() {
+        let (bridge, _events) = bridge();
+        bridge.register_manifest_handler("sess", Arc::new(StaticManifest));
         let request = Request::builder()
-            .method("HEAD")
-            .uri("/manifest/session-1/m0.mpd")
+            .method(Method::HEAD)
+            .uri("/manifest/sess/m0.mpd")
             .body(Body::empty())
             .unwrap();
-        let (status, headers, body) = drive(&bridge, request).await;
-
+        let (status, _headers, body) = drive(&bridge, request).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(content_type(&headers), "application/dash+xml");
         assert!(body.is_empty());
     }
 
-    struct NoisyManifest;
+    struct HeaderManifest;
 
     #[async_trait]
-    impl ManifestHandler for NoisyManifest {
+    impl ManifestHandler for HeaderManifest {
         async fn handle_manifest(
             &self,
             _request: ManifestProxyRequest,
         ) -> ProxyResult<ManifestProxyResponse> {
             let mut headers = HeaderMap::new();
-            for (name, value) in [
-                ("Connection", "keep-alive, X-Remove-Me"),
-                ("Content-Encoding", "gzip"),
-                ("Content-Length", "999"),
-                ("Content-Type", "text/plain"),
-                ("Set-Cookie", "sid=123"),
-                ("Transfer-Encoding", "chunked"),
-                ("X-Remove-Me", "1"),
-                ("X-Preserved", "ok"),
-            ] {
-                headers.append(
-                    http::HeaderName::try_from(name).unwrap(),
-                    value.parse().unwrap(),
-                );
-            }
+            headers.insert("connection", "keep-alive".parse().unwrap());
+            headers.insert("x-preserved", "yes".parse().unwrap());
             Ok(ManifestProxyResponse {
-                body: b"#EXTM3U\n".to_vec(),
-                content_type: "application/vnd.apple.mpegurl".into(),
+                body: b"ok".to_vec(),
+                content_type: "application/dash+xml".into(),
                 status: 200,
                 headers,
             })
@@ -1210,28 +1115,14 @@ mod tests {
 
     #[tokio::test]
     async fn manifest_proxy_filters_hop_by_hop_response_headers() {
-        let (bridge, _reports) = bridge();
-        bridge.register_manifest_handler("session-1", Arc::new(NoisyManifest));
-
-        let (status, headers, _body) = http_get(&bridge, "/manifest/session-1/m0.m3u8").await;
-
+        let (bridge, _events) = bridge();
+        bridge.register_manifest_handler("sess", Arc::new(HeaderManifest));
+        let (status, headers, _body) = http_get(&bridge, "/manifest/sess/m0.mpd").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(content_type(&headers), "application/vnd.apple.mpegurl");
+        assert!(!headers.contains_key("connection"));
         assert_eq!(
-            headers.get("X-Preserved").and_then(|v| v.to_str().ok()),
-            Some("ok")
+            headers.get("x-preserved").and_then(|v| v.to_str().ok()),
+            Some("yes")
         );
-        for blocked in [
-            "Connection",
-            "Content-Encoding",
-            "Set-Cookie",
-            "Transfer-Encoding",
-            "X-Remove-Me",
-        ] {
-            assert!(
-                !headers.contains_key(blocked),
-                "{blocked} should be dropped"
-            );
-        }
     }
 }

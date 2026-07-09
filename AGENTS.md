@@ -68,17 +68,33 @@ endpoint, and routes `LAUNCH`/`LOAD` to bundled app providers. A player bridge
 serves an embedded Shaka Player page over HTTP/WebSocket and proxies DRM license
 + DASH/HLS manifest requests (with normalization).
 
-The compose/orchestration logic — assemble certs + hub + bridge + eureka +
-tasks, then start/observe/stop — lives in `vibecast-platform`, shared by two
-platform bindings: `vibecast-cli` (binary name `vibecast`; the desktop
-Linux/macOS server, mDNS discovery, TOML config, Ctrl-C lifecycle) and
+**Per-player receivers.** vibecast is not one advertised device: each *player*
+(the browser Shaka page, the Kodi add-on, a native player) connects to the
+shared player bridge's `/player` WebSocket and **registers** its identity + a
+`PlayerCapabilities` (platform, DRM systems + security level, codecs, max
+resolution, HDR, HDCP). The orchestrator (`vibecast-platform::manager`) then
+spins up a *dedicated* Cast receiver for that player — its own friendly name
+(`<reported name> [vibecast]`), fresh device id, and dynamically-assigned
+CastV2/eureka ports — so senders see one distinct Chromecast per player,
+advertising that player's real capabilities. The receiver is torn down when the
+player disconnects (ephemeral). All per-player receivers share one harvested
+device certificate (varying only the identity strings). A player's capabilities
+reach app sessions via `ctx.receiver.capabilities`, so apps make conditional
+decisions per selected player (e.g. Prime Video derives its whole device profile
+from them).
+
+The compose/orchestration logic — assemble certs + shared bridge + the
+per-player orchestrator, then start/observe/stop — lives in `vibecast-platform`,
+shared by two platform bindings: `vibecast-cli` (binary name `vibecast`; the
+desktop Linux/macOS server, mDNS discovery, TOML config, Ctrl-C lifecycle) and
 `vibecast-ffi` (a `cdylib` + UniFFI facade generating Kotlin/Swift/… bindings
-for native Android/iOS frontends; discovery is delegated to the frontend, e.g.
-Android `NsdManager`). See `android/` for the Android TV frontend.
+for native Android/iOS frontends; per-player discovery is delegated to the
+frontend via `PlayerObserver`, e.g. Android `NsdManager`). See `android/` for
+the Android TV frontend.
 
 ## Workspace layout
 
-Cargo workspace of 16 focused crates under `crates/`. Layering is strict:
+Cargo workspace of 18 focused crates under `crates/`. Layering is strict:
 
 ```
 vibecast-proto        CastV2 protobuf + length-prefixed framing          (leaf)
@@ -86,15 +102,23 @@ vibecast-security     Device-auth material + TLS cert rotation           (leaf)
 vibecast-cast         CastV2 TLS transport: connection actor             (proto, security)
 vibecast-discovery    mDNS advertisement + eureka HTTP/HTTPS             (security)
 vibecast-messages     Cast JSON message models (serde)                   (leaf)
-vibecast-bridge       Player bridge: WebSocket relay + DRM/manifest proxy (messages)
-vibecast-sdk          Stable app-author SDK                              (messages)
+vibecast-player-api   Player/proxy seams + wire protocol + manifest utils (messages)
+vibecast-sdk          Stable app-author SDK (+ PlayerCapabilities)       (messages)
 vibecast-apps-*       Bundled apps (SVT Play, TV4 Play, Viaplay, Prime)  (sdk ONLY)
-vibecast-core         Receiver runtime: device hub + coordinator         (cast, messages, bridge, sdk)
-vibecast-platform     Shared compose/run() orchestration + Config        (core, cast, bridge, discovery, sdk, apps)
-vibecast-cli          Desktop binding: args + mDNS + Ctrl-C lifecycle    (platform)
+vibecast-bridge       Player bridge: registration + routing + proxy      (player-api, sdk)
+vibecast-core         Receiver runtime: device hub + coordinator         (cast, messages, player-api, sdk)
+vibecast-receiver     Generic per-receiver composition (reusable)        (cast, core, discovery, security, player-api, sdk)
+vibecast-platform     Compose + per-player orchestrator + Config         (receiver, bridge, core, apps, …)
+vibecast-cli          Desktop binding: args + Ctrl-C lifecycle           (platform)
 vibecast-ffi          cdylib + UniFFI facade (Kotlin/Swift/…)            (platform)
 uniffi-bindgen        Version-locked uniffi-bindgen CLI (dev tool)       (uniffi[cli])
 ```
+
+`vibecast-core` does **not** depend on `vibecast-bridge`: the `Player` command
+sink and `ProxyRegistrar` proxy seams live in `vibecast-player-api`, so the
+generic runtime is decoupled from the concrete Shaka/Kodi bridge.
+`vibecast-receiver` is the app-agnostic "one Cast receiver" composition and can
+be reused independently of vibecast's apps/bridge/branding.
 
 **App crates depend ONLY on `vibecast-sdk`.** No transport, TLS, or bridge
 types leak into app code. To add an app, model it on `vibecast-apps-svtplay`
@@ -105,10 +129,10 @@ pick it up automatically).
 ## Build, run, test
 
 ```sh
-# Build / run the receiver
-cargo run -p vibeast-cli                          # binary named `vibecast`
-cargo run -p vibeast-cli -- --name "Living Room"  # override friendly name
-cargo build -p vibeast-cli --release              # release binary
+# Build / run the server (players register over the bridge; each becomes a device)
+cargo run -p vibecast-cli                          # binary named `vibecast`
+cargo run -p vibecast-cli -- --model "Chromecast"  # override the reported model
+cargo build -p vibecast-cli --release              # release binary
 
 # Tests
 cargo nextest run --all-features --profile ci     # main suite (CI profile)
@@ -121,11 +145,12 @@ cargo deny check                                  # advisories + licenses + bans
 cargo doc --no-deps --all-features                # rustdoc build (must be warning-free)
 ```
 
-CLI flags (override `config.toml`): `--certs`, `--data-dir`, `--name`, `--model`,
-`--bind-host`, `--cast-port`, `--device-id`, `--log-level`. Data dir defaults to
+CLI flags (override `config.toml`): `--certs`, `--data-dir`, `--model`,
+`--bind-host`, `--player-port`, `--log-level`. Data dir defaults to
 `$HOME/.vibecast`; config lives at `{data_dir}/config.toml`; certs at
-`{data_dir}/certs.json`. Player bridge defaults to `:8010`, eureka HTTP `:8008`,
-eureka HTTPS `:8443`, CastV2 TLS `:8009`.
+`{data_dir}/certs.json`. The shared player bridge defaults to `:8010`; each
+per-player receiver binds **OS-assigned** CastV2/eureka ports (advertised via
+mDNS), so senders find them regardless of port.
 
 ```sh
 # Android (Android TV) frontend — needs cargo-ndk + NDK r28+ + JDK 17.
@@ -175,10 +200,17 @@ See `android/README.md` for cert provisioning and on-device validation over adb.
 ## Kodi add-on
 
 `kodi/service.vibecast/` is a Python Kodi add-on that bridges Kodi playback to
-vibecast's player WebSocket endpoint (`/player?role=primary`). It is a **client**
-of the receiver, not part of the receiver. Kodi add-ons are inherently Python, so
-this directory stays Python. The Rust receiver serves the `/player` endpoint the
+vibecast's player WebSocket endpoint (`/player`). It is a **client** of the
+receiver, not part of the receiver. Kodi add-ons are inherently Python, so this
+directory stays Python. The Rust receiver serves the `/player` endpoint the
 add-on connects to; no special flags are needed (player bridge is on by default).
+
+On connect the add-on sends a `register` frame (`{type:"register", playerId,
+name, capabilities}`) as its first message — its name defaults to `Kodi`
+(configurable, plus resolution/codecs/HDR/Widevine level under the add-on's
+**Player** settings; auto-detected by default) — and vibecast advertises it as
+`Kodi [vibecast]`. The embedded browser player (`crates/vibecast-bridge/assets/
+player.js`) registers the same way.
 
 ## Known limitations
 

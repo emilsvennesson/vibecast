@@ -1,6 +1,6 @@
-//! WebSocket wire protocol between the bridge and external renderers.
+//! WebSocket wire protocol between the bridge and external players.
 //!
-//! [`PlayerCommand`] flows bridge → renderer; [`PlayerReport`] flows renderer →
+//! [`PlayerCommand`] flows bridge → player; [`PlayerReport`] flows player →
 //! bridge. Both are `#[serde(tag = "type")]` enums with camelCase field names
 //! on the wire.
 
@@ -16,9 +16,15 @@ pub enum DrmSystem {
     /// Google Widevine.
     #[serde(rename = "com.widevine.alpha")]
     Widevine,
+    /// Microsoft PlayReady.
+    #[serde(rename = "com.microsoft.playready")]
+    PlayReady,
     /// W3C ClearKey.
     #[serde(rename = "org.w3.clearkey")]
     ClearKey,
+    /// Apple FairPlay Streaming.
+    #[serde(rename = "com.apple.fps")]
+    FairPlay,
 }
 
 /// DRM configuration attached to a stream on the wire.
@@ -29,7 +35,7 @@ pub struct DrmPayload {
     pub system: DrmSystem,
     /// License acquisition URL (rewritten to the bridge proxy by the coordinator).
     pub license_url: String,
-    /// Extra headers the renderer should attach to license requests.
+    /// Extra headers the player should attach to license requests.
     #[serde(default)]
     pub headers: HashMap<String, String>,
 }
@@ -103,7 +109,7 @@ fn empty_object() -> Value {
     Value::Object(Map::new())
 }
 
-/// A command sent from the bridge to renderers.
+/// A command sent from the bridge to players.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(
     tag = "type",
@@ -140,7 +146,7 @@ pub enum PlayerCommand {
         /// Owning session id.
         session_id: String,
     },
-    /// Update renderer volume.
+    /// Update player volume.
     Volume {
         /// Owning session id.
         session_id: String,
@@ -166,7 +172,7 @@ impl PlayerCommand {
     }
 }
 
-/// A report sent from the primary renderer back to the bridge.
+/// A report sent from the primary player back to the bridge.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(
     tag = "type",

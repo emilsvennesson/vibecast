@@ -6,8 +6,9 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 
 /**
- * Status screen: shows receiver state from [ReceiverState] and starts/stops the
- * [CastReceiverService]. No media renderer is wired yet (server-only phase).
+ * Status screen: shows server state from [ReceiverState] and starts/stops the
+ * [CastReceiverService]. Once running, each player that registers over the
+ * bridge becomes its own advertised Cast device.
  */
 class MainActivity : AppCompatActivity() {
     private lateinit var statusView: TextView

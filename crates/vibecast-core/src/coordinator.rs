@@ -1,7 +1,7 @@
 //! Per-session playback state and MEDIA_STATUS construction.
 //!
 //! This module owns only the serialized playback state and the status builders.
-//! The surrounding IO (sending to senders, driving the renderer, registering
+//! The surrounding IO (sending to senders, driving the player, registering
 //! proxies) lives in the hub, which owns the transport registry.
 
 use serde_json::Value;

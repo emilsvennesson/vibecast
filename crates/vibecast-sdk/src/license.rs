@@ -11,7 +11,7 @@ use http::HeaderMap;
 
 use crate::DrmSystem;
 
-/// A DRM license request forwarded from the renderer.
+/// A DRM license request forwarded from the player.
 #[derive(Debug, Clone)]
 pub struct LicenseRequest {
     /// Owning session id.
@@ -26,7 +26,7 @@ pub struct LicenseRequest {
     pub headers: HeaderMap,
 }
 
-/// The license response returned to the renderer.
+/// The license response returned to the player.
 #[derive(Debug, Clone)]
 pub struct LicenseResponse {
     /// Raw license body.

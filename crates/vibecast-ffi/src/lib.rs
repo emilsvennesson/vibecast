@@ -25,36 +25,30 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Once};
 
-use vibecast_platform::{Config, PlatformError, PlatformInputs, RunningReceiver, TxtObserver};
+use vibecast_platform::{
+    Config, PlatformError, PlatformInputs, PlayerObserver, PlayerStarted, RunningReceiver,
+};
 
 uniffi::setup_scaffolding!();
 
 /// Receiver configuration supplied by the native frontend. Fields not present
-/// here (manufacturer, locale, per-cast identity, volume, timeouts) use the
-/// portable Chromecast-like defaults from [`vibecast_platform::Config`].
+/// here (manufacturer, locale, volume, timeouts) use the portable
+/// Chromecast-like defaults from [`vibecast_platform::Config`].
+///
+/// Per-player Cast identities and their CastV2/eureka ports are assigned
+/// dynamically as players register — they are not configured here.
 #[derive(uniffi::Record)]
 pub struct ServerConfig {
     /// Data directory (e.g. `Context.filesDir.absolutePath`).
     pub data_dir: String,
     /// Certificate manifest path (provisioned into the data dir).
     pub certs_path: String,
-    /// Friendly name advertised to senders.
-    pub friendly_name: String,
-    /// Device model string.
+    /// Device model string (reported by every player's receiver).
     pub model: String,
     /// Host/interface to bind (e.g. `0.0.0.0`).
     pub bind_host: String,
-    /// CastV2 TLS port (use an alternate port to coexist with a built-in
-    /// Cast receiver, e.g. 9009).
-    pub cast_port: u16,
-    /// Eureka HTTP port (alternate, e.g. 9008).
-    pub eureka_http_port: u16,
-    /// Eureka HTTPS port (alternate, e.g. 9443).
-    pub eureka_https_port: u16,
-    /// Player-bridge port (loopback, e.g. 8010).
+    /// Player-bridge port where players connect to register (e.g. 8010).
     pub player_port: u16,
-    /// Stable device id. When absent, one is loaded/created under `data_dir`.
-    pub device_id: Option<String>,
     /// Per-app config as a JSON object string (`{"<app_key>": { ... }}`).
     pub apps_config_json: Option<String>,
 }
@@ -114,24 +108,70 @@ pub enum CallbackError {
     },
 }
 
-/// Rust → native events. The frontend implements this to register discovery,
-/// re-register on certificate rotation, and drive its UI/service state.
+/// Rust → native events. The frontend implements this to register each player's
+/// Cast receiver over discovery (Android `NsdManager`), re-register on
+/// certificate rotation, and drive its UI/service state.
+///
+/// Every callback is per-player: one physical player (browser / Kodi) that
+/// registers over the bridge becomes one advertised Cast device.
 #[uniffi::export(with_foreign)]
 pub trait ReceiverObserver: Send + Sync {
-    /// The receiver bound its ports and is ready to be advertised.
-    fn on_started(
+    /// A player registered and its receiver bound ports; register it for
+    /// discovery under `name` (already suffixed `... [vibecast]`).
+    fn on_player_started(
         &self,
+        player_id: String,
+        name: String,
+        instance_name: String,
         cast_port: u16,
         eureka_http_port: u16,
-        instance_name: String,
         txt: Vec<TxtEntry>,
     ) -> Result<(), CallbackError>;
-    /// The advertised TXT record changed (certificate rotation) — re-register.
-    fn on_txt_changed(&self, txt: Vec<TxtEntry>) -> Result<(), CallbackError>;
-    /// The receiver stopped cleanly.
-    fn on_stopped(&self) -> Result<(), CallbackError>;
+    /// A player's advertised TXT record changed (certificate rotation).
+    fn on_player_txt_changed(
+        &self,
+        player_id: String,
+        txt: Vec<TxtEntry>,
+    ) -> Result<(), CallbackError>;
+    /// A player disconnected; unregister its receiver from discovery.
+    fn on_player_stopped(&self, player_id: String) -> Result<(), CallbackError>;
     /// A non-fatal error occurred after startup.
     fn on_error(&self, message: String) -> Result<(), CallbackError>;
+}
+
+/// Adapts a foreign [`ReceiverObserver`] to the platform [`PlayerObserver`].
+struct ForeignObserver {
+    inner: Arc<dyn ReceiverObserver>,
+}
+
+impl PlayerObserver for ForeignObserver {
+    fn on_player_started(&self, started: PlayerStarted) {
+        if let Err(error) = self.inner.on_player_started(
+            started.player_id,
+            started.name,
+            started.instance_name,
+            started.cast_port,
+            started.eureka_http_port,
+            to_txt_entries(started.txt),
+        ) {
+            tracing::warn!(%error, "observer.on_player_started failed");
+        }
+    }
+
+    fn on_player_txt_changed(&self, player_id: &str, txt: Vec<(String, String)>) {
+        if let Err(error) = self
+            .inner
+            .on_player_txt_changed(player_id.to_string(), to_txt_entries(txt))
+        {
+            tracing::warn!(%error, "observer.on_player_txt_changed failed");
+        }
+    }
+
+    fn on_player_stopped(&self, player_id: &str) {
+        if let Err(error) = self.inner.on_player_stopped(player_id.to_string()) {
+            tracing::warn!(%error, "observer.on_player_stopped failed");
+        }
+    }
 }
 
 /// Handle to a receiver instance. Owns the Tokio runtime and the running
@@ -180,55 +220,33 @@ impl ReceiverHandle {
 
         let (platform_config, inputs) = build_config(config)?;
 
-        // Forward TXT-record changes (cert rotation) to the foreign observer.
-        let txt_observer = observer.clone();
-        let on_txt: TxtObserver = Arc::new(move |pairs: Vec<(String, String)>| {
-            if let Err(error) = txt_observer.on_txt_changed(to_txt_entries(pairs)) {
-                tracing::warn!(%error, "observer.on_txt_changed failed");
-            }
+        // Forward per-player lifecycle to the foreign observer.
+        let player_observer: Arc<dyn PlayerObserver> = Arc::new(ForeignObserver {
+            inner: observer.clone(),
         });
 
         let running = self.runtime.block_on(vibecast_platform::run(
             platform_config,
             inputs,
-            Some(on_txt),
+            Some(player_observer),
         ))?;
 
-        // Capture the facts the observer needs, store state, then release the
-        // lock *before* invoking the foreign callback: `state` is a non-reentrant
-        // `std::sync::Mutex`, so an observer that calls back into the handle
-        // (e.g. `is_running`/`stop`) from `on_started` would otherwise deadlock.
-        let started = (
-            running.cast_port,
-            running.eureka_http_port,
-            running.instance_name.clone(),
-            to_txt_entries(running.txt.clone()),
-        );
-        state.observer = Some(observer.clone());
+        state.observer = Some(observer);
         state.running = Some(running);
-        drop(state);
-
-        let (cast_port, eureka_http_port, instance_name, txt) = started;
-        if let Err(error) = observer.on_started(cast_port, eureka_http_port, instance_name, txt) {
-            tracing::warn!(%error, "observer.on_started failed");
-        }
         Ok(())
     }
 
-    /// Stop the receiver (blocking) and notify `observer.on_stopped`. A no-op
-    /// if not running.
+    /// Stop the server (blocking). Shutting down drains every per-player
+    /// receiver, so the observer receives an `on_player_stopped` for each. A
+    /// no-op if not running.
     fn stop(&self) {
-        let (running, observer) = {
+        let running = {
             let mut state = self.state.lock().expect("state mutex poisoned");
-            (state.running.take(), state.observer.take())
+            state.observer.take();
+            state.running.take()
         };
         if let Some(running) = running {
             self.runtime.block_on(running.shutdown());
-        }
-        if let Some(observer) = observer {
-            if let Err(error) = observer.on_stopped() {
-                tracing::warn!(%error, "observer.on_stopped failed");
-            }
         }
     }
 
@@ -245,12 +263,8 @@ impl ReceiverHandle {
 /// Map a [`ServerConfig`] onto the shared [`Config`] + [`PlatformInputs`].
 fn build_config(config: ServerConfig) -> Result<(Config, PlatformInputs), ReceiverError> {
     let mut platform_config = Config::default();
-    platform_config.device.friendly_name = config.friendly_name;
     platform_config.device.model = config.model;
     platform_config.network.bind_host = config.bind_host;
-    platform_config.network.cast_port = config.cast_port;
-    platform_config.network.eureka_http_port = config.eureka_http_port;
-    platform_config.network.eureka_https_port = config.eureka_https_port;
     platform_config.network.player_port = config.player_port;
 
     if let Some(json) = config.apps_config_json {
@@ -260,18 +274,12 @@ fn build_config(config: ServerConfig) -> Result<(Config, PlatformInputs), Receiv
             })?;
     }
 
-    let data_dir = PathBuf::from(config.data_dir);
-    let certs_path = PathBuf::from(config.certs_path);
-    let device_id = config
-        .device_id
-        .unwrap_or_else(|| vibecast_platform::load_or_create_device_id(&data_dir));
-
     let inputs = PlatformInputs {
-        data_dir,
-        certs_path,
-        device_id,
-        // Android/iOS advertise via the native discovery API using the
-        // returned instance/txt — never via mDNS from Rust.
+        data_dir: PathBuf::from(config.data_dir),
+        certs_path: PathBuf::from(config.certs_path),
+        // Android/iOS advertise each player's receiver via the native discovery
+        // API using the per-player facts from `on_player_started` — never via
+        // mDNS from Rust.
         advertise_mdns: false,
     };
     Ok((platform_config, inputs))
@@ -350,14 +358,9 @@ mod tests {
         ServerConfig {
             data_dir: "/tmp/vibecast-ffi-test".to_owned(),
             certs_path: "/tmp/vibecast-ffi-test/certs.json".to_owned(),
-            friendly_name: "Test Room".to_owned(),
             model: "Chromecast".to_owned(),
             bind_host: "127.0.0.1".to_owned(),
-            cast_port: 9009,
-            eureka_http_port: 9008,
-            eureka_https_port: 9443,
             player_port: 9010,
-            device_id: Some("test-device".to_owned()),
             apps_config_json: None,
         }
     }
@@ -365,11 +368,10 @@ mod tests {
     #[test]
     fn build_config_maps_fields_and_forces_no_mdns() {
         let (config, inputs) = build_config(base_config()).unwrap();
-        assert_eq!(config.device.friendly_name, "Test Room");
-        assert_eq!(config.network.cast_port, 9009);
+        assert_eq!(config.device.model, "Chromecast");
         assert_eq!(config.network.player_port, 9010);
-        assert_eq!(inputs.device_id, "test-device");
         assert!(!inputs.advertise_mdns);
+        let _ = inputs.certs_path;
     }
 
     #[test]

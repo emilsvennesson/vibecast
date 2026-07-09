@@ -11,3 +11,6 @@ app/src/main/jniLibs/
 
 # Never commit harvested device-auth material.
 **/certs.json
+
+# Personal local build notes.
+LOCAL_BUILD.md

@@ -9,6 +9,7 @@
 
 use std::fmt;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use http::HeaderMap;
@@ -110,7 +111,7 @@ impl FromStr for RouteId {
     }
 }
 
-/// A DRM license request forwarded from the renderer.
+/// A DRM license request forwarded from the player.
 #[derive(Debug, Clone)]
 pub struct LicenseRequest {
     /// Owning session id.
@@ -125,7 +126,7 @@ pub struct LicenseRequest {
     pub headers: HeaderMap,
 }
 
-/// A DRM license response returned to the renderer.
+/// A DRM license response returned to the player.
 #[derive(Debug, Clone)]
 pub struct LicenseResponse {
     /// Raw license body.
@@ -190,6 +191,22 @@ pub trait ManifestHandler: Send + Sync {
         &self,
         request: ManifestProxyRequest,
     ) -> ProxyResult<ManifestProxyResponse>;
+}
+
+/// Registration seam for a player's session-scoped proxy routes.
+///
+/// The receiver hub registers per-session license/manifest handlers through
+/// this trait and receives back the proxy URLs to advertise in the media
+/// payload, so the hub never depends on a concrete player implementation.
+pub trait ProxyRegistrar: Send + Sync {
+    /// Register a session license handler; returns its proxy URL.
+    fn register_license(&self, session_id: &str, handler: Arc<dyn LicenseHandler>) -> String;
+    /// Unregister a session license handler.
+    fn unregister_license(&self, session_id: &str);
+    /// Register a session manifest handler; returns its proxy URL prefix.
+    fn register_manifest(&self, session_id: &str, handler: Arc<dyn ManifestHandler>) -> String;
+    /// Unregister a session manifest handler.
+    fn unregister_manifest(&self, session_id: &str);
 }
 
 #[cfg(test)]

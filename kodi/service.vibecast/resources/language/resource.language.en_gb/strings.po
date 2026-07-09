@@ -66,3 +66,39 @@ msgstr ""
 msgctxt "#30011"
 msgid "Show connection notifications"
 msgstr ""
+
+msgctxt "#30012"
+msgid "Player"
+msgstr ""
+
+msgctxt "#30020"
+msgid "Player name (vibecast appends [vibecast])"
+msgstr ""
+
+msgctxt "#30021"
+msgid "Platform (auto, android, linux, macos, windows)"
+msgstr ""
+
+msgctxt "#30022"
+msgid "Max video width (0 = auto-detect)"
+msgstr ""
+
+msgctxt "#30023"
+msgid "Max video height (0 = auto-detect)"
+msgstr ""
+
+msgctxt "#30024"
+msgid "Video codecs (comma separated)"
+msgstr ""
+
+msgctxt "#30025"
+msgid "Audio codecs (comma separated)"
+msgstr ""
+
+msgctxt "#30026"
+msgid "HDR supported"
+msgstr ""
+
+msgctxt "#30027"
+msgid "Widevine security level (auto, L1, L2, L3)"
+msgstr ""

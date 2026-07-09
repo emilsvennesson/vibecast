@@ -12,7 +12,7 @@ publish.workspace = true
 vibecast-proto = { path = "../vibecast-proto" }
 vibecast-cast = { path = "../vibecast-cast" }
 vibecast-messages = { path = "../vibecast-messages" }
-vibecast-bridge = { path = "../vibecast-bridge" }
+vibecast-player-api = { path = "../vibecast-player-api" }
 vibecast-sdk = { path = "../vibecast-sdk" }
 tokio.workspace = true
 serde.workspace = true
