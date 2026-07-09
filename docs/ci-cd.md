@@ -112,7 +112,18 @@ Secrets (Settings → Secrets and variables → Actions):
 | `ANDROID_KEY_ALIAS` | build-android | signing key alias |
 | `ANDROID_KEY_PASSWORD` | build-android | key password |
 | `HOMEBREW_TAP_DEPLOY_KEY` | homebrew | private ed25519 deploy key with write to the tap repo |
+| `RELEASE_PLEASE_TOKEN` | release-please | *optional* — fine-grained PAT (Contents + Pull requests: read/write). Makes the release PR trigger CI so a required `ci-success` check can pass on it. Falls back to `GITHUB_TOKEN` when unset (release PR gets no CI). |
 | `GITHUB_TOKEN` | most jobs | automatic; GHCR push, release upload, release-please |
+
+### Branch protection + the release PR
+
+PRs opened with the automatic `GITHUB_TOKEN` do **not** trigger workflows (a
+GitHub anti-recursion rule), so the release-please PR gets no CI checks by
+default. If you require `ci-success` in branch protection, set
+`RELEASE_PLEASE_TOKEN` to a fine-grained PAT (Contents + Pull requests
+read/write, scoped to this repo) — the release PR will then run CI and can
+satisfy the required check. Without it, either don't require the check on release
+PRs or admin-merge them.
 
 The Android keystore is stable across releases — losing it blocks future signed
 upgrades. Keep the `.jks` + passwords somewhere safe.
