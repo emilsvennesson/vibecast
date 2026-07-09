@@ -40,7 +40,9 @@ env:
 jobs:
   # --- Version management (real releases only) ------------------------------
   release-please:
-    if: github.event_name == 'push'
+    # Always runs (even on dispatch, where the action step is skipped) so it is
+    # never a "skipped" node in the needs graph — a skipped release-please would
+    # transitively skip setup's dependents regardless of their own `if`.
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -52,6 +54,7 @@ jobs:
     steps:
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: rp
+        if: github.event_name == 'push'
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
