@@ -21,8 +21,9 @@ mod config;
 mod manager;
 
 use std::collections::HashSet;
+use std::io::Write;
 use std::net::{IpAddr, UdpSocket};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,8 +50,7 @@ pub use config::{
 };
 pub use manager::{PlayerObserver, PlayerStarted};
 
-/// Cast app ids advertised by every receiver (default media / backdrop apps).
-const BASE_APP_IDS: &[&str] = &["CC1AD845", "0F5096E8"];
+const INSTALLATION_ID_FILE: &str = "installation_id";
 
 /// Google endpoint for the Cast device CRL (opaque protobuf blob).
 const CRL_URL: &str = "https://clients3.google.com/cast/chromecast/device/crl";
@@ -80,6 +80,33 @@ pub struct PlatformInputs {
 /// Errors assembling or starting the receiver.
 #[derive(Debug, thiserror::Error)]
 pub enum PlatformError {
+    /// Reading persistent receiver state failed.
+    #[error("reading receiver state {path}")]
+    StateRead {
+        /// State file path.
+        path: PathBuf,
+        /// Underlying IO error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Persistent receiver state was invalid.
+    #[error("invalid installation id in {path}")]
+    InvalidInstallationId {
+        /// State file path.
+        path: PathBuf,
+        /// UUID parse error.
+        #[source]
+        source: uuid::Error,
+    },
+    /// Persisting receiver state failed.
+    #[error("writing receiver state {path}")]
+    StateWrite {
+        /// State file path.
+        path: PathBuf,
+        /// Underlying IO error.
+        #[source]
+        source: std::io::Error,
+    },
     /// Loading certificate material or building the TLS config failed.
     #[error("certificate/TLS setup failed")]
     Certs(#[from] SecurityError),
@@ -187,6 +214,11 @@ pub async fn run(
     let model = config.device.model.clone();
     let bind_host = config.network.bind_host.clone();
     let local_ip = local_ip.unwrap_or_else(|| detect_local_ip(&bind_host));
+    std::fs::create_dir_all(&data_dir).map_err(|source| PlatformError::StateWrite {
+        path: data_dir.clone(),
+        source,
+    })?;
+    let installation_id = load_or_create_installation_id(&data_dir)?;
 
     // --- certificates (shared across every per-player receiver) ---
     let store = CertificateStore::from_manifest_path(&certs_path)?;
@@ -195,13 +227,6 @@ pub async fn run(
 
     // --- apps ---
     let providers = build_app_providers(&config)?;
-    let mut discovery_app_ids: Vec<String> =
-        BASE_APP_IDS.iter().map(|id| (*id).to_string()).collect();
-    for provider in &providers {
-        for app_id in provider.app_ids() {
-            discovery_app_ids.push((*app_id).to_string());
-        }
-    }
     tracing::info!(
         apps = ?providers
             .iter()
@@ -237,7 +262,7 @@ pub async fn run(
     let manager_config = ManagerConfig {
         bridge: bridge.clone(),
         registry,
-        discovery_app_ids,
+        installation_id,
         http,
         data_dir,
         model,
@@ -272,6 +297,67 @@ pub async fn run(
         player_port,
         local_ip,
     })
+}
+
+fn load_or_create_installation_id(data_dir: &Path) -> Result<uuid::Uuid, PlatformError> {
+    let path = data_dir.join(INSTALLATION_ID_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(value) => parse_installation_id(&path, &value),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => create_installation_id(&path),
+        Err(source) => Err(PlatformError::StateRead { path, source }),
+    }
+}
+
+fn parse_installation_id(path: &Path, value: &str) -> Result<uuid::Uuid, PlatformError> {
+    uuid::Uuid::parse_str(value.trim()).map_err(|source| PlatformError::InvalidInstallationId {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn create_installation_id(path: &Path) -> Result<uuid::Uuid, PlatformError> {
+    let id = uuid::Uuid::new_v4();
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut file) => {
+            file.write_all(id.to_string().as_bytes())
+                .map_err(|source| PlatformError::StateWrite {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+            Ok(id)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            read_concurrently_created_installation_id(path)
+        }
+        Err(source) => Err(PlatformError::StateWrite {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn read_concurrently_created_installation_id(path: &Path) -> Result<uuid::Uuid, PlatformError> {
+    // The winning process creates the file before writing its UUID. Give that
+    // short window time to close rather than treating an empty file as corrupt.
+    for _ in 0..10 {
+        let value = std::fs::read_to_string(path).map_err(|source| PlatformError::StateRead {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if let Ok(id) = uuid::Uuid::parse_str(value.trim()) {
+            return Ok(id);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let value = std::fs::read_to_string(path).map_err(|source| PlatformError::StateRead {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    parse_installation_id(path, &value)
 }
 
 /// Install the process-default rustls crypto provider (aws-lc-rs). Idempotent —
@@ -388,6 +474,71 @@ mod tests {
         assert!(keys.contains(&"tv4play"));
         assert!(keys.contains(&"viaplay"));
         assert!(keys.contains(&"primevideo"));
+    }
+
+    #[test]
+    fn installation_id_is_created_and_reused() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "vibecast-platform-installation-id-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&data_dir).unwrap();
+
+        let first = load_or_create_installation_id(&data_dir).unwrap();
+        let second = load_or_create_installation_id(&data_dir).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            std::fs::read_to_string(data_dir.join(INSTALLATION_ID_FILE)).unwrap(),
+            first.to_string()
+        );
+
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn invalid_installation_id_is_rejected() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "vibecast-platform-invalid-installation-id-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&data_dir).unwrap();
+        std::fs::write(data_dir.join(INSTALLATION_ID_FILE), "not-a-uuid").unwrap();
+
+        assert!(matches!(
+            load_or_create_installation_id(&data_dir),
+            Err(PlatformError::InvalidInstallationId { .. })
+        ));
+
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_installation_id_creation_selects_one_id() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "vibecast-platform-concurrent-installation-id-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&data_dir).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let data_dir = data_dir.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    load_or_create_installation_id(&data_dir).unwrap()
+                })
+            })
+            .collect();
+        let ids: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        assert_eq!(ids[0], ids[1]);
+        assert_eq!(ids[0], load_or_create_installation_id(&data_dir).unwrap());
+        std::fs::remove_dir_all(data_dir).unwrap();
     }
 
     #[test]

@@ -74,8 +74,8 @@ shared player bridge's `/player` WebSocket and **registers** its identity + a
 `PlayerCapabilities` (platform, DRM systems + security level, codecs, max
 resolution, HDR, HDCP). The orchestrator (`vibecast-platform::manager`) then
 spins up a *dedicated* Cast receiver for that player — its own friendly name
-(`<reported name> [vibecast]`), fresh device id, and dynamically-assigned
-CastV2/eureka ports — so senders see one distinct Chromecast per player,
+(`<reported name> [vibecast]`), stable installation-scoped device id, and
+dynamically-assigned CastV2/eureka ports — so senders see one distinct Chromecast per player,
 advertising that player's real capabilities. The receiver is torn down when the
 player disconnects (ephemeral). All per-player receivers share one harvested
 device certificate (varying only the identity strings). A player's capabilities

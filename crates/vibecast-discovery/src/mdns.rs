@@ -140,30 +140,8 @@ fn format_uuid(clean_id: &str) -> Option<String> {
     ))
 }
 
-/// Normalize app ids to sorted, deduplicated 8-char uppercase hex.
-fn normalize_app_ids<I, S>(app_ids: I) -> Vec<String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let mut normalized: Vec<String> = app_ids
-        .into_iter()
-        .filter_map(|raw| {
-            let id = raw.as_ref().trim().to_ascii_uppercase();
-            (id.len() == 8 && id.bytes().all(|b| b.is_ascii_hexdigit())).then_some(id)
-        })
-        .collect();
-    normalized.sort();
-    normalized.dedup();
-    normalized
-}
-
-fn subtype_type(app_id: &str) -> String {
-    format!("_{app_id}._sub.{SERVICE_TYPE}")
-}
-
 /// The portable identity of a Cast advertisement: the service instance label,
-/// SRV host target, port, TXT record, and per-app subtypes.
+/// SRV host target, port, and TXT record.
 ///
 /// This carries no networking state. On desktop it feeds `MdnsResponder`; on
 /// platforms with native discovery it feeds the frontend's own registration
@@ -173,31 +151,18 @@ pub struct CastAdvertisement {
     server: String,
     port: u16,
     txt: CastServiceTxt,
-    // Consumed only by the mDNS responder; a native-discovery frontend
-    // registers the base service and ignores per-app subtypes.
-    #[cfg_attr(not(feature = "mdns"), allow(dead_code))]
-    subtype_types: Vec<String>,
 }
 
 impl CastAdvertisement {
     /// Compute the advertisement identity for a receiver.
-    pub fn new<I, S>(
+    pub fn new(
         friendly_name: &str,
         device_model: &str,
         device_id: &str,
         port: u16,
         cert_digest: &str,
-        app_ids: I,
-    ) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
+    ) -> Self {
         let clean_id = clean_device_id(device_id);
-        let subtype_types = normalize_app_ids(app_ids)
-            .iter()
-            .map(|id| subtype_type(id))
-            .collect();
         Self {
             instance: instance_name(&clean_id),
             server: server_name(device_id, &clean_id),
@@ -209,7 +174,6 @@ impl CastAdvertisement {
                 cert_digest,
                 &compute_bs(device_id),
             ),
-            subtype_types,
         }
     }
 
@@ -258,14 +222,11 @@ impl CastAdvertisement {
     }
 }
 
-/// Build the mDNS `ServiceInfo` for a given service/subtype domain.
+/// Build the mDNS `ServiceInfo` for the base `_googlecast._tcp` service.
 #[cfg(feature = "mdns")]
-fn service_info(
-    advertisement: &CastAdvertisement,
-    ty_domain: &str,
-) -> Result<mdns_sd::ServiceInfo, DiscoveryError> {
+fn service_info(advertisement: &CastAdvertisement) -> Result<mdns_sd::ServiceInfo, DiscoveryError> {
     let info = mdns_sd::ServiceInfo::new(
-        ty_domain,
+        SERVICE_TYPE,
         &advertisement.instance,
         &advertisement.server,
         "",
@@ -282,57 +243,47 @@ fn service_info(
 /// Only available with the `mdns` cargo feature. Dropping it stops advertising.
 #[cfg(feature = "mdns")]
 pub struct MdnsResponder {
-    daemons: Vec<mdns_sd::ServiceDaemon>,
+    daemon: Option<mdns_sd::ServiceDaemon>,
 }
 
 #[cfg(feature = "mdns")]
 impl MdnsResponder {
-    /// Start advertising `advertisement`. The base service is required; per-app
-    /// subtypes are best-effort — each needs its own responder because they
-    /// share one instance name, which `mdns-sd` cannot register from a single
-    /// daemon.
+    /// Start advertising the base `_googlecast._tcp` service. One instance, one
+    /// daemon — matching how a real Chromecast advertises (senders resolve app
+    /// availability over CastV2, not via mDNS subtypes).
     pub fn start(advertisement: &CastAdvertisement) -> Result<Self, DiscoveryError> {
         use mdns_sd::ServiceDaemon;
 
-        let base = ServiceDaemon::new().map_err(|e| DiscoveryError::Mdns(e.to_string()))?;
-        base.register(service_info(advertisement, SERVICE_TYPE)?)
+        let daemon = ServiceDaemon::new().map_err(|e| DiscoveryError::Mdns(e.to_string()))?;
+        daemon
+            .register(service_info(advertisement)?)
             .map_err(|e| DiscoveryError::Mdns(e.to_string()))?;
-        let mut daemons = vec![base];
-
-        for subtype in &advertisement.subtype_types {
-            let daemon = match ServiceDaemon::new() {
-                Ok(daemon) => daemon,
-                Err(err) => {
-                    tracing::warn!(%subtype, error = %err, "failed to create mDNS subtype responder");
-                    continue;
-                }
-            };
-            let info = match service_info(advertisement, subtype) {
-                Ok(info) => info,
-                Err(err) => {
-                    tracing::warn!(%subtype, error = %err, "failed to build mDNS subtype service");
-                    continue;
-                }
-            };
-            if let Err(err) = daemon.register(info) {
-                tracing::warn!(%subtype, %err, "failed to register mDNS subtype");
-            } else {
-                daemons.push(daemon);
-            }
-        }
 
         tracing::info!(
             service = %advertisement.fullname(),
-            subtypes = advertisement.subtype_types.len(),
             "mDNS advertisement started"
         );
-        Ok(Self { daemons })
+        Ok(Self {
+            daemon: Some(daemon),
+        })
     }
 
-    /// Stop advertising and shut down all responders.
+    /// Stop advertising and shut down the responder.
+    ///
+    /// Waits (bounded) for the daemon to send its goodbye packets and exit, so a
+    /// quick restart of the same identity doesn't race the network's cached
+    /// records for the previous instance.
     pub fn stop(&mut self) {
-        for daemon in self.daemons.drain(..) {
-            let _ = daemon.shutdown();
+        let Some(daemon) = self.daemon.take() else {
+            return;
+        };
+        match daemon.shutdown() {
+            Ok(status) => {
+                if let Err(error) = status.recv_timeout(std::time::Duration::from_secs(2)) {
+                    tracing::warn!(%error, "timed out waiting for mDNS responder to stop");
+                }
+            }
+            Err(error) => tracing::warn!(%error, "failed to request mDNS responder shutdown"),
         }
     }
 
@@ -373,14 +324,8 @@ mod tests {
 
     #[test]
     fn update_cert_digest_reports_change_and_uppercases() {
-        let mut advertisement = CastAdvertisement::new(
-            "Living Room",
-            "Chromecast",
-            "dev-id",
-            8009,
-            "abc123",
-            Vec::<String>::new(),
-        );
+        let mut advertisement =
+            CastAdvertisement::new("Living Room", "Chromecast", "dev-id", 8009, "abc123");
         assert_eq!(advertisement.txt().cd, "ABC123");
         // A no-op update (same digest, different case) reports no change.
         assert!(!advertisement.update_cert_digest("abc123"));
@@ -405,20 +350,6 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_and_sorts_app_ids() {
-        let ids = normalize_app_ids(["95370a1c", "17608BC8", "bad", "17608bc8", "ZZZZZZZZ"]);
-        assert_eq!(ids, vec!["17608BC8".to_string(), "95370A1C".to_string()]);
-    }
-
-    #[test]
-    fn subtype_type_format() {
-        assert_eq!(
-            subtype_type("95370A1C"),
-            "_95370A1C._sub._googlecast._tcp.local."
-        );
-    }
-
-    #[test]
     fn txt_record_matches_cast_layout() {
         let ad = CastAdvertisement::new(
             "Living Room",
@@ -426,7 +357,6 @@ mod tests {
             "12345678-1234-1234-1234-123456789abc",
             8009,
             "abcdef", // lower-case digest, expect uppercased
-            ["95370A1C"],
         );
         let txt = ad.txt();
         assert_eq!(txt.ve, "05");
@@ -437,6 +367,10 @@ mod tests {
         assert_eq!(txt.ca, "463365");
         assert_eq!(txt.st, "0");
         assert_eq!(txt.ic, "/setup/icon.png");
+        assert_eq!(
+            txt.pairs().iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            vec!["ve", "md", "fn", "id", "cd", "ca", "bs", "st", "nf", "ic", "rs", "rm"]
+        );
         // "fn" key is present in the on-wire pairs.
         assert!(txt
             .pairs()
@@ -446,27 +380,21 @@ mod tests {
 
     #[cfg(feature = "mdns")]
     #[test]
-    fn base_and_subtype_service_info_construct_correctly() {
+    fn base_service_info_constructs_correctly() {
         let ad = CastAdvertisement::new(
             "Living Room",
             "Chromecast",
             "12345678-1234-1234-1234-123456789abc",
             8009,
             "ABCDEF",
-            ["95370A1C"],
         );
 
-        let base = service_info(&ad, SERVICE_TYPE).unwrap();
+        let base = service_info(&ad).unwrap();
         assert_eq!(base.get_type(), SERVICE_TYPE);
         assert_eq!(base.get_port(), 8009);
         assert!(base.get_fullname().starts_with("vibecast-"));
         assert_eq!(base.get_property_val_str("md").unwrap(), "Chromecast");
-
-        // Subtype spike: mdns-sd must parse and expose the subtype.
-        let subtype = service_info(&ad, "_95370A1C._sub._googlecast._tcp.local.").unwrap();
-        assert_eq!(
-            subtype.get_subtype().as_deref(),
-            Some("_95370A1C._sub._googlecast._tcp.local.")
-        );
+        // Only the base service is advertised; no DNS-SD subtypes.
+        assert_eq!(base.get_subtype().as_deref(), None);
     }
 }

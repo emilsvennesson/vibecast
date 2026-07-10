@@ -68,6 +68,23 @@ pub struct TxtEntry {
     pub value: String,
 }
 
+/// Discovery facts for one newly started per-player receiver.
+#[derive(uniffi::Record)]
+pub struct PlayerStartedInfo {
+    /// Stable player lifecycle key.
+    pub player_id: String,
+    /// Advertised friendly name.
+    pub name: String,
+    /// DNS-SD service instance name.
+    pub instance_name: String,
+    /// CastV2 TLS port.
+    pub cast_port: u16,
+    /// Eureka HTTP port.
+    pub eureka_http_port: u16,
+    /// Cast TXT record entries.
+    pub txt: Vec<TxtEntry>,
+}
+
 /// Errors starting the receiver, surfaced as typed exceptions to the frontend.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum ReceiverError {
@@ -123,15 +140,7 @@ pub enum CallbackError {
 pub trait ReceiverObserver: Send + Sync {
     /// A player registered and its receiver bound ports; register it for
     /// discovery under `name` (already suffixed `... [vibecast]`).
-    fn on_player_started(
-        &self,
-        player_id: String,
-        name: String,
-        instance_name: String,
-        cast_port: u16,
-        eureka_http_port: u16,
-        txt: Vec<TxtEntry>,
-    ) -> Result<(), CallbackError>;
+    fn on_player_started(&self, started: PlayerStartedInfo) -> Result<(), CallbackError>;
     /// A player's advertised TXT record changed (certificate rotation).
     fn on_player_txt_changed(
         &self,
@@ -151,14 +160,15 @@ struct ForeignObserver {
 
 impl PlayerObserver for ForeignObserver {
     fn on_player_started(&self, started: PlayerStarted) {
-        if let Err(error) = self.inner.on_player_started(
-            started.player_id,
-            started.name,
-            started.instance_name,
-            started.cast_port,
-            started.eureka_http_port,
-            to_txt_entries(started.txt),
-        ) {
+        let started = PlayerStartedInfo {
+            player_id: started.player_id,
+            name: started.name,
+            instance_name: started.instance_name,
+            cast_port: started.cast_port,
+            eureka_http_port: started.eureka_http_port,
+            txt: to_txt_entries(started.txt),
+        };
+        if let Err(error) = self.inner.on_player_started(started) {
             tracing::warn!(%error, "observer.on_player_started failed");
         }
     }
@@ -311,7 +321,10 @@ impl From<PlatformError> for ReceiverError {
             }
             PlatformError::Discovery(_)
             | PlatformError::HttpClient(_)
-            | PlatformError::BridgeStart(_) => ReceiverError::Other { reason: message },
+            | PlatformError::BridgeStart(_)
+            | PlatformError::StateRead { .. }
+            | PlatformError::InvalidInstallationId { .. }
+            | PlatformError::StateWrite { .. } => ReceiverError::Other { reason: message },
         }
     }
 }

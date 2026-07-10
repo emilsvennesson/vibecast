@@ -4,6 +4,7 @@
     reconnectTimer: null,
     activeSessionId: null,
     player: null,
+    playerId: null,
     lastStateKey: "",
     autoplayMuted: false,
   };
@@ -159,6 +160,8 @@
   // ---------------------------------------------------------------------------
 
   function playerId() {
+    if (app.playerId) return app.playerId;
+
     let id = null;
     try {
       id = window.localStorage.getItem("vibecast_player_id");
@@ -176,6 +179,7 @@
         /* storage unavailable: fall back to an ephemeral id */
       }
     }
+    app.playerId = id;
     return id;
   }
 
