@@ -17,6 +17,7 @@ import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import uniffi.vibecast_ffi.PlayerStartedInfo
 import uniffi.vibecast_ffi.ReceiverHandle
 import uniffi.vibecast_ffi.ReceiverObserver
 import uniffi.vibecast_ffi.ServerConfig
@@ -60,11 +61,15 @@ class CastReceiverService :
     // looper (registerPlayer / unregisterPlayer are always posted there).
     private val registrations = HashMap<String, PlayerRegistration>()
 
-    private class PlayerRegistration(
-        val listener: NsdManager.RegistrationListener,
+    private data class PlayerAdvertisement(
         val name: String,
         val instanceName: String,
         val castPort: Int,
+    )
+
+    private class PlayerRegistration(
+        val listener: NsdManager.RegistrationListener,
+        val advertisement: PlayerAdvertisement,
     )
 
     override fun onCreate() {
@@ -134,19 +139,23 @@ class CastReceiverService :
 
     // --- ReceiverObserver: invoked from Rust/Tokio worker threads ---
 
-    override fun onPlayerStarted(
-        playerId: String,
-        name: String,
-        instanceName: String,
-        castPort: UShort,
-        eurekaHttpPort: UShort,
-        txt: List<TxtEntry>,
-    ) {
+    override fun onPlayerStarted(started: PlayerStartedInfo) {
         mainHandler.post {
-            registerPlayer(playerId, name, instanceName, castPort.toInt(), txt)
+            registerPlayer(
+                started.playerId,
+                PlayerAdvertisement(
+                    started.name,
+                    started.instanceName,
+                    started.castPort.toInt(),
+                ),
+                started.txt,
+            )
             refreshRunningState()
         }
-        Log.i(TAG, "player started: $name id=$playerId cast=$castPort")
+        Log.i(
+            TAG,
+            "player started: ${started.name} id=${started.playerId} cast=${started.castPort}",
+        )
     }
 
     override fun onPlayerTxtChanged(
@@ -156,7 +165,7 @@ class CastReceiverService :
         mainHandler.post {
             val existing = registrations[playerId] ?: return@post
             Log.i(TAG, "TXT changed (cert rotation); re-registering NSD for $playerId")
-            registerPlayer(playerId, existing.name, existing.instanceName, existing.castPort, txt)
+            registerPlayer(playerId, existing.advertisement, txt)
         }
     }
 
@@ -174,7 +183,7 @@ class CastReceiverService :
             if (registrations.isEmpty()) {
                 "Waiting for players…"
             } else {
-                val names = registrations.values.joinToString(", ") { it.name }
+                val names = registrations.values.joinToString(", ") { it.advertisement.name }
                 "${registrations.size} player(s): $names"
             }
         ReceiverState.update("Running", detail)
@@ -189,18 +198,16 @@ class CastReceiverService :
 
     private fun registerPlayer(
         playerId: String,
-        name: String,
-        instanceName: String,
-        port: Int,
+        advertisement: PlayerAdvertisement,
         txt: List<TxtEntry>,
     ) {
         // Re-registration (cert rotation): drop the previous registration first.
         unregisterPlayer(playerId)
         val info =
             NsdServiceInfo().apply {
-                serviceName = instanceName
+                serviceName = advertisement.instanceName
                 serviceType = SERVICE_TYPE
-                setPort(port)
+                setPort(advertisement.castPort)
                 txt.forEach { entry -> setAttribute(entry.key, entry.value) }
             }
         val listener =
@@ -229,7 +236,7 @@ class CastReceiverService :
                     Log.e(TAG, "NSD unregistration failed: $errorCode")
                 }
             }
-        registrations[playerId] = PlayerRegistration(listener, name, instanceName, port)
+        registrations[playerId] = PlayerRegistration(listener, advertisement)
         nsdManager.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
     }
 

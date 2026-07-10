@@ -67,10 +67,4 @@ impl AppRegistry {
     pub fn all(&self) -> &[Arc<dyn AppProvider>] {
         &self.all
     }
-
-    /// All handled app ids (for mDNS/discovery advertisement).
-    #[must_use]
-    pub fn app_ids(&self) -> Vec<String> {
-        self.by_id.keys().cloned().collect()
-    }
 }

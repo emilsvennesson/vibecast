@@ -76,7 +76,7 @@ base64 = "0.22"
 
 # HTTP client for app API calls, CRL, and license/manifest proxy fetches
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip", "cookies"] }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v5"] }
 
 # Async stream/sink combinators (sink feature enables SinkExt + Framed::split)
 futures-util = { version = "0.3", features = ["sink"] }

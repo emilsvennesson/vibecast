@@ -74,8 +74,6 @@ pub struct ReceiverParams {
     pub eureka_https_port: u16,
     /// Advertise over mDNS from Rust (desktop `true`; frontend-owned discovery `false`).
     pub advertise_mdns: bool,
-    /// App ids advertised over mDNS (base + app subtypes).
-    pub app_ids: Vec<String>,
 }
 
 /// Errors composing or starting a receiver.
@@ -225,7 +223,6 @@ pub async fn spawn(params: ReceiverParams) -> Result<RunningReceiver, ReceiverEr
         eureka_http_port,
         eureka_https_port,
         advertise_mdns,
-        app_ids,
     } = params;
 
     // Advertisement identity strings, captured before `identity` moves into the hub.
@@ -380,7 +377,6 @@ pub async fn spawn(params: ReceiverParams) -> Result<RunningReceiver, ReceiverEr
         &adv_id,
         cast_port,
         &bundle.cert_digest_md5(),
-        app_ids,
     );
 
     #[cfg(feature = "mdns")]

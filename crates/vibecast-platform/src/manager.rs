@@ -2,10 +2,11 @@
 //!
 //! The [`PlayerManager`] consumes [`PlayerEvent`]s from the shared player bridge
 //! and, for each player that registers, spins up a dedicated Cast receiver with
-//! its own identity (`<name> [vibecast]`), fresh device id, dynamically-assigned
-//! ports, and the player's reported capabilities. When a player disconnects its
-//! receiver is torn down (ephemeral lifecycle). The manager also owns the single
-//! certificate-rotation loop, hot-swapping every live receiver on rotation.
+//! its own identity (`<name> [vibecast]`), stable installation-scoped device id,
+//! dynamically-assigned ports, and the player's reported capabilities. When a
+//! player disconnects its receiver is torn down (ephemeral lifecycle). The
+//! manager also owns the single certificate-rotation loop, hot-swapping every
+//! live receiver on rotation.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -68,7 +69,7 @@ pub(crate) struct EurekaConfig {
 pub(crate) struct ManagerConfig {
     pub bridge: Arc<PlayerBridge>,
     pub registry: AppRegistry,
-    pub discovery_app_ids: Vec<String>,
+    pub installation_id: uuid::Uuid,
     pub http: reqwest::Client,
     pub data_dir: PathBuf,
     pub model: String,
@@ -159,7 +160,7 @@ impl PlayerManager {
             existing.receiver.shutdown().await;
         }
 
-        let device_id = uuid::Uuid::new_v4().to_string();
+        let device_id = player_device_id(&self.config.installation_id, &player_id);
         let friendly_name = format!("{} [vibecast]", registration.name);
         let eureka_identity = self.eureka_identity(&friendly_name, &device_id);
 
@@ -189,7 +190,6 @@ impl PlayerManager {
             eureka_http_port: 0,
             eureka_https_port: 0,
             advertise_mdns: self.config.advertise_mdns,
-            app_ids: self.config.discovery_app_ids.clone(),
         };
 
         let receiver = match spawn_receiver(params).await {
@@ -293,9 +293,33 @@ impl PlayerManager {
     }
 }
 
+fn player_device_id(installation_id: &uuid::Uuid, player_id: &str) -> String {
+    uuid::Uuid::new_v5(installation_id, player_id.as_bytes()).to_string()
+}
+
 fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn player_device_ids_are_stable_and_installation_scoped() {
+        let installation_a = uuid::Uuid::parse_str("8ae23d30-9c4a-4f7b-a0ca-e775e40472bb").unwrap();
+        let installation_b = uuid::Uuid::parse_str("af67ff60-6f9b-4338-bfe2-ae77f13fe615").unwrap();
+
+        let first = player_device_id(&installation_a, "browser-deadbeef");
+        assert_eq!(first, player_device_id(&installation_a, "browser-deadbeef"));
+        assert_ne!(first, player_device_id(&installation_a, "kodi-deadbeef"));
+        assert_ne!(first, player_device_id(&installation_b, "browser-deadbeef"));
+
+        let parsed = uuid::Uuid::parse_str(&first).unwrap();
+        assert_eq!(parsed.get_version(), Some(uuid::Version::Sha1));
+        assert_eq!(parsed.to_string(), first);
+    }
 }
