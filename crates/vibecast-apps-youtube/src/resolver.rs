@@ -818,6 +818,21 @@ fn build_dash_manifest(
         if let Some(container) = group.reps.first().map(|rep| rep.container) {
             group.reps.retain(|rep| rep.container == container);
         }
+        // Representations within one AdaptationSet must be seamlessly
+        // switchable. YouTube AAC ships both HE-AAC (`mp4a.40.5`, 22.05 kHz)
+        // and AAC-LC (`mp4a.40.2`, 44.1 kHz) for a track; mixing object types
+        // and sample rates makes the audio decoder emit static on an ABR
+        // switch. Keep a single codec string — the highest-bitrate
+        // representation's (AAC-LC over HE-AAC), which also preserves the Opus
+        // bitrate ladder (all Opus reps share one codec string).
+        if let Some(codecs) = group
+            .reps
+            .iter()
+            .max_by_key(|rep| rep.bitrate)
+            .map(|rep| rep.codecs)
+        {
+            group.reps.retain(|rep| rep.codecs == codecs);
+        }
         group.reps.sort_by_key(|rep| rep.bitrate);
         // Guard against duplicate `Representation` ids: some clients repeat the
         // same itag for a track (e.g. DRC/non-DRC that collapse into one group).
@@ -1494,6 +1509,51 @@ mod tests {
         .0;
 
         assert!(!mpd.contains("contentType=\"text\""));
+    }
+
+    #[test]
+    fn audio_set_keeps_single_codec_profile_to_avoid_decoder_glitch() {
+        // English shipped as HE-AAC (mp4a.40.5) + AAC-LC (mp4a.40.2) plus a
+        // two-rung Opus ladder. The AAC set must collapse to AAC-LC only (never
+        // mixing object types in one AdaptationSet), while Opus keeps both rungs.
+        let english = serde_json::json!([
+            {
+                "itag": 139, "mimeType": "audio/mp4; codecs=\"mp4a.40.5\"",
+                "url": "https://media.example/en-heaac", "bitrate": 48000,
+                "initRange": {"start": "0", "end": "731"},
+                "indexRange": {"start": "732", "end": "1519"},
+                "audioSampleRate": "22050", "audioChannels": 2,
+                "audioTrack": {"id": "en.4", "displayName": "English", "audioIsDefault": true}
+            },
+            {
+                "itag": 140, "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+                "url": "https://media.example/en-aaclc", "bitrate": 128000,
+                "initRange": {"start": "0", "end": "722"},
+                "indexRange": {"start": "723", "end": "1510"},
+                "audioSampleRate": "44100", "audioChannels": 2,
+                "audioTrack": {"id": "en.4", "displayName": "English", "audioIsDefault": true}
+            }
+        ]);
+        let mut formats: Vec<AdaptiveFormat> = serde_json::from_value(english).unwrap();
+        formats.extend(multilingual_formats());
+
+        let aac = build_dash_manifest(&formats, &[], &caps(&["h264"], &["aac"], &[], (1920, 1080)))
+            .unwrap()
+            .0;
+        assert!(aac.contains("https://media.example/en-aaclc"));
+        assert!(!aac.contains("mp4a.40.5"));
+        assert!(!aac.contains("https://media.example/en-heaac"));
+
+        // With Opus advertised, English resolves to the Opus ladder (both rungs).
+        let opus = build_dash_manifest(
+            &formats,
+            &[],
+            &caps(&["h264"], &["opus"], &[], (1920, 1080)),
+        )
+        .unwrap()
+        .0;
+        assert!(opus.contains("https://media.example/en-opus-high"));
+        assert!(opus.contains("https://media.example/en-opus-low"));
     }
 
     #[test]
