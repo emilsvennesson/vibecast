@@ -8,10 +8,19 @@ use thiserror::Error;
 use url::Url;
 use vibecast_sdk::{MediaImage, PlaybackMedia, PlaybackStream, PlayerCapabilities, StreamType};
 
-const CLIENT_NAME: &str = "ANDROID_VR";
-const CLIENT_VERSION: &str = "1.57";
+// The IOS InnerTube client is used because, unlike ANDROID_VR, it returns the
+// full resolution ladder *and* every alternate/dubbed audio track (each with a
+// plain `url` plus byte ranges, which is what a SegmentBase DASH manifest
+// needs) as well as caption tracks.
+const CLIENT_NAME: &str = "IOS";
+const CLIENT_VERSION: &str = "20.03.02";
 const CLIENT_USER_AGENT: &str =
-    "com.google.android.apps.youtube.vr.oculus/1.57 (Linux; U; Android 12L; en_US)";
+    "com.google.ios.youtube/20.03.02 (iPhone16,2; U; CPU iOS 18_2_1 like Mac OS X;)";
+const CLIENT_NAME_HEADER: &str = "5";
+const DEVICE_MAKE: &str = "Apple";
+const DEVICE_MODEL: &str = "iPhone16,2";
+const OS_NAME: &str = "iPhone";
+const OS_VERSION: &str = "18.2.1.22C161";
 
 #[derive(Clone)]
 pub(crate) struct Resolver {
@@ -84,6 +93,8 @@ impl Resolver {
             .http
             .post(player_url)
             .header("User-Agent", CLIENT_USER_AGENT)
+            .header("X-YouTube-Client-Name", CLIENT_NAME_HEADER)
+            .header("X-YouTube-Client-Version", CLIENT_VERSION)
             .json(&PlayerRequest::new(video_id, visitor_data.as_deref()))
             .send()
             .await?
@@ -139,10 +150,14 @@ impl<'a> PlayerRequest<'a> {
                 client: ClientContext {
                     client_name: CLIENT_NAME,
                     client_version: CLIENT_VERSION,
+                    device_make: DEVICE_MAKE,
+                    device_model: DEVICE_MODEL,
+                    os_name: OS_NAME,
+                    os_version: OS_VERSION,
+                    user_agent: CLIENT_USER_AGENT,
                     visitor_data,
                     hl: "en",
                     gl: "US",
-                    android_sdk_version: 32,
                 },
             },
         }
@@ -160,12 +175,20 @@ struct ClientContext<'a> {
     client_name: &'static str,
     #[serde(rename = "clientVersion")]
     client_version: &'static str,
+    #[serde(rename = "deviceMake")]
+    device_make: &'static str,
+    #[serde(rename = "deviceModel")]
+    device_model: &'static str,
+    #[serde(rename = "osName")]
+    os_name: &'static str,
+    #[serde(rename = "osVersion")]
+    os_version: &'static str,
+    #[serde(rename = "userAgent")]
+    user_agent: &'static str,
     #[serde(rename = "visitorData", skip_serializing_if = "Option::is_none")]
     visitor_data: Option<&'a str>,
     hl: &'static str,
     gl: &'static str,
-    #[serde(rename = "androidSdkVersion")]
-    android_sdk_version: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -192,9 +215,9 @@ struct StreamingData {
     adaptive_formats: Vec<AdaptiveFormat>,
 }
 
-/// One adaptive (video-only or audio-only) rendition. ANDROID_VR returns plain
-/// `url`s plus byte ranges, which is exactly what a DASH `SegmentBase` manifest
-/// needs.
+/// One adaptive (video-only or audio-only) rendition. The IOS client returns
+/// plain `url`s plus byte ranges, which is exactly what a DASH `SegmentBase`
+/// manifest needs.
 #[derive(Debug, Deserialize)]
 struct AdaptiveFormat {
     itag: Option<u32>,
@@ -565,6 +588,7 @@ impl<'a> AudioRep<'a> {
             .filter(|kind| *kind != AudioKind::Unspecified)
             .or_else(|| track.map(|track| AudioKind::from_label(&track.display_name)))
             .unwrap_or(AudioKind::Unspecified);
+        let is_drc = format.is_drc || tag_value(&tags, "drc") == Some("1");
         let mut label = track
             .map(|track| track.display_name.trim())
             .unwrap_or("")
@@ -572,7 +596,7 @@ impl<'a> AudioRep<'a> {
         if label.is_empty() {
             label = language.clone();
         }
-        if format.is_drc {
+        if is_drc {
             label.push_str(" (DRC)");
         }
 
@@ -592,7 +616,7 @@ impl<'a> AudioRep<'a> {
             label,
             kind,
             is_default: track.is_some_and(|track| track.audio_is_default),
-            is_drc: format.is_drc,
+            is_drc,
         })
     }
 }
@@ -795,6 +819,10 @@ fn build_dash_manifest(
             group.reps.retain(|rep| rep.container == container);
         }
         group.reps.sort_by_key(|rep| rep.bitrate);
+        // Guard against duplicate `Representation` ids: some clients repeat the
+        // same itag for a track (e.g. DRC/non-DRC that collapse into one group).
+        let mut seen_itags = std::collections::HashSet::new();
+        group.reps.retain(|rep| seen_itags.insert(rep.itag));
     }
     audio_groups.retain(|group| !group.reps.is_empty());
     let main_audio = audio_groups
@@ -1466,6 +1494,21 @@ mod tests {
         .0;
 
         assert!(!mpd.contains("contentType=\"text\""));
+    }
+
+    #[test]
+    fn decodes_real_ios_audio_xtags() {
+        // Captured from the IOS InnerTube client (base64url, no padding).
+        let dubbed = decode_xtags(Some("Cg8KBWFjb250EgZkdWJiZWQKCgoEbGFuZxICamE"));
+        assert_eq!(tag_value(&dubbed, "acont"), Some("dubbed"));
+        assert_eq!(tag_value(&dubbed, "lang"), Some("ja"));
+
+        let original_drc = decode_xtags(Some(
+            "ChEKBWFjb250EghvcmlnaW5hbAoICgNkcmMSATEKCgoEbGFuZxICZW4",
+        ));
+        assert_eq!(tag_value(&original_drc, "acont"), Some("original"));
+        assert_eq!(tag_value(&original_drc, "drc"), Some("1"));
+        assert_eq!(tag_value(&original_drc, "lang"), Some("en"));
     }
 
     #[tokio::test]
