@@ -12,6 +12,10 @@ scripts/
 capture_*.jsonl
 *.log
 
+# `vibecast capture` session output (cast/http JSONL, meta.json, session CA)
+captures/
+capture_proxy_device_id
+
 # Certificates / secrets — never commit
 *.pem
 *.key

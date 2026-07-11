@@ -15,6 +15,9 @@ path = "src/main.rs"
 [dependencies]
 # Desktop advertises each receiver over mDNS from Rust (enables `mdns-sd`).
 vibecast-platform = { path = "../vibecast-platform", features = ["mdns"] }
+# Developer capture proxy (the `vibecast capture` subcommand). Desktop-only —
+# the Android/iOS FFI binding never links it.
+vibecast-capture = { path = "../vibecast-capture" }
 
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 clap = { workspace = true }
