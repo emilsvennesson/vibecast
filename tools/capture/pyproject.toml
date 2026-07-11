@@ -1,0 +1,16 @@
+[project]
+name = "vibecast-capture"
+version = "0.1.0"
+description = "Developer capture tool: a Cast MITM proxy (built on the vibecast primitives FFI) plus mitmproxy HTTP/HTTPS capture over WireGuard, for reverse-engineering Cast apps."
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "mitmproxy>=11",
+]
+
+# This is a standalone dev tool, not part of the Rust build and not a published
+# package. Run it with `uv run capture.py ...` (see README.md). The vibecast
+# primitives bindings are generated locally into ./generated (git-ignored) from
+# the `vibecast-primitives-ffi` cdylib; capture.py adds that dir to sys.path.
+[tool.uv]
+package = false

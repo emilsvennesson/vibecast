@@ -21,28 +21,28 @@ use vibecast_platform::{Config, PlatformInputs};
 struct Args {
     /// Certificate manifest path (overrides `[device].certs`; relative paths
     /// resolve from the data dir).
-    #[arg(long)]
+    #[arg(long, global = true)]
     certs: Option<PathBuf>,
 
     /// Data directory holding `config.toml` and receiver state
     /// (default: `$HOME/.vibecast`).
-    #[arg(long)]
+    #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
 
     /// Override the configured device model (reported by every player's receiver).
-    #[arg(long)]
+    #[arg(long, global = true)]
     model: Option<String>,
 
     /// Override the configured bind host.
-    #[arg(long)]
+    #[arg(long, global = true)]
     bind_host: Option<String>,
 
     /// Override the player-bridge port (players connect here to register).
-    #[arg(long)]
+    #[arg(long, global = true)]
     player_port: Option<u16>,
 
     /// Log level (`trace|debug|info|warn|error`); overrides `RUST_LOG`.
-    #[arg(long)]
+    #[arg(long, global = true)]
     log_level: Option<String>,
 }
 
@@ -51,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     init_tracing(args.log_level.as_deref());
     vibecast_platform::install_default_crypto_provider();
+
     run(args).await
 }
 

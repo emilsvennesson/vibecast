@@ -1,0 +1,12 @@
+[project]
+name = "castreg"
+version = "0.1.0"
+description = "Query Google's Cast application registry: resolve a Cast appId to its name, web-receiver URL, and features."
+readme = "README.md"
+requires-python = ">=3.10"
+# Standard library only — no dependencies. Run `python3 castreg.py ...` directly,
+# or `uv run castreg.py ...`.
+dependencies = []
+
+[tool.uv]
+package = false

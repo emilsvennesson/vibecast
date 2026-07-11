@@ -20,6 +20,7 @@ members = [
     "crates/vibecast-platform",
     "crates/vibecast-cli",
     "crates/vibecast-ffi",
+    "crates/vibecast-primitives-ffi",
     "crates/uniffi-bindgen",
 ]
 

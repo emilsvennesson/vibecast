@@ -1,0 +1,27 @@
+[package]
+name = "vibecast-primitives-ffi"
+description = "UniFFI facade exposing vibecast's reusable Google Cast building blocks (device auth, framing, payload decode, mDNS) to foreign languages"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "vibecast_primitives_ffi"
+# cdylib: the .dylib/.so foreign bindings load. lib: unit tests + workspace reuse.
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+# EXTRACTABLE Google Cast layer ONLY. This facade must never depend on anything
+# above it (no platform/receiver/core/bridge/apps/sdk), so it can move with the
+# Cast layer if that is ever split into a standalone crate.
+vibecast-proto = { path = "../vibecast-proto" }
+vibecast-security = { path = "../vibecast-security" }
+vibecast-discovery = { path = "../vibecast-discovery", features = ["mdns"] }
+
+uniffi = { workspace = true }
+prost = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

@@ -94,7 +94,7 @@ the Android TV frontend.
 
 ## Workspace layout
 
-Cargo workspace of 18 focused crates under `crates/`. Layering is strict:
+Cargo workspace of 19 focused crates under `crates/`. Layering is strict:
 
 ```
 vibecast-proto        CastV2 protobuf + length-prefixed framing          (leaf)
@@ -110,9 +110,20 @@ vibecast-core         Receiver runtime: device hub + coordinator         (cast, 
 vibecast-receiver     Generic per-receiver composition (reusable)        (cast, core, discovery, security, player-api, sdk)
 vibecast-platform     Compose + per-player orchestrator + Config         (receiver, bridge, core, apps, …)
 vibecast-cli          Desktop binding: args + Ctrl-C lifecycle           (platform)
-vibecast-ffi          cdylib + UniFFI facade (Kotlin/Swift/…)            (platform)
+vibecast-ffi          cdylib + UniFFI facade for the receiver (Kotlin/Swift/…) (platform)
+vibecast-primitives-ffi  cdylib + UniFFI facade for the Cast building blocks (proto, security, discovery)
 uniffi-bindgen        Version-locked uniffi-bindgen CLI (dev tool)       (uniffi[cli])
 ```
+
+Two UniFFI facades sit over the workspace, each a thin, purpose-shaped view —
+`vibecast-ffi` exposes the *receiver* (over `vibecast-platform`) for the
+Android/iOS frontends; `vibecast-primitives-ffi` exposes the reusable *Google
+Cast building blocks* (`CertBundle`/device-auth reply, frame parse/serialize,
+payload decode, `CastAdvertiser`) to foreign languages. The primitives facade
+depends **only on the extractable Cast layer** (`proto`/`security`/`discovery`,
+never platform/receiver/apps/bridge) so it can move with that layer if the Cast
+implementation is ever split into a standalone crate. Its first consumer is the
+`tools/capture/` dev tool (see below).
 
 `vibecast-core` does **not** depend on `vibecast-bridge`: the `Player` command
 sink and `ProxyRegistrar` proxy seams live in `vibecast-player-api`, so the
@@ -241,6 +252,25 @@ name, capabilities}`) as its first message — its name defaults to `Kodi`
 **Player** settings; auto-detected by default) — and vibecast advertises it as
 `Kodi [vibecast]`. The embedded browser player (`crates/vibecast-bridge/assets/
 player.js`) registers the same way.
+
+## Capture dev tool
+
+`tools/capture/` is a **standalone** [uv](https://docs.astral.sh/uv/)-managed
+Python tool for reverse-engineering Cast apps. It is **not** part of the vibecast
+binary and adds no Python to the Rust build. It builds a Cast MITM proxy purely
+from `vibecast-primitives-ffi`'s generated Python bindings (`CertBundle`,
+`try_parse_frame`/`serialize_frame`, `decode_payload_json`, `CastAdvertiser`) —
+no protocol is re-implemented — and runs [mitmproxy](https://mitmproxy.org) as a
+library in WireGuard mode for the receiver's decrypted HTTP/HTTPS egress. It logs
+`cast.jsonl` + `http.jsonl` (merge by `ts`).
+
+Setup + usage live in `tools/capture/README.md`. Regenerate the bindings after
+changing the FFI: `tools/capture/regenerate-bindings.sh` (writes the git-ignored
+`generated/`). The tool is **read-only toward the device**: the WireGuard tunnel
+that routes egress to mitmproxy is enabled by the operator in the WireGuard app;
+the tool never toggles it (it only prints the requirement + a status hint). The
+mitmproxy CA must be trusted in the device's **system** store, and the tunnel's
+`AllowedIPs` must exclude the LAN so CastV2 + mDNS stay local.
 
 ## Known limitations
 

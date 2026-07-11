@@ -3380,6 +3380,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "vibecast-primitives-ffi"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uniffi",
+ "vibecast-discovery",
+ "vibecast-proto",
+ "vibecast-security",
+]
+
+[[package]]
 name = "vibecast-proto"
 version = "0.1.0"
 dependencies = [
