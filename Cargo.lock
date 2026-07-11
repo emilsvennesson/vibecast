@@ -1996,7 +1996,6 @@ dependencies = [
  "ring",
  "rustls-pki-types",
  "time",
- "x509-parser",
  "yasna",
 ]
 
@@ -2040,7 +2039,6 @@ dependencies = [
  "cookie",
  "cookie_store",
  "futures-core",
- "futures-util",
  "http",
  "http-body",
  "http-body-util",
@@ -2060,14 +2058,12 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
- "tokio-util",
  "tower",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm-streams",
  "web-sys",
  "webpki-roots",
 ]
@@ -3242,33 +3238,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vibecast-capture"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "futures-util",
- "http",
- "http-body-util",
- "hyper",
- "hyper-util",
- "prost",
- "rcgen",
- "reqwest",
- "rustls",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "tracing",
- "vibecast-discovery",
- "vibecast-proto",
- "vibecast-security",
-]
-
-[[package]]
 name = "vibecast-cast"
 version = "0.1.0"
 dependencies = [
@@ -3297,7 +3266,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "vibecast-capture",
  "vibecast-platform",
 ]
 
@@ -3409,6 +3377,19 @@ dependencies = [
  "url",
  "vibecast-messages",
  "xot",
+]
+
+[[package]]
+name = "vibecast-primitives-ffi"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uniffi",
+ "vibecast-discovery",
+ "vibecast-proto",
+ "vibecast-security",
 ]
 
 [[package]]
@@ -3562,19 +3543,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc1b4cb0cc549fcf58d7dfc081778139b3d283a081644e833e84682ad71cea24"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "wasm-streams"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
-dependencies = [
- "futures-util",
- "js-sys",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
 ]
 
 [[package]]
@@ -3768,7 +3736,6 @@ dependencies = [
  "lazy_static",
  "nom",
  "oid-registry",
- "ring",
  "rusticata-macros",
  "thiserror 1.0.69",
  "time",

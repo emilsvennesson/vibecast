@@ -20,7 +20,7 @@ members = [
     "crates/vibecast-platform",
     "crates/vibecast-cli",
     "crates/vibecast-ffi",
-    "crates/vibecast-capture",
+    "crates/vibecast-primitives-ffi",
     "crates/uniffi-bindgen",
 ]
 
@@ -57,12 +57,6 @@ hex = "0.4"
 # Shared HTTP types (HeaderMap/HeaderName/HeaderValue) used on proxy boundaries;
 # unifies with axum + reqwest header types (all built on the `http` crate).
 http = "1"
-
-# Low-level HTTP server/body plumbing for the capture MITM (vibecast-capture).
-# Already in the tree via axum/reqwest, so no new advisory surface.
-hyper = { version = "1", features = ["server", "http1", "http2"] }
-hyper-util = { version = "0.1", features = ["server", "server-auto", "tokio"] }
-http-body-util = "0.1"
 
 # Discovery: mDNS advertisement + eureka HTTP/HTTPS
 mdns-sd = "0.20"

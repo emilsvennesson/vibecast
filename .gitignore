@@ -12,9 +12,11 @@ scripts/
 capture_*.jsonl
 *.log
 
-# `vibecast capture` session output (cast/http JSONL, meta.json, session CA)
-captures/
-capture_proxy_device_id
+# Dev tools under tools/: uv venvs; capture's generated UniFFI bindings + cdylib
+# and per-session output (cast/http JSONL, meta.json).
+tools/*/.venv/
+tools/capture/generated/
+tools/capture/captures/
 
 # Certificates / secrets — never commit
 *.pem
@@ -24,7 +26,7 @@ certs/
 # nextest CI artifact
 junit.xml
 
-# Python (only the Kodi add-on at kodi/service.vibecast/ is Python)
+# Python (the Kodi add-on at kodi/service.vibecast/ and the tools/capture/ dev tool)
 __pycache__/
 *.py[cod]
 
