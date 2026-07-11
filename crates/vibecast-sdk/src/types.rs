@@ -39,15 +39,73 @@ impl DrmInfo {
     }
 }
 
+/// Where a stream's manifest/media bytes come from.
+///
+/// Most apps point at a [`Url`](StreamSource::Url) the proxy fetches (and, for
+/// DASH/HLS, normalizes). Apps that construct a manifest themselves (e.g.
+/// YouTube synthesizing a DASH MPD from adaptive formats) return an
+/// [`InlineManifest`](StreamSource::InlineManifest) body, which the bridge
+/// serves verbatim from the session manifest route — so any player (browser
+/// Shaka, Kodi InputStream Adaptive, …) consumes it as an ordinary proxied
+/// manifest URL. Segment/media URLs inside an inline manifest must be absolute.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamSource {
+    /// Fetch (and normalize, for DASH/HLS) the manifest/media from this URL.
+    Url(String),
+    /// Serve this app-generated manifest body directly. The `content_type`
+    /// on the owning [`PlaybackStream`] selects the manifest kind.
+    InlineManifest(String),
+}
+
+impl StreamSource {
+    /// The fetch URL if this is a [`Url`](StreamSource::Url) source.
+    #[must_use]
+    pub fn as_url(&self) -> Option<&str> {
+        match self {
+            StreamSource::Url(url) => Some(url),
+            StreamSource::InlineManifest(_) => None,
+        }
+    }
+}
+
 /// A single playable stream candidate with optional DRM.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaybackStream {
-    /// Manifest / media URL.
-    pub url: String,
+    /// Where the stream's manifest/media bytes come from.
+    pub source: StreamSource,
     /// MIME type.
     pub content_type: String,
     /// DRM configuration, if the stream is protected.
     pub drm: Option<DrmInfo>,
+}
+
+impl PlaybackStream {
+    /// A clear stream the proxy fetches from `url`.
+    #[must_use]
+    pub fn url(url: impl Into<String>, content_type: impl Into<String>) -> Self {
+        Self {
+            source: StreamSource::Url(url.into()),
+            content_type: content_type.into(),
+            drm: None,
+        }
+    }
+
+    /// A clear stream served from an app-generated manifest `body`.
+    #[must_use]
+    pub fn inline_manifest(body: impl Into<String>, content_type: impl Into<String>) -> Self {
+        Self {
+            source: StreamSource::InlineManifest(body.into()),
+            content_type: content_type.into(),
+            drm: None,
+        }
+    }
+
+    /// Attach DRM configuration to this stream.
+    #[must_use]
+    pub fn with_drm(mut self, drm: DrmInfo) -> Self {
+        self.drm = Some(drm);
+        self
+    }
 }
 
 /// Canonical media description returned by an app's `resolve_media`.

@@ -8,6 +8,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::capabilities::PlayerCapabilities;
+use crate::types::PlaybackMedia;
 
 /// Sends custom-namespace messages on behalf of an app callback.
 ///
@@ -29,6 +30,33 @@ pub struct NoopSenderChannel;
 impl SenderChannel for NoopSenderChannel {
     async fn send_custom(&self, _namespace: &str, _data: Value) {}
     async fn broadcast_custom(&self, _namespace: &str, _data: Value) {}
+}
+
+/// Drives playback when an app receives commands outside the Cast media
+/// namespace, as YouTube does through its Lounge connection.
+#[async_trait]
+pub trait PlaybackController: Send + Sync {
+    /// Replace the current media and start loading it.
+    async fn load(&self, media: PlaybackMedia);
+    /// Resume playback.
+    async fn play(&self);
+    /// Pause playback.
+    async fn pause(&self);
+    /// Seek to a position in seconds.
+    async fn seek(&self, position: f64);
+    /// Stop playback and clear the current media.
+    async fn stop(&self);
+}
+
+struct NoopPlaybackController;
+
+#[async_trait]
+impl PlaybackController for NoopPlaybackController {
+    async fn load(&self, _media: PlaybackMedia) {}
+    async fn play(&self) {}
+    async fn pause(&self) {}
+    async fn seek(&self, _position: f64) {}
+    async fn stop(&self) {}
 }
 
 /// Receiver metadata made available to app sessions.
@@ -85,6 +113,7 @@ pub struct AppContext {
     /// Receiver metadata.
     pub receiver: ReceiverContext,
     sender: Arc<dyn SenderChannel>,
+    playback: Arc<dyn PlaybackController>,
 }
 
 impl AppContext {
@@ -105,7 +134,21 @@ impl AppContext {
             http,
             receiver,
             sender,
+            playback: Arc::new(NoopPlaybackController),
         }
+    }
+
+    /// Bind this context to a live playback controller.
+    #[must_use]
+    pub fn with_playback_controller(mut self, playback: Arc<dyn PlaybackController>) -> Self {
+        self.playback = playback;
+        self
+    }
+
+    /// Clone the controller used for app-driven playback commands.
+    #[must_use]
+    pub fn playback_controller(&self) -> Arc<dyn PlaybackController> {
+        self.playback.clone()
     }
 
     /// Send a custom-namespace message to the sender associated with this

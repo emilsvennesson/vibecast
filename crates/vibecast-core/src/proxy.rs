@@ -26,7 +26,7 @@ use vibecast_player_api::{
 };
 use vibecast_sdk::{
     AppContext, AppSession, DrmSystem, LicenseForwarder, LicenseRequest, LicenseResponse,
-    LicenseRoute as SdkLicenseRoute, PlaybackMedia,
+    LicenseRoute as SdkLicenseRoute, PlaybackMedia, PlaybackStream, StreamSource,
 };
 
 /// A resolved DRM license target.
@@ -36,11 +36,19 @@ pub(crate) struct LicenseRoute {
     pub headers: HeaderMap,
 }
 
+/// Where a proxied manifest's bytes come from.
+pub(crate) enum ManifestSource {
+    /// Fetch (and normalize) the manifest from this upstream URL.
+    Upstream(String),
+    /// Serve these app-generated manifest bytes verbatim (already absolute).
+    Inline(Vec<u8>),
+}
+
 /// A resolved manifest target.
 pub(crate) struct ManifestRoute {
     pub kind: ManifestKind,
-    pub upstream_url: String,
     pub content_type: String,
+    pub source: ManifestSource,
 }
 
 /// Session-scoped proxy handler backing the bridge's license/manifest routes.
@@ -149,23 +157,39 @@ impl ManifestHandler for SessionProxy {
             return Ok(error_manifest(404, "unknown manifest route"));
         };
 
-        let headers = filter_upstream_headers(&request.headers);
         let is_head = request.method == http::Method::HEAD;
+
+        // An app-generated manifest is served verbatim (segment URLs are already
+        // absolute, so no normalization or upstream fetch is needed).
+        let upstream_url = match &route.source {
+            ManifestSource::Inline(body) => {
+                let content_type = if route.content_type.is_empty() {
+                    default_manifest_content_type(route.kind).to_string()
+                } else {
+                    route.content_type.clone()
+                };
+                return Ok(ManifestProxyResponse {
+                    body: if is_head { Vec::new() } else { body.clone() },
+                    content_type,
+                    status: 200,
+                    headers: HeaderMap::new(),
+                });
+            }
+            ManifestSource::Upstream(url) => url,
+        };
+
+        let headers = filter_upstream_headers(&request.headers);
         let method = if is_head {
             reqwest::Method::HEAD
         } else {
             reqwest::Method::GET
         };
 
-        let builder = self
-            .ctx
-            .http
-            .request(method, &route.upstream_url)
-            .headers(headers);
+        let builder = self.ctx.http.request(method, upstream_url).headers(headers);
         let response = match builder.send().await {
             Ok(response) => response,
             Err(error) => {
-                tracing::warn!(%error, route = %route.upstream_url, "manifest fetch failed");
+                tracing::warn!(%error, route = %upstream_url, "manifest fetch failed");
                 return Ok(error_manifest(502, "manifest request failed"));
             }
         };
@@ -203,7 +227,7 @@ impl ManifestHandler for SessionProxy {
         };
         if status < 400 {
             let (normalized, resolved_content_type) =
-                normalize_manifest_bytes(&body, &route.upstream_url, Some(&content_type));
+                normalize_manifest_bytes(&body, upstream_url, Some(&content_type));
             body = normalized;
             content_type = resolved_content_type;
         }
@@ -317,6 +341,25 @@ fn drm_headers(map: &HashMap<String, String>) -> HeaderMap {
     headers
 }
 
+/// The manifest kind to proxy this stream as, or `None` when it is not a
+/// manifest (a plain [`StreamSource::Url`] with an unknown kind — e.g. a
+/// progressive MP4 — reaches the player directly). Inline manifests are always
+/// proxied, classified by their `content_type`.
+///
+/// `collect_routes` and `rewrite_streams` must agree on this so the registered
+/// routes and the rewritten URLs line up.
+fn manifest_kind_for(stream: &PlaybackStream) -> Option<ManifestKind> {
+    match &stream.source {
+        StreamSource::Url(url) => {
+            let kind = infer_manifest_kind(Some(&stream.content_type), url);
+            (kind != ManifestKind::Unknown).then_some(kind)
+        }
+        StreamSource::InlineManifest(_) => {
+            Some(infer_manifest_kind(Some(&stream.content_type), ""))
+        }
+    }
+}
+
 /// Collect proxy route maps from the resolved media streams.
 pub(crate) fn collect_routes(
     media: &PlaybackMedia,
@@ -327,14 +370,19 @@ pub(crate) fn collect_routes(
     let mut manifest_routes = HashMap::new();
     let mut license_routes = HashMap::new();
     for (index, stream) in media.streams.iter().enumerate() {
-        let kind = infer_manifest_kind(Some(&stream.content_type), &stream.url);
-        if kind != ManifestKind::Unknown {
+        if let Some(kind) = manifest_kind_for(stream) {
+            let source = match &stream.source {
+                StreamSource::Url(url) => ManifestSource::Upstream(url.clone()),
+                StreamSource::InlineManifest(body) => {
+                    ManifestSource::Inline(body.clone().into_bytes())
+                }
+            };
             manifest_routes.insert(
                 RouteId::manifest(index),
                 ManifestRoute {
                     kind,
-                    upstream_url: stream.url.clone(),
                     content_type: stream.content_type.clone(),
+                    source,
                 },
             );
         }
@@ -367,15 +415,12 @@ pub(crate) fn rewrite_streams(
     media_session_id: i64,
 ) {
     for (index, stream) in media.streams.iter_mut().enumerate() {
-        let kind = infer_manifest_kind(Some(&stream.content_type), &stream.url);
-        if kind != ManifestKind::Unknown {
-            if let Some(base) = manifest_base {
-                stream.url = format!(
-                    "{base}/{route}{}?v={media_session_id}",
-                    manifest_route_suffix(kind),
-                    route = RouteId::manifest(index),
-                );
-            }
+        if let (Some(kind), Some(base)) = (manifest_kind_for(stream), manifest_base) {
+            stream.source = StreamSource::Url(format!(
+                "{base}/{route}{}?v={media_session_id}",
+                manifest_route_suffix(kind),
+                route = RouteId::manifest(index),
+            ));
         }
         if let Some(drm) = &mut stream.drm {
             if let Some(base) = license_base {
@@ -393,7 +438,13 @@ pub(crate) fn to_payload(media: &PlaybackMedia) -> PlaybackMediaPayload {
             .streams
             .iter()
             .map(|stream| PlaybackStreamPayload {
-                url: stream.url.clone(),
+                // Proxied streams are rewritten to `Url` before this point; an
+                // inline manifest that reached here unrewritten (no proxy base)
+                // has no player-facing URL, so it is dropped to an empty string.
+                url: match &stream.source {
+                    StreamSource::Url(url) => url.clone(),
+                    StreamSource::InlineManifest(_) => String::new(),
+                },
                 content_type: stream.content_type.clone(),
                 drm: stream.drm.as_ref().map(|drm| DrmPayload {
                     system: match drm.system {
@@ -418,5 +469,112 @@ pub(crate) fn to_payload(media: &PlaybackMedia) -> PlaybackMediaPayload {
             .custom_data
             .clone()
             .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use vibecast_player_api::ManifestHandler;
+    use vibecast_sdk::{
+        LoadRequest, MediaResolveError, NoopSenderChannel, ReceiverContext, StreamType,
+    };
+
+    fn inline_media() -> PlaybackMedia {
+        PlaybackMedia::new(
+            "sess",
+            vec![PlaybackStream::inline_manifest(
+                "<MPD>body</MPD>",
+                "application/dash+xml",
+            )],
+            StreamType::Buffered,
+        )
+    }
+
+    #[test]
+    fn inline_stream_registers_inline_manifest_route() {
+        let (manifest_routes, license_routes) = collect_routes(&inline_media());
+        assert!(license_routes.is_empty());
+        let route = manifest_routes
+            .get(&RouteId::manifest(0))
+            .expect("inline stream should register a manifest route");
+        assert!(matches!(route.kind, ManifestKind::Dash));
+        assert!(
+            matches!(&route.source, ManifestSource::Inline(body) if body == b"<MPD>body</MPD>")
+        );
+    }
+
+    #[test]
+    fn rewrite_and_payload_expose_the_proxy_url_for_inline() {
+        let mut media = inline_media();
+        rewrite_streams(&mut media, Some("http://proxy/manifest/sess"), None, 7);
+        assert_eq!(
+            media.streams[0].source.as_url(),
+            Some("http://proxy/manifest/sess/m0.mpd?v=7")
+        );
+        assert_eq!(
+            to_payload(&media).streams[0].url,
+            "http://proxy/manifest/sess/m0.mpd?v=7"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_manifest_serves_inline_body_without_upstream_fetch() {
+        struct NullSession;
+        #[async_trait]
+        impl AppSession for NullSession {
+            async fn resolve_media(
+                &self,
+                _ctx: &AppContext,
+                _request: &LoadRequest,
+            ) -> Result<PlaybackMedia, MediaResolveError> {
+                unreachable!("the inline manifest path never resolves media")
+            }
+        }
+
+        let ctx = AppContext::new(
+            "sess",
+            "transport",
+            "APP",
+            reqwest::Client::new(),
+            ReceiverContext::new("vibecast", "Model", "dev", PathBuf::new()),
+            Arc::new(NoopSenderChannel),
+        );
+        let mut manifest_routes = HashMap::new();
+        manifest_routes.insert(
+            RouteId::manifest(0),
+            ManifestRoute {
+                kind: ManifestKind::Dash,
+                content_type: "application/dash+xml".to_string(),
+                source: ManifestSource::Inline(b"<MPD>inline</MPD>".to_vec()),
+            },
+        );
+        let proxy = SessionProxy::new(Arc::new(NullSession), ctx, manifest_routes, HashMap::new());
+
+        let get = proxy
+            .handle_manifest(ManifestProxyRequest {
+                session_id: "sess".into(),
+                route_id: RouteId::manifest(0),
+                method: http::Method::GET,
+                headers: HeaderMap::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(get.status, 200);
+        assert_eq!(get.content_type, "application/dash+xml");
+        assert_eq!(get.body, b"<MPD>inline</MPD>");
+
+        let head = proxy
+            .handle_manifest(ManifestProxyRequest {
+                session_id: "sess".into(),
+                route_id: RouteId::manifest(0),
+                method: http::Method::HEAD,
+                headers: HeaderMap::new(),
+            })
+            .await
+            .unwrap();
+        assert!(head.body.is_empty());
+        assert_eq!(head.content_type, "application/dash+xml");
     }
 }

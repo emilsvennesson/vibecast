@@ -89,11 +89,14 @@ mod types;
 
 pub use capabilities::{DrmCapability, DrmSecurityLevel, Platform, PlayerCapabilities, Resolution};
 pub use config::{AppConfig, AppConfigError};
-pub use context::{AppContext, NoopSenderChannel, ReceiverContext, SenderChannel};
+pub use context::{
+    AppContext, NoopSenderChannel, PlaybackController, ReceiverContext, SenderChannel,
+};
 pub use error::{LaunchError, MediaResolveCode, MediaResolveError};
 pub use license::{LicenseForwarder, LicenseRequest, LicenseResponse, LicenseRoute};
 pub use types::{
     DrmInfo, DrmSystem, LaunchCredentials, PlaybackMedia, PlaybackState, PlaybackStream,
+    StreamSource,
 };
 
 // Re-export the Cast protocol types apps need so they depend on this crate only.

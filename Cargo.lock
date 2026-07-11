@@ -3218,6 +3218,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "vibecast-apps-youtube"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "prost",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+ "vibecast-sdk",
+ "wiremock",
+]
+
+[[package]]
 name = "vibecast-bridge"
 version = "0.1.0"
 dependencies = [
@@ -3354,6 +3373,7 @@ dependencies = [
  "vibecast-apps-svtplay",
  "vibecast-apps-tv4play",
  "vibecast-apps-viaplay",
+ "vibecast-apps-youtube",
  "vibecast-bridge",
  "vibecast-cast",
  "vibecast-core",

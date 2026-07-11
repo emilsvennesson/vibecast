@@ -22,7 +22,8 @@ use tokio_util::task::TaskTracker;
 use vibecast_sdk::{
     normalize_stream_type, AppContext, AppProvider, AppSession, DrmInfo, DrmSystem,
     LaunchCredentials, LaunchError, LoadRequest, MediaResolveCode, MediaResolveError,
-    MessageDisposition, PlaybackMedia, PlaybackState, PlaybackStream, PlayerState, StreamType,
+    MessageDisposition, PlaybackMedia, PlaybackState, PlaybackStream, PlayerState, StreamSource,
+    StreamType,
 };
 
 use crate::api::{DeviceAuthInfo, SessionCheckResult, SetupParams, ViaplayApi, ViaplayError};
@@ -276,7 +277,7 @@ impl AppSession for ViaplaySession {
         let mut add_stream = |url: &str| {
             if !url.is_empty() && seen_urls.insert(url.to_string()) {
                 streams.push(PlaybackStream {
-                    url: url.to_string(),
+                    source: StreamSource::Url(url.to_string()),
                     content_type: stream_info.content_type.clone(),
                     drm: drm.clone(),
                 });
@@ -1070,7 +1071,10 @@ mod tests {
         assert_eq!(media.session_id, "sess-1");
         assert_eq!(media.stream_type, StreamType::Live);
         assert_eq!(media.streams.len(), 1);
-        assert_eq!(media.streams[0].url, "https://cdn.example.com/manifest.mpd");
+        assert_eq!(
+            media.streams[0].source.as_url(),
+            Some("https://cdn.example.com/manifest.mpd")
+        );
         assert_eq!(media.streams[0].content_type, "application/dash+xml");
         assert_eq!(media.duration, Some(3600.0));
         assert_eq!(media.title.as_deref(), Some("Live Match"));

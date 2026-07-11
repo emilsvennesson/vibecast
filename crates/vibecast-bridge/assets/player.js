@@ -16,6 +16,13 @@
   const subtitleEl = document.getElementById("subtitle");
   const logEl = document.getElementById("log");
   const videoEl = document.getElementById("video");
+  const trackControlsEl = document.getElementById("track-controls");
+  const qualityControlEl = document.getElementById("quality-control");
+  const qualitySelectEl = document.getElementById("quality-select");
+  const audioControlEl = document.getElementById("audio-control");
+  const audioSelectEl = document.getElementById("audio-select");
+  const textControlEl = document.getElementById("text-control");
+  const textSelectEl = document.getElementById("text-select");
   const btnCopy = document.getElementById("btn-copy");
   const btnClear = document.getElementById("btn-clear");
 
@@ -317,6 +324,168 @@
   // UI helpers
   // ---------------------------------------------------------------------------
 
+  function qualityKey(track) {
+    return [track.height || 0, track.frameRate || 0, track.videoCodec || ""].join("|");
+  }
+
+  function audioKey(track) {
+    return JSON.stringify([
+      track.language || "und",
+      track.label || "",
+      Array.isArray(track.roles) ? track.roles : [],
+    ]);
+  }
+
+  function setOptions(select, options, selectedValue) {
+    select.replaceChildren();
+    for (const option of options) {
+      const element = document.createElement("option");
+      element.value = option.value;
+      element.textContent = option.label;
+      select.appendChild(element);
+    }
+    if (options.some((option) => option.value === selectedValue)) {
+      select.value = selectedValue;
+    }
+  }
+
+  function audioLabel(track) {
+    if (track.label) return track.label;
+    const language = track.language && track.language !== "und" ? track.language : "Unknown";
+    const roles = Array.isArray(track.roles) ? track.roles.filter((role) => role !== "main") : [];
+    return roles.length ? language + " (" + roles.join(", ") + ")" : language;
+  }
+
+  function refreshTrackControls() {
+    const player = app.player;
+    if (player === null) return;
+
+    const variants = player.getVariantTracks();
+    const activeVariant = variants.find((track) => track.active) || null;
+    const qualities = new Map();
+    for (const track of variants) {
+      if (!track.height) continue;
+      const key = qualityKey(track);
+      if (!qualities.has(key)) qualities.set(key, track);
+    }
+    const qualityOptions = Array.from(qualities.entries())
+      .sort((left, right) => {
+        const a = left[1];
+        const b = right[1];
+        return b.height - a.height || (b.frameRate || 0) - (a.frameRate || 0);
+      })
+      .map(([key, track]) => {
+        const fps = track.frameRate ? " " + Math.round(track.frameRate) + "fps" : "";
+        const codec = track.videoCodec ? " " + track.videoCodec.split(".")[0].toUpperCase() : "";
+        return { value: key, label: track.height + "p" + fps + codec };
+      });
+    qualityOptions.unshift({ value: "auto", label: "Auto" });
+    const abrEnabled = player.getConfiguration().abr.enabled;
+    setOptions(
+      qualitySelectEl,
+      qualityOptions,
+      abrEnabled || activeVariant === null ? "auto" : qualityKey(activeVariant),
+    );
+    qualityControlEl.hidden = qualities.size <= 1;
+
+    const audioTracks = new Map();
+    for (const track of variants) {
+      const key = audioKey(track);
+      if (!audioTracks.has(key)) audioTracks.set(key, track);
+    }
+    const audioOptions = Array.from(audioTracks.entries())
+      .map(([key, track]) => ({ value: key, label: audioLabel(track) }))
+      .sort((left, right) => left.label.localeCompare(right.label));
+    setOptions(audioSelectEl, audioOptions, activeVariant ? audioKey(activeVariant) : "");
+    audioControlEl.hidden = audioTracks.size <= 1;
+
+    const textTracks = player.getTextTracks();
+    const activeText = textTracks.find((track) => track.active) || null;
+    const textOptions = [{ value: "off", label: "Off" }];
+    for (const track of textTracks) {
+      const generated = Array.isArray(track.roles) && track.roles.includes("caption");
+      textOptions.push({
+        value: String(track.id),
+        label: track.label || (track.language || "Unknown") + (generated ? " (captions)" : ""),
+      });
+    }
+    setOptions(
+      textSelectEl,
+      textOptions,
+      player.isTextTrackVisible() && activeText ? String(activeText.id) : "off",
+    );
+    textControlEl.hidden = textTracks.length === 0;
+
+    trackControlsEl.hidden =
+      qualityControlEl.hidden && audioControlEl.hidden && textControlEl.hidden;
+  }
+
+  function resetTrackControls() {
+    qualitySelectEl.replaceChildren();
+    audioSelectEl.replaceChildren();
+    textSelectEl.replaceChildren();
+    qualityControlEl.hidden = true;
+    audioControlEl.hidden = true;
+    textControlEl.hidden = true;
+    trackControlsEl.hidden = true;
+  }
+
+  qualitySelectEl.addEventListener("change", () => {
+    const player = app.player;
+    if (player === null) return;
+    if (qualitySelectEl.value === "auto") {
+      player.configure({ abr: { enabled: true } });
+      refreshTrackControls();
+      return;
+    }
+
+    const tracks = player.getVariantTracks();
+    const active = tracks.find((track) => track.active) || null;
+    const currentAudio = active ? audioKey(active) : null;
+    const target =
+      tracks.find(
+        (track) => qualityKey(track) === qualitySelectEl.value && audioKey(track) === currentAudio,
+      ) || tracks.find((track) => qualityKey(track) === qualitySelectEl.value);
+    if (!target) return;
+    player.configure({ abr: { enabled: false } });
+    player.selectVariantTrack(target, true, 2);
+    refreshTrackControls();
+  });
+
+  audioSelectEl.addEventListener("change", () => {
+    const player = app.player;
+    if (player === null) return;
+    const tracks = player.getVariantTracks();
+    const active = tracks.find((track) => track.active) || null;
+    const currentQuality = active ? qualityKey(active) : null;
+    const target =
+      tracks.find(
+        (track) => audioKey(track) === audioSelectEl.value && qualityKey(track) === currentQuality,
+      ) || tracks.find((track) => audioKey(track) === audioSelectEl.value);
+    if (!target) return;
+    const role = Array.isArray(target.roles) ? target.roles[0] || "" : "";
+    player.selectAudioLanguage(target.language || "und", role);
+    player.selectVariantTrack(target, true, 2);
+    refreshTrackControls();
+  });
+
+  textSelectEl.addEventListener("change", () => {
+    const player = app.player;
+    if (player === null) return;
+    if (textSelectEl.value === "off") {
+      player.setTextTrackVisibility(false);
+      refreshTrackControls();
+      return;
+    }
+    const track = player
+      .getTextTracks()
+      .find((candidate) => String(candidate.id) === textSelectEl.value);
+    if (!track) return;
+    player.selectTextTrack(track);
+    player.setTextTrackVisibility(true);
+    refreshTrackControls();
+  });
+
   function resetSessionUi() {
     videoEl.controls = false;
     app.autoplayMuted = false;
@@ -325,6 +494,7 @@
     subtitleEl.textContent =
       "Open this page on your playback device. It registers over /player.";
     stateEl.textContent = "IDLE";
+    resetTrackControls();
   }
 
   function isAutoplayBlocked(error) {
@@ -464,6 +634,7 @@
     videoEl.removeAttribute("src");
     videoEl.load();
     app.lastStateKey = "";
+    resetTrackControls();
 
     if (sessionId !== null) {
       sendStateReport(sessionId, "IDLE", idleReason, true);
@@ -489,6 +660,14 @@
       const message = detail && detail.message ? detail.message : formatted;
       sendError("SHAKA_" + String(code), message);
     });
+    for (const eventName of [
+      "trackschanged",
+      "variantchanged",
+      "textchanged",
+      "texttrackvisibility",
+    ]) {
+      player.addEventListener(eventName, refreshTrackControls);
+    }
 
     installNetworkFilters(player);
     app.player = player;
@@ -551,13 +730,12 @@
         const drm = stream && typeof stream === "object" ? stream.drm || null : null;
 
         pushLog("info", "Stream " + (i + 1) + "/" + streams.length + ": " + (streamType || "(no mime)"), {
-          url: streamUrl,
           contentType: streamType,
-          drm: drm,
+          drmSystem: drm && typeof drm.system === "string" ? drm.system : null,
         });
 
         if (!configureDrm(player, drm)) {
-          lastErrorMessage = "Unsupported DRM key system for stream " + streamUrl;
+          lastErrorMessage = "Unsupported DRM key system for stream " + (i + 1);
           pushLog("err", lastErrorMessage);
           continue;
         }
@@ -565,6 +743,7 @@
         try {
           await player.load(streamUrl, startTime, streamType || undefined);
           pushLog("info", "Stream " + (i + 1) + " loaded OK");
+          refreshTrackControls();
           loaded = true;
           break;
         } catch (error) {
@@ -605,7 +784,12 @@
 
     switch (command.type) {
       case "load":
-        pushLog("ws-recv", "<< load", command);
+        pushLog("ws-recv", "<< load", {
+          type: command.type,
+          sessionId: command.sessionId,
+          streamCount:
+            command.media && Array.isArray(command.media.streams) ? command.media.streams.length : 0,
+        });
         await handleLoad(command);
         break;
       case "play":
