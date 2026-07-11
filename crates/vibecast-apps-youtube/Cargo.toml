@@ -12,6 +12,8 @@ publish.workspace = true
 vibecast-sdk = { path = "../vibecast-sdk" }
 
 async-trait = { workspace = true }
+base64 = { workspace = true }
+prost = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

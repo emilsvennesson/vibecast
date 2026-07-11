@@ -119,6 +119,43 @@
       gap: 0.25rem;
     }
 
+    .track-controls {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 0.65rem;
+      padding: 0.8rem 1rem 0;
+    }
+
+    .track-controls[hidden],
+    .track-control[hidden] {
+      display: none;
+    }
+
+    .track-control {
+      display: grid;
+      gap: 0.35rem;
+      min-width: 0;
+    }
+
+    .track-control label {
+      font-family: "IBM Plex Mono", "SF Mono", monospace;
+      color: var(--muted);
+      font-size: 0.62rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .track-control select {
+      width: 100%;
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 0.45rem;
+      background: rgba(5, 8, 22, 0.82);
+      color: var(--text);
+      padding: 0.45rem 0.55rem;
+      font: 500 0.78rem "Space Grotesk", "Avenir Next", sans-serif;
+    }
+
     h1 { margin: 0; font-size: 1.15rem; line-height: 1.25; }
     p  { margin: 0; color: var(--muted); font-size: 0.9rem; line-height: 1.4; }
 
@@ -280,6 +317,10 @@
       .log-col {
         max-height: 50vh;
       }
+
+      .track-controls {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
@@ -292,6 +333,20 @@
         <div class="label">State <span class="value" id="state">IDLE</span></div>
       </div>
       <video id="video" class="video" playsinline></video>
+      <div class="track-controls" id="track-controls" hidden>
+        <div class="track-control" id="quality-control" hidden>
+          <label for="quality-select">Quality</label>
+          <select id="quality-select"></select>
+        </div>
+        <div class="track-control" id="audio-control" hidden>
+          <label for="audio-select">Audio</label>
+          <select id="audio-select"></select>
+        </div>
+        <div class="track-control" id="text-control" hidden>
+          <label for="text-select">Subtitles</label>
+          <select id="text-select"></select>
+        </div>
+      </div>
       <div class="meta">
         <h1 id="title">Waiting for LOAD</h1>
         <p id="subtitle">Open this page on your playback device. It registers over <code>/player</code>.</p>

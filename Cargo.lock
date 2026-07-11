@@ -3222,6 +3222,8 @@ name = "vibecast-apps-youtube"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
+ "prost",
  "reqwest",
  "serde",
  "serde_json",

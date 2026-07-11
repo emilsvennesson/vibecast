@@ -1,5 +1,8 @@
 //! YouTube video metadata and progressive-stream resolution.
 
+use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
+use base64::Engine as _;
+use prost::Message as _;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
@@ -173,6 +176,7 @@ struct PlayerResponse {
     streaming_data: Option<StreamingData>,
     #[serde(rename = "videoDetails")]
     video_details: Option<VideoDetails>,
+    captions: Option<Captions>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -209,10 +213,90 @@ struct AdaptiveFormat {
     audio_sample_rate: Option<String>,
     #[serde(rename = "audioChannels")]
     audio_channels: Option<u32>,
+    #[serde(rename = "audioTrack")]
+    audio_track: Option<AudioTrack>,
+    #[serde(rename = "isDrc", default)]
+    is_drc: bool,
+    xtags: Option<String>,
     #[serde(rename = "colorInfo", default)]
     color_info: ColorInfo,
     #[serde(rename = "approxDurationMs")]
     approx_duration_ms: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AudioTrack {
+    #[serde(rename = "audioIsDefault", default)]
+    audio_is_default: bool,
+    #[serde(rename = "displayName", default)]
+    display_name: String,
+    #[serde(default)]
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Captions {
+    #[serde(rename = "playerCaptionsTracklistRenderer")]
+    tracklist: Option<CaptionTracklist>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CaptionTracklist {
+    #[serde(rename = "captionTracks", default)]
+    caption_tracks: Vec<CaptionTrack>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CaptionTrack {
+    #[serde(rename = "baseUrl")]
+    base_url: String,
+    #[serde(rename = "languageCode", default)]
+    language_code: String,
+    #[serde(rename = "vssId", default)]
+    vss_id: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    name: Text,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Text {
+    #[serde(rename = "simpleText")]
+    simple_text: Option<String>,
+    #[serde(default)]
+    runs: Vec<TextRun>,
+}
+
+impl Text {
+    fn value(&self) -> String {
+        self.simple_text.clone().unwrap_or_else(|| {
+            self.runs
+                .iter()
+                .map(|run| run.text.as_str())
+                .collect::<String>()
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TextRun {
+    #[serde(default)]
+    text: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct FormatXTags {
+    #[prost(message, repeated, tag = "1")]
+    values: Vec<XTag>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct XTag {
+    #[prost(string, optional, tag = "1")]
+    key: Option<String>,
+    #[prost(string, optional, tag = "2")]
+    value: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -260,13 +344,21 @@ fn playback_media(
     start_time: f64,
     capabilities: &PlayerCapabilities,
 ) -> Result<PlaybackMedia, ResolveError> {
-    let formats = response
-        .streaming_data
+    let PlayerResponse {
+        streaming_data,
+        video_details: details,
+        captions,
+        ..
+    } = response;
+    let formats = streaming_data
         .ok_or(ResolveError::NoCompatibleStream)?
         .adaptive_formats;
-    let details = response.video_details;
+    let caption_tracks = captions
+        .and_then(|captions| captions.tracklist)
+        .map(|tracklist| tracklist.caption_tracks)
+        .unwrap_or_default();
 
-    let (manifest, stream_duration) = build_dash_manifest(&formats, capabilities)?;
+    let (manifest, stream_duration) = build_dash_manifest(&formats, &caption_tracks, capabilities)?;
 
     let duration = stream_duration.or_else(|| {
         details
@@ -443,6 +535,12 @@ struct AudioRep<'a> {
     channels: u32,
     init: &'a ByteRange,
     index: &'a ByteRange,
+    track_id: &'a str,
+    language: String,
+    label: String,
+    kind: AudioKind,
+    is_default: bool,
+    is_drc: bool,
 }
 
 impl<'a> AudioRep<'a> {
@@ -452,6 +550,32 @@ impl<'a> AudioRep<'a> {
             return None;
         }
         let codecs = codecs_of(&format.mime_type)?;
+        let tags = decode_xtags(format.xtags.as_deref());
+        let track = format.audio_track.as_ref();
+        let track_id = track
+            .map(|track| track.id.as_str())
+            .filter(|id| !id.is_empty())
+            .unwrap_or("und");
+        let language = tag_value(&tags, "lang")
+            .and_then(normalize_language)
+            .or_else(|| normalize_language(track_id.split('.').next().unwrap_or("")))
+            .unwrap_or_else(|| "und".to_string());
+        let kind = tag_value(&tags, "acont")
+            .map(AudioKind::from_tag)
+            .filter(|kind| *kind != AudioKind::Unspecified)
+            .or_else(|| track.map(|track| AudioKind::from_label(&track.display_name)))
+            .unwrap_or(AudioKind::Unspecified);
+        let mut label = track
+            .map(|track| track.display_name.trim())
+            .unwrap_or("")
+            .to_string();
+        if label.is_empty() {
+            label = language.clone();
+        }
+        if format.is_drc {
+            label.push_str(" (DRC)");
+        }
+
         Some(Self {
             itag: format.itag?,
             url: format.url.as_deref()?,
@@ -463,8 +587,102 @@ impl<'a> AudioRep<'a> {
             channels: format.audio_channels.unwrap_or(2),
             init: format.init_range.as_ref()?,
             index: format.index_range.as_ref()?,
+            track_id,
+            language,
+            label,
+            kind,
+            is_default: track.is_some_and(|track| track.audio_is_default),
+            is_drc: format.is_drc,
         })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudioKind {
+    Original,
+    Dubbed,
+    AutoDubbed,
+    Descriptive,
+    Secondary,
+    Unspecified,
+}
+
+impl AudioKind {
+    fn from_tag(value: &str) -> Self {
+        match value {
+            "original" => Self::Original,
+            "dubbed" => Self::Dubbed,
+            "dubbed-auto" => Self::AutoDubbed,
+            "descriptive" => Self::Descriptive,
+            "secondary" => Self::Secondary,
+            _ => Self::Unspecified,
+        }
+    }
+
+    fn from_label(value: &str) -> Self {
+        let value = value.to_ascii_lowercase();
+        if value.contains("audio description") || value.contains("descriptive") {
+            Self::Descriptive
+        } else if value.contains("auto-dubbed") || value.contains("auto dubbed") {
+            Self::AutoDubbed
+        } else if value.contains("dubbed") {
+            Self::Dubbed
+        } else if value.contains("original") {
+            Self::Original
+        } else {
+            Self::Unspecified
+        }
+    }
+}
+
+struct AudioGroup<'a> {
+    track_id: &'a str,
+    language: String,
+    label: String,
+    kind: AudioKind,
+    is_default: bool,
+    is_drc: bool,
+    reps: Vec<&'a AudioRep<'a>>,
+}
+
+fn decode_xtags(value: Option<&str>) -> Vec<XTag> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    let decoded_value = Url::parse(&format!("https://invalid/?xtags={value}"))
+        .ok()
+        .and_then(|url| {
+            url.query_pairs()
+                .find(|(key, _)| key == "xtags")
+                .map(|(_, value)| value.into_owned())
+        })
+        .unwrap_or_else(|| value.to_string());
+    let bytes = URL_SAFE_NO_PAD
+        .decode(decoded_value.as_bytes())
+        .or_else(|_| URL_SAFE.decode(decoded_value.as_bytes()));
+    bytes
+        .ok()
+        .and_then(|bytes| FormatXTags::decode(bytes.as_slice()).ok())
+        .map(|tags| tags.values)
+        .unwrap_or_default()
+}
+
+fn tag_value<'a>(tags: &'a [XTag], key: &str) -> Option<&'a str> {
+    tags.iter()
+        .find(|tag| tag.key.as_deref() == Some(key))
+        .and_then(|tag| tag.value.as_deref())
+}
+
+fn normalize_language(value: &str) -> Option<String> {
+    let value = value.trim().replace('_', "-");
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return None;
+    }
+    Some(value)
 }
 
 fn container_of(mime: &str) -> &str {
@@ -493,6 +711,7 @@ fn hdr_token(color: &ColorInfo) -> Option<&'static str> {
 /// duration derived from the selected video renditions.
 fn build_dash_manifest(
     formats: &[AdaptiveFormat],
+    caption_tracks: &[CaptionTrack],
     capabilities: &PlayerCapabilities,
 ) -> Result<(String, Option<f64>), ResolveError> {
     let videos: Vec<VideoRep> = formats
@@ -537,19 +756,66 @@ fn build_dash_manifest(
         return Err(ResolveError::NoCompatibleStream);
     }
 
-    // Audio codec: Opus > AAC, gated on advertised support.
+    // Keep each logical YouTube audio track separate. Codec selection happens
+    // per track so a language available only as AAC is not hidden by another
+    // language that also offers Opus.
     let audio_all: Vec<AudioRep> = formats.iter().filter_map(AudioRep::from_format).collect();
-    let audio_codec = [AudioCodec::Opus, AudioCodec::Aac]
-        .into_iter()
-        .find(|codec| {
-            capabilities.audio_codecs.iter().any(|c| c == codec.token())
-                && audio_all.iter().any(|rep| rep.codec == *codec)
+    let mut audio_groups: Vec<AudioGroup<'_>> = Vec::new();
+    for rep in &audio_all {
+        let existing = audio_groups.iter_mut().find(|group| {
+            group.track_id == rep.track_id && group.kind == rep.kind && group.is_drc == rep.is_drc
         });
-    let mut audio_reps: Vec<&AudioRep> = match audio_codec {
-        Some(codec) => audio_all.iter().filter(|rep| rep.codec == codec).collect(),
-        None => Vec::new(),
+        if let Some(group) = existing {
+            group.is_default |= rep.is_default;
+            group.reps.push(rep);
+        } else {
+            audio_groups.push(AudioGroup {
+                track_id: rep.track_id,
+                language: rep.language.clone(),
+                label: rep.label.clone(),
+                kind: rep.kind,
+                is_default: rep.is_default,
+                is_drc: rep.is_drc,
+                reps: vec![rep],
+            });
+        }
+    }
+    for group in &mut audio_groups {
+        let selected_codec = [AudioCodec::Opus, AudioCodec::Aac]
+            .into_iter()
+            .find(|codec| {
+                capabilities.audio_codecs.iter().any(|c| c == codec.token())
+                    && group.reps.iter().any(|rep| rep.codec == *codec)
+            });
+        match selected_codec {
+            Some(codec) => group.reps.retain(|rep| rep.codec == codec),
+            None => group.reps.clear(),
+        }
+        if let Some(container) = group.reps.first().map(|rep| rep.container) {
+            group.reps.retain(|rep| rep.container == container);
+        }
+        group.reps.sort_by_key(|rep| rep.bitrate);
+    }
+    audio_groups.retain(|group| !group.reps.is_empty());
+    let main_audio = audio_groups
+        .iter()
+        .position(|group| group.is_default && !group.is_drc)
+        .or_else(|| audio_groups.iter().position(|group| group.is_default))
+        .or_else(|| {
+            audio_groups
+                .iter()
+                .position(|group| group.kind == AudioKind::Original && !group.is_drc)
+        })
+        .or_else(|| (!audio_groups.is_empty()).then_some(0));
+    let caption_tracks = if capabilities
+        .subtitle_formats
+        .iter()
+        .any(|format| format == "vtt")
+    {
+        caption_tracks
+    } else {
+        &[]
     };
-    audio_reps.sort_by_key(|rep| rep.bitrate);
 
     let duration = video_reps
         .iter()
@@ -558,7 +824,16 @@ fn build_dash_manifest(
             Some(acc.map_or(secs, |current| current.max(secs)))
         });
 
-    Ok((render_mpd(&video_reps, &audio_reps, duration), duration))
+    Ok((
+        render_mpd(
+            &video_reps,
+            &audio_groups,
+            main_audio,
+            caption_tracks,
+            duration,
+        ),
+        duration,
+    ))
 }
 
 /// CICP colour-signaling integers (ISO/IEC 23001-8) for a rendition's
@@ -589,7 +864,19 @@ fn xml_escape(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
-fn render_mpd(video_reps: &[&VideoRep], audio_reps: &[&AudioRep], duration: Option<f64>) -> String {
+fn xml_escape_attr(text: &str) -> String {
+    xml_escape(text)
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn render_mpd(
+    video_reps: &[&VideoRep],
+    audio_groups: &[AudioGroup<'_>],
+    main_audio: Option<usize>,
+    caption_tracks: &[CaptionTrack],
+    duration: Option<f64>,
+) -> String {
     use std::fmt::Write as _;
 
     let mut out = String::new();
@@ -597,7 +884,7 @@ fn render_mpd(video_reps: &[&VideoRep], audio_reps: &[&AudioRep], duration: Opti
     let _ = writeln!(
         out,
         "<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" \
-profiles=\"urn:mpeg:dash:profile:isoff-on-demand:2011\" type=\"static\" \
+profiles=\"urn:mpeg:dash:profile:full:2011\" type=\"static\" \
 minBufferTime=\"PT1.5S\" mediaPresentationDuration=\"PT{:.3}S\">",
         duration.unwrap_or(0.0)
     );
@@ -605,10 +892,11 @@ minBufferTime=\"PT1.5S\" mediaPresentationDuration=\"PT{:.3}S\">",
 
     let _ = writeln!(
         out,
-        "<AdaptationSet contentType=\"video\" mimeType=\"{}\" \
+        "<AdaptationSet id=\"video\" contentType=\"video\" mimeType=\"{}\" \
 subsegmentAlignment=\"true\" startWithSAP=\"1\">",
         video_reps[0].container
     );
+    out.push_str("<Role schemeIdUri=\"urn:mpeg:dash:role:2011\" value=\"main\"/>\n");
     if video_reps[0].hdr.is_some() {
         if let Some((primaries, transfer, matrix)) = cicp(video_reps[0].color) {
             let _ = writeln!(
@@ -650,13 +938,33 @@ subsegmentAlignment=\"true\" startWithSAP=\"1\">",
     }
     out.push_str("</AdaptationSet>\n");
 
-    if let Some(first) = audio_reps.first() {
+    for (index, group) in audio_groups.iter().enumerate() {
+        let first = group.reps[0];
         let _ = writeln!(
             out,
-            "<AdaptationSet contentType=\"audio\" mimeType=\"{}\" lang=\"und\" startWithSAP=\"1\">",
-            first.container
+            "<AdaptationSet id=\"audio-{index}\" contentType=\"audio\" mimeType=\"{}\" lang=\"{}\" startWithSAP=\"1\">",
+            first.container,
+            xml_escape_attr(&group.language),
         );
-        for rep in audio_reps {
+        let _ = writeln!(out, "<Label>{}</Label>", xml_escape(&group.label));
+        let role = if main_audio == Some(index) {
+            "main"
+        } else {
+            match group.kind {
+                AudioKind::Dubbed | AudioKind::AutoDubbed => "dub",
+                _ => "alternate",
+            }
+        };
+        let _ = writeln!(
+            out,
+            "<Role schemeIdUri=\"urn:mpeg:dash:role:2011\" value=\"{role}\"/>"
+        );
+        if group.kind == AudioKind::Descriptive {
+            out.push_str(
+                "<Accessibility schemeIdUri=\"urn:tva:metadata:cs:AudioPurposeCS:2007\" value=\"1\"/>\n",
+            );
+        }
+        for rep in &group.reps {
             let mut tag = format!(
                 "<Representation id=\"{}\" codecs=\"{}\" bandwidth=\"{}\"",
                 rep.itag, rep.codecs, rep.bitrate
@@ -680,6 +988,49 @@ schemeIdUri=\"urn:mpeg:dash:23003:3:audio_channel_configuration:2011\" value=\"{
             out.push_str("</Representation>\n");
         }
         out.push_str("</AdaptationSet>\n");
+    }
+
+    for (index, track) in caption_tracks.iter().enumerate() {
+        let Ok(mut url) = Url::parse(&track.base_url) else {
+            continue;
+        };
+        let query: Vec<(String, String)> = url
+            .query_pairs()
+            .filter(|(key, _)| key != "fmt")
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        url.query_pairs_mut()
+            .clear()
+            .extend_pairs(query)
+            .append_pair("fmt", "vtt");
+        let language = normalize_language(&track.language_code).unwrap_or_else(|| "und".into());
+        let label = track.name.value();
+        let role = if track.kind == "asr" {
+            "caption"
+        } else {
+            "subtitle"
+        };
+        let _ = writeln!(
+            out,
+            "<AdaptationSet id=\"text-{index}\" contentType=\"text\" mimeType=\"text/vtt\" lang=\"{}\">",
+            xml_escape_attr(&language),
+        );
+        let _ = writeln!(
+            out,
+            "<Label>{}</Label>",
+            xml_escape(if label.is_empty() { &language } else { &label })
+        );
+        let _ = writeln!(
+            out,
+            "<Role schemeIdUri=\"urn:mpeg:dash:role:2011\" value=\"{role}\"/>"
+        );
+        let _ = writeln!(
+            out,
+            "<Representation id=\"text-{index}-{}\" bandwidth=\"256\" mimeType=\"text/vtt\">",
+            xml_escape_attr(&track.vss_id)
+        );
+        let _ = writeln!(out, "<BaseURL>{}</BaseURL>", xml_escape(url.as_str()));
+        out.push_str("</Representation>\n</AdaptationSet>\n");
     }
 
     out.push_str("</Period>\n</MPD>\n");
@@ -826,6 +1177,116 @@ mod tests {
         serde_json::from_value(adaptive_formats()).unwrap()
     }
 
+    fn encoded_xtags(values: &[(&str, &str)]) -> String {
+        URL_SAFE_NO_PAD.encode(
+            FormatXTags {
+                values: values
+                    .iter()
+                    .map(|(key, value)| XTag {
+                        key: Some((*key).to_string()),
+                        value: Some((*value).to_string()),
+                    })
+                    .collect(),
+            }
+            .encode_to_vec(),
+        )
+    }
+
+    fn multilingual_formats() -> Vec<AdaptiveFormat> {
+        serde_json::from_value(serde_json::json!([
+            {
+                "itag": 137, "mimeType": "video/mp4; codecs=\"avc1.640028\"",
+                "url": "https://media.example/video-1080", "bitrate": 4000000,
+                "width": 1920, "height": 1080, "fps": 30,
+                "initRange": {"start": "0", "end": "700"},
+                "indexRange": {"start": "701", "end": "1200"},
+                "approxDurationMs": "10000"
+            },
+            {
+                "itag": 136, "mimeType": "video/mp4; codecs=\"avc1.4d401f\"",
+                "url": "https://media.example/video-720", "bitrate": 2000000,
+                "width": 1280, "height": 720, "fps": 30,
+                "initRange": {"start": "0", "end": "700"},
+                "indexRange": {"start": "701", "end": "1200"},
+                "approxDurationMs": "10000"
+            },
+            {
+                "itag": 251, "mimeType": "audio/webm; codecs=\"opus\"",
+                "url": "https://media.example/en-opus-high", "bitrate": 130000,
+                "initRange": {"start": "0", "end": "258"},
+                "indexRange": {"start": "259", "end": "629"},
+                "audioSampleRate": "48000", "audioChannels": 2,
+                "audioTrack": {"id": "en.4", "displayName": "English (Original)",
+                    "audioIsDefault": true},
+                "xtags": encoded_xtags(&[("lang", "en"), ("acont", "original")])
+            },
+            {
+                "itag": 250, "mimeType": "audio/webm; codecs=\"opus\"",
+                "url": "https://media.example/en-opus-low", "bitrate": 70000,
+                "initRange": {"start": "0", "end": "258"},
+                "indexRange": {"start": "259", "end": "629"},
+                "audioSampleRate": "48000", "audioChannels": 2,
+                "audioTrack": {"id": "en.4", "displayName": "English (Original)",
+                    "audioIsDefault": true},
+                "xtags": encoded_xtags(&[("lang", "en"), ("acont", "original")])
+            },
+            {
+                "itag": 140, "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+                "url": "https://media.example/en-aac", "bitrate": 128000,
+                "initRange": {"start": "0", "end": "722"},
+                "indexRange": {"start": "723", "end": "1018"},
+                "audioSampleRate": "44100", "audioChannels": 2,
+                "audioTrack": {"id": "en.4", "displayName": "English (Original)",
+                    "audioIsDefault": true},
+                "xtags": encoded_xtags(&[("lang", "en"), ("acont", "original")])
+            },
+            {
+                "itag": 140, "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+                "url": "https://media.example/es-aac", "bitrate": 128000,
+                "initRange": {"start": "0", "end": "722"},
+                "indexRange": {"start": "723", "end": "1018"},
+                "audioSampleRate": "44100", "audioChannels": 2,
+                "audioTrack": {"id": "es.3", "displayName": "Spanish (Dubbed)"},
+                "xtags": encoded_xtags(&[("lang", "es"), ("acont", "dubbed")])
+            },
+            {
+                "itag": 140, "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+                "url": "https://media.example/en-description", "bitrate": 128000,
+                "initRange": {"start": "0", "end": "722"},
+                "indexRange": {"start": "723", "end": "1018"},
+                "audioSampleRate": "44100", "audioChannels": 2,
+                "audioTrack": {"id": "en.5", "displayName": "English description"},
+                "xtags": encoded_xtags(&[("lang", "en"), ("acont", "descriptive")])
+            },
+            {
+                "itag": 250, "mimeType": "audio/webm; codecs=\"opus\"",
+                "url": "https://media.example/en-drc", "bitrate": 70000,
+                "initRange": {"start": "0", "end": "258"},
+                "indexRange": {"start": "259", "end": "629"},
+                "audioSampleRate": "48000", "audioChannels": 2, "isDrc": true,
+                "audioTrack": {"id": "en.4", "displayName": "English (Original)"},
+                "xtags": encoded_xtags(&[("lang", "en"), ("acont", "original")])
+            }
+        ]))
+        .unwrap()
+    }
+
+    fn caption_tracks() -> Vec<CaptionTrack> {
+        serde_json::from_value(serde_json::json!([
+            {
+                "baseUrl": "https://subs.example/en?sig=a&fmt=json3",
+                "languageCode": "en", "vssId": ".en",
+                "name": {"simpleText": "English"}
+            },
+            {
+                "baseUrl": "https://subs.example/sv?sig=b",
+                "languageCode": "sv", "vssId": "a.sv", "kind": "asr",
+                "name": {"runs": [{"text": "Swedish"}, {"text": " (auto-generated)"}]}
+            }
+        ]))
+        .unwrap()
+    }
+
     fn caps(video: &[&str], audio: &[&str], hdr: &[&str], max: (u32, u32)) -> PlayerCapabilities {
         PlayerCapabilities {
             video_codecs: video.iter().map(|s| s.to_string()).collect(),
@@ -837,7 +1298,7 @@ mod tests {
     }
 
     fn build(caps: &PlayerCapabilities) -> String {
-        build_dash_manifest(&formats(), caps).unwrap().0
+        build_dash_manifest(&formats(), &[], caps).unwrap().0
     }
 
     #[test]
@@ -910,7 +1371,11 @@ mod tests {
 
     #[test]
     fn unsupported_video_codec_yields_no_compatible_stream() {
-        let result = build_dash_manifest(&formats(), &caps(&["hevc"], &["aac"], &[], (3840, 2160)));
+        let result = build_dash_manifest(
+            &formats(),
+            &[],
+            &caps(&["hevc"], &["aac"], &[], (3840, 2160)),
+        );
         assert!(matches!(result, Err(ResolveError::NoCompatibleStream)));
     }
 
@@ -925,7 +1390,7 @@ mod tests {
             "approxDurationMs": "1000"
         }]);
         let formats: Vec<AdaptiveFormat> = serde_json::from_value(raw).unwrap();
-        let mpd = build_dash_manifest(&formats, &caps(&["h264"], &["aac"], &[], (1920, 1080)))
+        let mpd = build_dash_manifest(&formats, &[], &caps(&["h264"], &["aac"], &[], (1920, 1080)))
             .unwrap()
             .0;
         assert!(mpd.contains("<BaseURL>https://media.example/v?a=1&amp;b=2</BaseURL>"));
@@ -939,6 +1404,68 @@ mod tests {
         assert!(mpd.contains("<Initialization range=\"0-219\"/>"));
         assert!(mpd.contains("frameRate=\"25\""));
         assert!(mpd.contains("mediaPresentationDuration=\"PT213.040S\""));
+    }
+
+    #[test]
+    fn renders_separate_standard_audio_tracks_and_codec_fallbacks() {
+        let mpd = build_dash_manifest(
+            &multilingual_formats(),
+            &[],
+            &caps(&["h264"], &["opus", "aac"], &[], (1920, 1080)),
+        )
+        .unwrap()
+        .0;
+
+        assert!(mpd.contains("<Label>English (Original)</Label>"));
+        assert!(mpd.contains("lang=\"en\""));
+        assert!(mpd.contains("value=\"main\""));
+        assert!(mpd.contains("https://media.example/en-opus-high"));
+        assert!(mpd.contains("https://media.example/en-opus-low"));
+        assert!(!mpd.contains("https://media.example/en-aac"));
+
+        assert!(mpd.contains("<Label>Spanish (Dubbed)</Label>"));
+        assert!(mpd.contains("lang=\"es\""));
+        assert!(mpd.contains("value=\"dub\""));
+        assert!(mpd.contains("https://media.example/es-aac"));
+
+        assert!(mpd.contains("<Label>English description</Label>"));
+        assert!(mpd.contains("urn:tva:metadata:cs:AudioPurposeCS:2007"));
+        assert!(mpd.contains("<Label>English (Original) (DRC)</Label>"));
+
+        assert!(!mpd.contains(" name="));
+        assert!(!mpd.contains(" default="));
+        assert!(!mpd.contains(" original="));
+        assert!(!mpd.contains(" impaired="));
+    }
+
+    #[test]
+    fn renders_labeled_vtt_caption_adaptation_sets() {
+        let mut capabilities = caps(&["h264"], &["aac"], &[], (1920, 1080));
+        capabilities.subtitle_formats = vec!["vtt".into()];
+        let mpd = build_dash_manifest(&multilingual_formats(), &caption_tracks(), &capabilities)
+            .unwrap()
+            .0;
+
+        assert!(mpd.contains("contentType=\"text\" mimeType=\"text/vtt\" lang=\"en\""));
+        assert!(mpd.contains("<Label>English</Label>"));
+        assert!(mpd.contains("value=\"subtitle\""));
+        assert!(mpd.contains("https://subs.example/en?sig=a&amp;fmt=vtt"));
+        assert!(mpd.contains("lang=\"sv\""));
+        assert!(mpd.contains("<Label>Swedish (auto-generated)</Label>"));
+        assert!(mpd.contains("value=\"caption\""));
+    }
+
+    #[test]
+    fn omits_captions_when_the_player_does_not_advertise_vtt() {
+        let mpd = build_dash_manifest(
+            &multilingual_formats(),
+            &caption_tracks(),
+            &caps(&["h264"], &["aac"], &[], (1920, 1080)),
+        )
+        .unwrap()
+        .0;
+
+        assert!(!mpd.contains("contentType=\"text\""));
     }
 
     #[tokio::test]
@@ -963,18 +1490,25 @@ mod tests {
                     "thumbnail": {"thumbnails": [{
                         "url": "https://img.example/large.jpg", "width": 1280, "height": 720
                     }]}
+                },
+                "captions": {
+                    "playerCaptionsTracklistRenderer": {
+                        "captionTracks": [{
+                            "baseUrl": "https://subs.example/en?sig=test",
+                            "languageCode": "en", "vssId": ".en",
+                            "name": {"simpleText": "English"}
+                        }]
+                    }
                 }
             })))
             .mount(&server)
             .await;
 
         let resolver = Resolver::with_endpoints(reqwest::Client::new(), &server.uri());
+        let mut capabilities = caps(&["av1", "vp9", "h264"], &["opus", "aac"], &[], (3840, 2160));
+        capabilities.subtitle_formats = vec!["vtt".into()];
         let media = resolver
-            .resolve(
-                "dQw4w9WgXcQ",
-                12.5,
-                &caps(&["av1", "vp9", "h264"], &["opus", "aac"], &[], (3840, 2160)),
-            )
+            .resolve("dQw4w9WgXcQ", 12.5, &capabilities)
             .await
             .unwrap();
 
@@ -986,6 +1520,7 @@ mod tests {
         assert!(manifest.starts_with("<?xml"));
         assert!(manifest.contains("<MPD"));
         assert!(manifest.contains("av01.0.12M.08"));
+        assert!(manifest.contains("<Label>English</Label>"));
         assert_eq!(media.title.as_deref(), Some("Example"));
         assert_eq!(media.subtitle.as_deref(), Some("Channel"));
         assert!((media.duration.unwrap() - 213.04).abs() < 0.001);
