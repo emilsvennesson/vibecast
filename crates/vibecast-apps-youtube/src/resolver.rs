@@ -8,19 +8,10 @@ use thiserror::Error;
 use url::Url;
 use vibecast_sdk::{MediaImage, PlaybackMedia, PlaybackStream, PlayerCapabilities, StreamType};
 
-// The IOS InnerTube client is used because, unlike ANDROID_VR, it returns the
-// full resolution ladder *and* every alternate/dubbed audio track (each with a
-// plain `url` plus byte ranges, which is what a SegmentBase DASH manifest
-// needs) as well as caption tracks.
-const CLIENT_NAME: &str = "IOS";
-const CLIENT_VERSION: &str = "20.03.02";
+const CLIENT_NAME: &str = "ANDROID_VR";
+const CLIENT_VERSION: &str = "1.57";
 const CLIENT_USER_AGENT: &str =
-    "com.google.ios.youtube/20.03.02 (iPhone16,2; U; CPU iOS 18_2_1 like Mac OS X;)";
-const CLIENT_NAME_HEADER: &str = "5";
-const DEVICE_MAKE: &str = "Apple";
-const DEVICE_MODEL: &str = "iPhone16,2";
-const OS_NAME: &str = "iPhone";
-const OS_VERSION: &str = "18.2.1.22C161";
+    "com.google.android.apps.youtube.vr.oculus/1.57 (Linux; U; Android 12L; en_US)";
 
 #[derive(Clone)]
 pub(crate) struct Resolver {
@@ -93,8 +84,6 @@ impl Resolver {
             .http
             .post(player_url)
             .header("User-Agent", CLIENT_USER_AGENT)
-            .header("X-YouTube-Client-Name", CLIENT_NAME_HEADER)
-            .header("X-YouTube-Client-Version", CLIENT_VERSION)
             .json(&PlayerRequest::new(video_id, visitor_data.as_deref()))
             .send()
             .await?
@@ -150,14 +139,10 @@ impl<'a> PlayerRequest<'a> {
                 client: ClientContext {
                     client_name: CLIENT_NAME,
                     client_version: CLIENT_VERSION,
-                    device_make: DEVICE_MAKE,
-                    device_model: DEVICE_MODEL,
-                    os_name: OS_NAME,
-                    os_version: OS_VERSION,
-                    user_agent: CLIENT_USER_AGENT,
                     visitor_data,
                     hl: "en",
                     gl: "US",
+                    android_sdk_version: 32,
                 },
             },
         }
@@ -175,20 +160,12 @@ struct ClientContext<'a> {
     client_name: &'static str,
     #[serde(rename = "clientVersion")]
     client_version: &'static str,
-    #[serde(rename = "deviceMake")]
-    device_make: &'static str,
-    #[serde(rename = "deviceModel")]
-    device_model: &'static str,
-    #[serde(rename = "osName")]
-    os_name: &'static str,
-    #[serde(rename = "osVersion")]
-    os_version: &'static str,
-    #[serde(rename = "userAgent")]
-    user_agent: &'static str,
     #[serde(rename = "visitorData", skip_serializing_if = "Option::is_none")]
     visitor_data: Option<&'a str>,
     hl: &'static str,
     gl: &'static str,
+    #[serde(rename = "androidSdkVersion")]
+    android_sdk_version: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -215,9 +192,9 @@ struct StreamingData {
     adaptive_formats: Vec<AdaptiveFormat>,
 }
 
-/// One adaptive (video-only or audio-only) rendition. The IOS client returns
-/// plain `url`s plus byte ranges, which is exactly what a DASH `SegmentBase`
-/// manifest needs.
+/// One adaptive (video-only or audio-only) rendition. ANDROID_VR returns plain
+/// `url`s plus byte ranges, which is exactly what a DASH `SegmentBase` manifest
+/// needs.
 #[derive(Debug, Deserialize)]
 struct AdaptiveFormat {
     itag: Option<u32>,
@@ -588,7 +565,6 @@ impl<'a> AudioRep<'a> {
             .filter(|kind| *kind != AudioKind::Unspecified)
             .or_else(|| track.map(|track| AudioKind::from_label(&track.display_name)))
             .unwrap_or(AudioKind::Unspecified);
-        let is_drc = format.is_drc || tag_value(&tags, "drc") == Some("1");
         let mut label = track
             .map(|track| track.display_name.trim())
             .unwrap_or("")
@@ -596,7 +572,7 @@ impl<'a> AudioRep<'a> {
         if label.is_empty() {
             label = language.clone();
         }
-        if is_drc {
+        if format.is_drc {
             label.push_str(" (DRC)");
         }
 
@@ -616,7 +592,7 @@ impl<'a> AudioRep<'a> {
             label,
             kind,
             is_default: track.is_some_and(|track| track.audio_is_default),
-            is_drc,
+            is_drc: format.is_drc,
         })
     }
 }
@@ -818,26 +794,7 @@ fn build_dash_manifest(
         if let Some(container) = group.reps.first().map(|rep| rep.container) {
             group.reps.retain(|rep| rep.container == container);
         }
-        // Representations within one AdaptationSet must be seamlessly
-        // switchable. YouTube AAC ships both HE-AAC (`mp4a.40.5`, 22.05 kHz)
-        // and AAC-LC (`mp4a.40.2`, 44.1 kHz) for a track; mixing object types
-        // and sample rates makes the audio decoder emit static on an ABR
-        // switch. Keep a single codec string — the highest-bitrate
-        // representation's (AAC-LC over HE-AAC), which also preserves the Opus
-        // bitrate ladder (all Opus reps share one codec string).
-        if let Some(codecs) = group
-            .reps
-            .iter()
-            .max_by_key(|rep| rep.bitrate)
-            .map(|rep| rep.codecs)
-        {
-            group.reps.retain(|rep| rep.codecs == codecs);
-        }
         group.reps.sort_by_key(|rep| rep.bitrate);
-        // Guard against duplicate `Representation` ids: some clients repeat the
-        // same itag for a track (e.g. DRC/non-DRC that collapse into one group).
-        let mut seen_itags = std::collections::HashSet::new();
-        group.reps.retain(|rep| seen_itags.insert(rep.itag));
     }
     audio_groups.retain(|group| !group.reps.is_empty());
     let main_audio = audio_groups
@@ -1509,66 +1466,6 @@ mod tests {
         .0;
 
         assert!(!mpd.contains("contentType=\"text\""));
-    }
-
-    #[test]
-    fn audio_set_keeps_single_codec_profile_to_avoid_decoder_glitch() {
-        // English shipped as HE-AAC (mp4a.40.5) + AAC-LC (mp4a.40.2) plus a
-        // two-rung Opus ladder. The AAC set must collapse to AAC-LC only (never
-        // mixing object types in one AdaptationSet), while Opus keeps both rungs.
-        let english = serde_json::json!([
-            {
-                "itag": 139, "mimeType": "audio/mp4; codecs=\"mp4a.40.5\"",
-                "url": "https://media.example/en-heaac", "bitrate": 48000,
-                "initRange": {"start": "0", "end": "731"},
-                "indexRange": {"start": "732", "end": "1519"},
-                "audioSampleRate": "22050", "audioChannels": 2,
-                "audioTrack": {"id": "en.4", "displayName": "English", "audioIsDefault": true}
-            },
-            {
-                "itag": 140, "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
-                "url": "https://media.example/en-aaclc", "bitrate": 128000,
-                "initRange": {"start": "0", "end": "722"},
-                "indexRange": {"start": "723", "end": "1510"},
-                "audioSampleRate": "44100", "audioChannels": 2,
-                "audioTrack": {"id": "en.4", "displayName": "English", "audioIsDefault": true}
-            }
-        ]);
-        let mut formats: Vec<AdaptiveFormat> = serde_json::from_value(english).unwrap();
-        formats.extend(multilingual_formats());
-
-        let aac = build_dash_manifest(&formats, &[], &caps(&["h264"], &["aac"], &[], (1920, 1080)))
-            .unwrap()
-            .0;
-        assert!(aac.contains("https://media.example/en-aaclc"));
-        assert!(!aac.contains("mp4a.40.5"));
-        assert!(!aac.contains("https://media.example/en-heaac"));
-
-        // With Opus advertised, English resolves to the Opus ladder (both rungs).
-        let opus = build_dash_manifest(
-            &formats,
-            &[],
-            &caps(&["h264"], &["opus"], &[], (1920, 1080)),
-        )
-        .unwrap()
-        .0;
-        assert!(opus.contains("https://media.example/en-opus-high"));
-        assert!(opus.contains("https://media.example/en-opus-low"));
-    }
-
-    #[test]
-    fn decodes_real_ios_audio_xtags() {
-        // Captured from the IOS InnerTube client (base64url, no padding).
-        let dubbed = decode_xtags(Some("Cg8KBWFjb250EgZkdWJiZWQKCgoEbGFuZxICamE"));
-        assert_eq!(tag_value(&dubbed, "acont"), Some("dubbed"));
-        assert_eq!(tag_value(&dubbed, "lang"), Some("ja"));
-
-        let original_drc = decode_xtags(Some(
-            "ChEKBWFjb250EghvcmlnaW5hbAoICgNkcmMSATEKCgoEbGFuZxICZW4",
-        ));
-        assert_eq!(tag_value(&original_drc, "acont"), Some("original"));
-        assert_eq!(tag_value(&original_drc, "drc"), Some("1"));
-        assert_eq!(tag_value(&original_drc, "lang"), Some("en"));
     }
 
     #[tokio::test]
