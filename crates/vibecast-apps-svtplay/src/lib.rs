@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use url::Url;
 use vibecast_sdk::{
     normalize_stream_type, AppContext, AppProvider, AppSession, LaunchCredentials, LaunchError,
-    LoadRequest, MediaMetadata, MediaResolveError, PlaybackMedia, PlaybackStream,
+    LoadRequest, MediaMetadata, MediaResolveError, PlaybackMedia, PlaybackStream, StreamSource,
 };
 
 use crate::api::{SvtError, SvtPlayApi, SvtResolvedStream};
@@ -98,7 +98,7 @@ impl AppSession for SvtSession {
                      content_type,
                      drm,
                  }| PlaybackStream {
-                    url,
+                    source: StreamSource::Url(url),
                     content_type,
                     drm,
                 },
@@ -113,7 +113,10 @@ impl AppSession for SvtSession {
             session_id = %ctx.session_id,
             svt_id = %svt_id,
             streams = streams.len(),
-            first_url = %streams.first().map(|s| s.url.as_str()).unwrap_or(""),
+            first_url = %streams
+                .first()
+                .and_then(|s| s.source.as_url())
+                .unwrap_or(""),
             "svt stream resolved"
         );
 
@@ -325,7 +328,7 @@ mod tests {
 
         assert!(media.streams.len() >= 2);
 
-        let ditto = Url::parse(&media.streams[0].url).unwrap();
+        let ditto = Url::parse(media.streams[0].source.as_url().unwrap()).unwrap();
         let params: HashMap<String, String> = ditto.query_pairs().into_owned().collect();
         let manifest = |name: &str| format!("{}/manifest/{name}.mpd", server.uri());
         assert_eq!(params.get("manifestUrl"), Some(&manifest("default")));
@@ -351,7 +354,10 @@ mod tests {
         );
         assert_eq!(params.get("b").map(String::as_str), Some("-6334"));
 
-        assert_eq!(media.streams[1].url, manifest("default"));
+        assert_eq!(
+            media.streams[1].source.as_url(),
+            Some(manifest("default").as_str())
+        );
         assert_eq!(media.title.as_deref(), Some("Hundarna"));
         assert_eq!(media.subtitle.as_deref(), Some("1. Nu kor vi!"));
         assert_eq!(media.duration, Some(2489.0));

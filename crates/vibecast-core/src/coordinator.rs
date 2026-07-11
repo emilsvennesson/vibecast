@@ -171,7 +171,11 @@ pub(crate) fn media_info(media: &PlaybackMedia) -> MediaInfo {
     let content_id = media
         .content_id
         .clone()
-        .or_else(|| primary.map(|stream| stream.url.clone()))
+        .or_else(|| {
+            primary
+                .and_then(|stream| stream.source.as_url())
+                .map(str::to_string)
+        })
         .unwrap_or_default();
     let is_live = media.stream_type == StreamType::Live;
     MediaInfo {
@@ -183,7 +187,9 @@ pub(crate) fn media_info(media: &PlaybackMedia) -> MediaInfo {
         metadata,
         duration: media.duration,
         custom_data: media.custom_data.clone().filter(is_non_empty_object),
-        content_url: primary.map(|stream| stream.url.clone()),
+        content_url: primary
+            .and_then(|stream| stream.source.as_url())
+            .map(str::to_string),
         media_category: Some(MediaCategory::Video),
         start_absolute_time: None,
         is_live_media: if is_live { Some(true) } else { None },

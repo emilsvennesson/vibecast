@@ -30,8 +30,8 @@ use vibecast_player_api::{Player, PlayerCommand, PlayerReport};
 use vibecast_proto::CastMessage;
 use vibecast_sdk::{
     AppContext, AppSession, LaunchCredentials, MediaResolveError, MessageDisposition,
-    NoopSenderChannel, PlaybackMedia, PlaybackState, PlayerCapabilities, ReceiverContext,
-    SenderChannel,
+    NoopSenderChannel, PlaybackController, PlaybackMedia, PlaybackState, PlayerCapabilities,
+    ReceiverContext, SenderChannel,
 };
 
 use crate::coordinator::{loading_media_info, media_info, Coordinator};
@@ -73,6 +73,54 @@ impl SenderChannel for HubSender {
     }
 }
 
+/// Routes app-driven playback back through the hub's canonical media state
+/// machine instead of letting an app talk directly to a concrete player.
+struct HubPlaybackController {
+    tx: mpsc::Sender<HubEvent>,
+    session_id: String,
+}
+
+#[async_trait]
+impl PlaybackController for HubPlaybackController {
+    async fn load(&self, media: PlaybackMedia) {
+        let _ = self
+            .tx
+            .send(HubEvent::AppPlayback(AppPlaybackEvent {
+                session_id: self.session_id.clone(),
+                command: AppPlaybackCommand::Load(media),
+            }))
+            .await;
+    }
+
+    async fn play(&self) {
+        self.send(AppPlaybackCommand::Play).await;
+    }
+
+    async fn pause(&self) {
+        self.send(AppPlaybackCommand::Pause).await;
+    }
+
+    async fn seek(&self, position: f64) {
+        self.send(AppPlaybackCommand::Seek(position)).await;
+    }
+
+    async fn stop(&self) {
+        self.send(AppPlaybackCommand::Stop).await;
+    }
+}
+
+impl HubPlaybackController {
+    async fn send(&self, command: AppPlaybackCommand) {
+        let _ = self
+            .tx
+            .send(HubEvent::AppPlayback(AppPlaybackEvent {
+                session_id: self.session_id.clone(),
+                command,
+            }))
+            .await;
+    }
+}
+
 /// An event driving the hub actor. Internal to the crate: external callers use
 /// [`DeviceHubHandle`], so the internal `MediaResolved` feedback variant is
 /// never part of the public API.
@@ -83,8 +131,23 @@ enum HubEvent {
     Report(PlayerReport),
     /// The result of an app's `resolve_media` (internal feedback).
     MediaResolved(MediaResolved),
+    /// Playback initiated by an app-specific control channel.
+    AppPlayback(AppPlaybackEvent),
     /// Stop all app sessions cleanly, then acknowledge (graceful shutdown).
     Shutdown(tokio::sync::oneshot::Sender<()>),
+}
+
+struct AppPlaybackEvent {
+    session_id: String,
+    command: AppPlaybackCommand,
+}
+
+enum AppPlaybackCommand {
+    Load(PlaybackMedia),
+    Play,
+    Pause,
+    Seek(f64),
+    Stop,
 }
 
 /// The (spawned) result of resolving media for one LOAD request.
@@ -312,6 +375,7 @@ impl DeviceHub {
             }
             HubEvent::Report(report) => self.on_report(report).await,
             HubEvent::MediaResolved(resolved) => self.on_media_resolved(resolved).await,
+            HubEvent::AppPlayback(event) => self.on_app_playback(event).await,
             HubEvent::Shutdown(ack) => {
                 for session_id in self.sessions.keys().cloned().collect::<Vec<_>>() {
                     self.stop_session(&session_id).await;
@@ -468,7 +532,11 @@ impl DeviceHub {
                 capabilities: self.capabilities.clone(),
             },
             Arc::new(NoopSenderChannel),
-        );
+        )
+        .with_playback_controller(Arc::new(HubPlaybackController {
+            tx: self.self_tx.clone(),
+            session_id: session_id.clone(),
+        }));
 
         let app: Arc<dyn AppSession> = match provider
             .launch(
@@ -677,64 +745,20 @@ impl DeviceHub {
             MediaRequest::Load(load) => self.media_load(conn_id, transport, source, load).await,
             MediaRequest::Play(r) => {
                 tracing::debug!(session_id = %transport, request_id = r.request_id, "PLAY");
-                self.transition(transport, r.request_id, |c| {
-                    c.player_state = PlayerState::Playing;
-                    c.idle_reason = None;
-                })
-                .await;
-                self.player
-                    .send(PlayerCommand::Play {
-                        session_id: transport.to_string(),
-                    })
-                    .await;
-                self.notify_app(transport).await;
+                self.play(transport, r.request_id).await;
             }
             MediaRequest::Pause(r) => {
                 tracing::debug!(session_id = %transport, request_id = r.request_id, "PAUSE");
-                self.transition(transport, r.request_id, |c| {
-                    c.player_state = PlayerState::Paused;
-                    c.idle_reason = None;
-                })
-                .await;
-                self.player
-                    .send(PlayerCommand::Pause {
-                        session_id: transport.to_string(),
-                    })
-                    .await;
-                self.notify_app(transport).await;
+                self.pause(transport, r.request_id).await;
             }
             MediaRequest::Seek(r) => {
                 let position = r.current_time;
                 tracing::debug!(session_id = %transport, request_id = r.request_id, position, "SEEK");
-                self.transition(transport, r.request_id, |c| {
-                    c.current_time = position;
-                    c.idle_reason = None;
-                })
-                .await;
-                self.player
-                    .send(PlayerCommand::Seek {
-                        session_id: transport.to_string(),
-                        position,
-                    })
-                    .await;
-                self.notify_app(transport).await;
+                self.seek(transport, r.request_id, position).await;
             }
             MediaRequest::Stop(r) => {
                 tracing::debug!(session_id = %transport, request_id = r.request_id, "STOP");
-                self.transition(transport, r.request_id, |c| {
-                    c.set_idle(Some(IdleReason::Cancelled));
-                })
-                .await;
-                self.player
-                    .send(PlayerCommand::Stop {
-                        session_id: transport.to_string(),
-                    })
-                    .await;
-                if let Some(session) = self.sessions.get_mut(transport) {
-                    session.coordinator.clear_media();
-                }
-                self.unregister_proxies(transport);
-                self.notify_app(transport).await;
+                self.stop_playback(transport, r.request_id).await;
             }
             MediaRequest::SetVolume(r) => {
                 let (level, muted) = match self.sessions.get_mut(transport) {
@@ -809,6 +833,66 @@ impl DeviceHub {
         self.broadcast(transport, ns::MEDIA, &response).await;
     }
 
+    async fn play(&mut self, session_id: &str, request_id: i64) {
+        self.transition(session_id, request_id, |coordinator| {
+            coordinator.player_state = PlayerState::Playing;
+            coordinator.idle_reason = None;
+        })
+        .await;
+        self.player
+            .send(PlayerCommand::Play {
+                session_id: session_id.to_string(),
+            })
+            .await;
+        self.notify_app(session_id).await;
+    }
+
+    async fn pause(&mut self, session_id: &str, request_id: i64) {
+        self.transition(session_id, request_id, |coordinator| {
+            coordinator.player_state = PlayerState::Paused;
+            coordinator.idle_reason = None;
+        })
+        .await;
+        self.player
+            .send(PlayerCommand::Pause {
+                session_id: session_id.to_string(),
+            })
+            .await;
+        self.notify_app(session_id).await;
+    }
+
+    async fn seek(&mut self, session_id: &str, request_id: i64, position: f64) {
+        self.transition(session_id, request_id, |coordinator| {
+            coordinator.current_time = position;
+            coordinator.idle_reason = None;
+        })
+        .await;
+        self.player
+            .send(PlayerCommand::Seek {
+                session_id: session_id.to_string(),
+                position,
+            })
+            .await;
+        self.notify_app(session_id).await;
+    }
+
+    async fn stop_playback(&mut self, session_id: &str, request_id: i64) {
+        self.transition(session_id, request_id, |coordinator| {
+            coordinator.set_idle(Some(IdleReason::Cancelled));
+        })
+        .await;
+        self.player
+            .send(PlayerCommand::Stop {
+                session_id: session_id.to_string(),
+            })
+            .await;
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            session.coordinator.clear_media();
+        }
+        self.unregister_proxies(session_id);
+        self.notify_app(session_id).await;
+    }
+
     async fn media_load(
         &mut self,
         conn_id: u64,
@@ -877,7 +961,7 @@ impl DeviceHub {
             return; // session stopped while resolving
         }
 
-        let mut media = match result {
+        let media = match result {
             Ok(media) => media,
             Err(failure) => {
                 self.fail_load(&session_id, connection_id, &sender_id, request_id, &failure)
@@ -885,7 +969,6 @@ impl DeviceHub {
                 return;
             }
         };
-        media.session_id = session_id.clone();
         if media.streams.is_empty() {
             let failure = MediaResolveError::internal("INVALID_APP_MEDIA");
             self.fail_load(&session_id, connection_id, &sender_id, request_id, &failure)
@@ -893,24 +976,61 @@ impl DeviceHub {
             return;
         }
 
+        self.start_resolved_media(&session_id, request_id, media)
+            .await;
+    }
+
+    async fn on_app_playback(&mut self, event: AppPlaybackEvent) {
+        let AppPlaybackEvent {
+            session_id,
+            command,
+        } = event;
+        if !self.sessions.contains_key(&session_id) {
+            tracing::debug!(%session_id, "app playback command for stopped session; dropping");
+            return;
+        }
+
+        match command {
+            AppPlaybackCommand::Load(media) if media.streams.is_empty() => {
+                tracing::warn!(%session_id, "app tried to load media without streams");
+            }
+            AppPlaybackCommand::Load(media) => {
+                if let Some(session) = self.sessions.get_mut(&session_id) {
+                    session.coordinator.media_session_id += 1;
+                }
+                self.start_resolved_media(&session_id, 0, media).await;
+            }
+            AppPlaybackCommand::Play => self.play(&session_id, 0).await,
+            AppPlaybackCommand::Pause => self.pause(&session_id, 0).await,
+            AppPlaybackCommand::Seek(position) => self.seek(&session_id, 0, position).await,
+            AppPlaybackCommand::Stop => self.stop_playback(&session_id, 0).await,
+        }
+    }
+
+    async fn start_resolved_media(
+        &mut self,
+        session_id: &str,
+        request_id: i64,
+        mut media: PlaybackMedia,
+    ) {
+        media.session_id = session_id.to_string();
         let media_session_id = self
             .sessions
-            .get(&session_id)
-            .map(|s| s.coordinator.media_session_id)
+            .get(session_id)
+            .map(|session| session.coordinator.media_session_id)
             .unwrap_or(0);
-        let media = self.attach_proxies(&session_id, media_session_id, media);
+        let media = self.attach_proxies(session_id, media_session_id, media);
 
         tracing::info!(
             session_id = %session_id,
             request_id,
             streams = media.streams.len(),
             stream_type = ?media.stream_type,
-            first_url = %media.streams.first().map(|s| s.url.as_str()).unwrap_or(""),
             "media resolved"
         );
 
         // Phase 3 + 4: broadcast resolved LOADING, then BUFFERING, then load.
-        let (loading, buffering) = match self.sessions.get_mut(&session_id) {
+        let (loading, buffering) = match self.sessions.get_mut(session_id) {
             Some(session) => {
                 let coordinator = &mut session.coordinator;
                 let info = media_info(&media);
@@ -925,16 +1045,16 @@ impl DeviceHub {
             }
             None => return,
         };
-        self.broadcast(&session_id, ns::MEDIA, &loading).await;
-        self.broadcast(&session_id, ns::MEDIA, &buffering).await;
+        self.broadcast(session_id, ns::MEDIA, &loading).await;
+        self.broadcast(session_id, ns::MEDIA, &buffering).await;
 
         self.player
             .send(PlayerCommand::Load {
-                session_id: session_id.clone(),
+                session_id: session_id.to_string(),
                 media: to_payload(&media),
             })
             .await;
-        self.notify_app(&session_id).await;
+        self.notify_app(session_id).await;
     }
 
     fn attach_proxies(
@@ -1134,6 +1254,7 @@ impl DeviceHub {
             session.ctx.receiver.clone(),
             sender,
         )
+        .with_playback_controller(session.ctx.playback_controller())
     }
 
     async fn notify_app(&self, session_id: &str) {

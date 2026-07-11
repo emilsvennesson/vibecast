@@ -551,13 +551,12 @@
         const drm = stream && typeof stream === "object" ? stream.drm || null : null;
 
         pushLog("info", "Stream " + (i + 1) + "/" + streams.length + ": " + (streamType || "(no mime)"), {
-          url: streamUrl,
           contentType: streamType,
-          drm: drm,
+          drmSystem: drm && typeof drm.system === "string" ? drm.system : null,
         });
 
         if (!configureDrm(player, drm)) {
-          lastErrorMessage = "Unsupported DRM key system for stream " + streamUrl;
+          lastErrorMessage = "Unsupported DRM key system for stream " + (i + 1);
           pushLog("err", lastErrorMessage);
           continue;
         }
@@ -605,7 +604,12 @@
 
     switch (command.type) {
       case "load":
-        pushLog("ws-recv", "<< load", command);
+        pushLog("ws-recv", "<< load", {
+          type: command.type,
+          sessionId: command.sessionId,
+          streamCount:
+            command.media && Array.isArray(command.media.streams) ? command.media.streams.length : 0,
+        });
         await handleLoad(command);
         break;
       case "play":

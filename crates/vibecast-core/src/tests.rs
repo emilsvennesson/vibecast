@@ -118,11 +118,10 @@ impl AppSession for FakeSession {
         }
         let mut media = PlaybackMedia::new(
             ctx.session_id.clone(),
-            vec![PlaybackStream {
-                url: "https://cdn.example/manifest.mpd".into(),
-                content_type: "application/dash+xml".into(),
-                drm: None,
-            }],
+            vec![PlaybackStream::url(
+                "https://cdn.example/manifest.mpd",
+                "application/dash+xml",
+            )],
             StreamType::Buffered,
         );
         media.title = Some("Fake Title".into());
@@ -138,9 +137,32 @@ impl AppSession for FakeSession {
         data: &Value,
     ) -> vibecast_sdk::MessageDisposition {
         if namespace == FAKE_NS {
-            let echo = data.get("type").cloned();
-            ctx.send_custom(namespace, serde_json::json!({"type": "PONG", "echo": echo}))
-                .await;
+            match data.get("type").and_then(Value::as_str) {
+                Some("PUSH_MEDIA") => {
+                    let mut media = PlaybackMedia::new(
+                        ctx.session_id.clone(),
+                        vec![PlaybackStream::url(
+                            "https://cdn.example/video.mp4",
+                            "video/mp4",
+                        )],
+                        StreamType::Buffered,
+                    );
+                    media.title = Some("App-driven media".into());
+                    media.start_time = 7.0;
+                    ctx.playback_controller().load(media).await;
+                }
+                Some("APP_PLAY") => ctx.playback_controller().play().await,
+                Some("APP_PAUSE") => ctx.playback_controller().pause().await,
+                Some("APP_SEEK") => ctx.playback_controller().seek(33.0).await,
+                Some("APP_STOP") => ctx.playback_controller().stop().await,
+                message_type => {
+                    ctx.send_custom(
+                        namespace,
+                        serde_json::json!({"type": "PONG", "echo": message_type}),
+                    )
+                    .await;
+                }
+            }
             vibecast_sdk::MessageDisposition::Handled
         } else {
             vibecast_sdk::MessageDisposition::Unhandled
@@ -462,6 +484,53 @@ async fn custom_namespace_message_is_handled_and_replies() {
     let reply = next_json(client).await;
     assert_eq!(reply["type"], "PONG");
     assert_eq!(reply["echo"], "PING");
+}
+
+#[tokio::test]
+async fn app_driven_playback_uses_canonical_media_path() {
+    let mut harness = setup().await;
+    let client = &mut harness.client;
+    let transport = launch(client).await;
+    send(client, ns::CONNECTION, &transport, r#"{"type":"CONNECT"}"#).await;
+    let _ = next_json(client).await;
+
+    send(client, FAKE_NS, &transport, r#"{"type":"PUSH_MEDIA"}"#).await;
+    let loading = next_json(client).await;
+    let buffering = next_json(client).await;
+    assert_eq!(
+        loading["status"][0]["extendedStatus"]["playerState"],
+        "LOADING"
+    );
+    assert_eq!(loading["status"][0]["mediaSessionId"], 2);
+    assert_eq!(buffering["status"][0]["playerState"], "BUFFERING");
+    assert_eq!(buffering["status"][0]["currentTime"], 7.0);
+
+    send(client, FAKE_NS, &transport, r#"{"type":"APP_PAUSE"}"#).await;
+    assert_eq!(
+        next_json(client).await["status"][0]["playerState"],
+        "PAUSED"
+    );
+    send(client, FAKE_NS, &transport, r#"{"type":"APP_SEEK"}"#).await;
+    assert_eq!(next_json(client).await["status"][0]["currentTime"], 33.0);
+    send(client, FAKE_NS, &transport, r#"{"type":"APP_PLAY"}"#).await;
+    assert_eq!(
+        next_json(client).await["status"][0]["playerState"],
+        "PLAYING"
+    );
+    send(client, FAKE_NS, &transport, r#"{"type":"APP_STOP"}"#).await;
+    let stopped = next_json(client).await;
+    assert_eq!(stopped["status"][0]["playerState"], "IDLE");
+    assert_eq!(stopped["status"][0]["idleReason"], "CANCELLED");
+
+    let commands = harness.player.commands();
+    assert!(matches!(commands[0], PlayerCommand::Load { .. }));
+    assert!(matches!(commands[1], PlayerCommand::Pause { .. }));
+    assert!(matches!(
+        commands[2],
+        PlayerCommand::Seek { position: 33.0, .. }
+    ));
+    assert!(matches!(commands[3], PlayerCommand::Play { .. }));
+    assert!(matches!(commands[4], PlayerCommand::Stop { .. }));
 }
 
 /// An app session whose `resolve_license` reverses the challenge instead of

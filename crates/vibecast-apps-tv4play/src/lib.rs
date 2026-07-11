@@ -18,7 +18,7 @@ use vibecast_sdk::{
     normalize_stream_type, AppContext, AppProvider, AppSession, DrmInfo, DrmSystem,
     LaunchCredentials, LaunchError, LoadRequest, MediaImage, MediaMetadata, MediaResolveCode,
     MediaResolveError, MessageDisposition, PlaybackMedia, PlaybackState, PlaybackStream,
-    StreamType,
+    StreamSource, StreamType,
 };
 
 use crate::api::{merged_custom_data, Tv4AuthTokens, Tv4Error, Tv4PlayApi, Tv4ResolvedMedia};
@@ -292,7 +292,7 @@ fn direct_media(ctx: &AppContext, request: &LoadRequest, content_id: &str) -> Pl
     PlaybackMedia {
         session_id: ctx.session_id.clone(),
         streams: vec![PlaybackStream {
-            url,
+            source: StreamSource::Url(url),
             content_type,
             drm: None,
         }],
@@ -351,7 +351,7 @@ fn playback_media_from_resolved(
     PlaybackMedia {
         session_id: ctx.session_id.clone(),
         streams: vec![PlaybackStream {
-            url: resolved.manifest_url.clone(),
+            source: StreamSource::Url(resolved.manifest_url.clone()),
             content_type: resolved.content_type.clone(),
             drm: drm_info(item),
         }],
@@ -701,10 +701,13 @@ mod tests {
 
         assert_eq!(media.stream_type, StreamType::Buffered);
         assert_eq!(
-            media.streams[0].url,
-            format!(
-                "{}/csm/builder/proxy.1,proxy.2.mpd?yo.p.si=abc&ss.sig=sig",
-                server.uri()
+            media.streams[0].source.as_url(),
+            Some(
+                format!(
+                    "{}/csm/builder/proxy.1,proxy.2.mpd?yo.p.si=abc&ss.sig=sig",
+                    server.uri()
+                )
+                .as_str()
             )
         );
         assert_eq!(media.streams[0].content_type, "application/dash+xml");
@@ -785,8 +788,8 @@ mod tests {
 
         assert_eq!(media.stream_type, StreamType::Live);
         assert_eq!(
-            media.streams[0].url,
-            "https://vod.streaming.a2d.tv/original.mpd"
+            media.streams[0].source.as_url(),
+            Some("https://vod.streaming.a2d.tv/original.mpd")
         );
         assert_eq!(media.content_id.as_deref(), Some("live-asset"));
         assert_eq!(media.title.as_deref(), Some("TV4"));

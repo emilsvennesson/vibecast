@@ -22,7 +22,8 @@ use vibecast_sdk::{
     normalize_stream_type, AppConfig, AppConfigError, AppContext, AppProvider, AppSession, DrmInfo,
     DrmSystem, LaunchCredentials, LaunchError, LicenseForwarder, LicenseRequest, LicenseResponse,
     LicenseRoute, LoadRequest, MediaMetadata, MediaResolveCode, MediaResolveError,
-    MessageDisposition, PlaybackMedia, PlaybackStream, PlayerCapabilities, StreamType,
+    MessageDisposition, PlaybackMedia, PlaybackStream, PlayerCapabilities, StreamSource,
+    StreamType,
 };
 
 use crate::api::{
@@ -345,7 +346,7 @@ impl AppSession for PrimeSession {
         let streams: Vec<PlaybackStream> = ordered_sets
             .into_iter()
             .map(|url| PlaybackStream {
-                url: self.api.with_device_type_query(&url),
+                source: StreamSource::Url(self.api.with_device_type_query(&url)),
                 content_type: "application/dash+xml".to_string(),
                 drm: Some(drm.clone()),
             })
@@ -1022,10 +1023,9 @@ mod tests {
 
         let resolved = session.resolve_media(&ctx, &request).await.unwrap();
         assert_eq!(resolved.streams.len(), 2);
-        assert!(resolved.streams[0]
-            .url
-            .starts_with("https://cdn.example.com/main.mpd"));
-        assert!(resolved.streams[0].url.contains("amznDtid="));
+        let stream_url = resolved.streams[0].source.as_url().unwrap();
+        assert!(stream_url.starts_with("https://cdn.example.com/main.mpd"));
+        assert!(stream_url.contains("amznDtid="));
         let drm = resolved.streams[0].drm.as_ref().unwrap();
         assert_eq!(drm.system, DrmSystem::Widevine);
         assert!(drm
@@ -1095,7 +1095,9 @@ mod tests {
         assert_eq!(resolved.stream_type, StreamType::Live);
         assert_eq!(resolved.start_time, 64092211200.0);
         assert!(resolved.streams[0]
-            .url
+            .source
+            .as_url()
+            .unwrap()
             .starts_with("https://cdn.example.com/live-main.mpd"));
         assert!(resolved.streams[0]
             .drm

@@ -34,6 +34,7 @@ use vibecast_apps_primevideo::PrimeVideo;
 use vibecast_apps_svtplay::SvtPlay;
 use vibecast_apps_tv4play::Tv4Play;
 use vibecast_apps_viaplay::Viaplay;
+use vibecast_apps_youtube::YouTube;
 use vibecast_bridge::PlayerBridge;
 use vibecast_core::{AppRegistry, RegistryError};
 use vibecast_discovery::DiscoveryError;
@@ -373,6 +374,7 @@ fn build_app_providers(config: &Config) -> Result<Vec<Arc<dyn AppProvider>>, Pla
         Box::new(Tv4Play::new()),
         Box::new(Viaplay::new()),
         Box::new(PrimeVideo::new()),
+        Box::new(YouTube::new()),
     ];
 
     for provider in &mut providers {
@@ -474,6 +476,7 @@ mod tests {
         assert!(keys.contains(&"tv4play"));
         assert!(keys.contains(&"viaplay"));
         assert!(keys.contains(&"primevideo"));
+        assert!(keys.contains(&"youtube"));
     }
 
     #[test]
