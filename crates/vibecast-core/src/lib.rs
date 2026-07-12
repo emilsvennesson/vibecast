@@ -20,5 +20,5 @@ mod tests;
 
 pub use hub::{DeviceHub, DeviceHubHandle, HubClosed, HubConfig};
 pub use identity::DeviceIdentity;
-pub use registry::{AppRegistry, RegistryError};
+pub use registry::{AppRegistry, RegisteredApp, RegistryError};
 pub use vibecast_player_api::ProxyRegistrar;

@@ -10,8 +10,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use url::Url;
 use vibecast_sdk::{
-    normalize_stream_type, AppContext, AppProvider, AppSession, LaunchCredentials, LaunchError,
-    LoadRequest, MediaMetadata, MediaResolveError, PlaybackMedia, PlaybackStream, StreamSource,
+    normalize_stream_type, AppContext, AppManifest, AppProvider, AppSession, LaunchCredentials,
+    LaunchError, LoadRequest, MediaMetadata, MediaResolveError, PlaybackMedia, PlaybackStream,
+    StreamSource,
 };
 
 use crate::api::{SvtError, SvtPlayApi, SvtResolvedStream};
@@ -33,20 +34,8 @@ impl SvtPlay {
 
 #[async_trait]
 impl AppProvider for SvtPlay {
-    fn app_ids(&self) -> &'static [&'static str] {
-        APP_IDS
-    }
-
-    fn display_name(&self) -> &'static str {
-        "SVT Play"
-    }
-
-    fn app_key(&self) -> &'static str {
-        "svtplay"
-    }
-
-    fn icon_url(&self) -> Option<&'static str> {
-        Some(ICON_URL)
+    fn manifest(&self) -> AppManifest {
+        AppManifest::without_settings("svtplay", APP_IDS, "SVT Play").with_icon_url(ICON_URL)
     }
 
     async fn launch(
@@ -249,6 +238,17 @@ mod tests {
             "eXv13pb"
         );
         assert_eq!(extract_svt_id("https://www.svtplay.se/foo/bar"), "bar");
+    }
+
+    #[test]
+    fn app_manifest() {
+        let manifest = SvtPlay::new().manifest();
+        assert_eq!(manifest.app_key, "svtplay");
+        assert_eq!(manifest.app_ids, APP_IDS);
+        assert_eq!(manifest.display_name, "SVT Play");
+        assert_eq!(manifest.icon_url, Some(ICON_URL));
+        assert!(manifest.namespaces.is_empty());
+        assert!(manifest.settings.settings().is_empty());
     }
 
     fn video_payload(base: &str) -> serde_json::Value {

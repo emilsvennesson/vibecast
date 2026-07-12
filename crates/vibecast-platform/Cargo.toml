@@ -23,6 +23,7 @@ vibecast-core = { path = "../vibecast-core" }
 vibecast-player-api = { path = "../vibecast-player-api" }
 vibecast-receiver = { path = "../vibecast-receiver" }
 vibecast-sdk = { path = "../vibecast-sdk" }
+vibecast-settings = { path = "../vibecast-settings" }
 vibecast-messages = { path = "../vibecast-messages" }
 vibecast-apps-svtplay = { path = "../vibecast-apps-svtplay" }
 vibecast-apps-tv4play = { path = "../vibecast-apps-tv4play" }
@@ -32,6 +33,7 @@ vibecast-apps-youtube = { path = "../vibecast-apps-youtube" }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true, features = ["rt"] }
+async-trait = { workspace = true }
 reqwest = { workspace = true }
 rustls = { workspace = true }
 serde = { workspace = true }

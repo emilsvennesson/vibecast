@@ -32,6 +32,13 @@
 
     <category id="player" label="30012">
       <group id="1">
+        <setting id="open_app_settings" type="action" label="30028">
+          <level>0</level>
+          <data>NotifyAll(service.vibecast,open_app_settings)</data>
+          <control type="button" format="action">
+            <close>true</close>
+          </control>
+        </setting>
         <setting id="player_name" type="string" label="30020">
           <level>0</level>
           <default>Kodi</default>

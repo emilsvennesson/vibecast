@@ -102,3 +102,35 @@ msgstr ""
 msgctxt "#30027"
 msgid "Widevine security level (auto, L1, L2, L3)"
 msgstr ""
+
+msgctxt "#30028"
+msgid "App settings..."
+msgstr ""
+
+msgctxt "#30030"
+msgid "App settings"
+msgstr ""
+
+msgctxt "#30031"
+msgid "Reset to default"
+msgstr ""
+
+msgctxt "#30032"
+msgid "Close"
+msgstr ""
+
+msgctxt "#30033"
+msgid "APPS"
+msgstr ""
+
+msgctxt "#30034"
+msgid "SETTINGS"
+msgstr ""
+
+msgctxt "#30035"
+msgid "Choose how each Cast app behaves on this player."
+msgstr ""
+
+msgctxt "#30037"
+msgid "No app settings are available for this player."
+msgstr ""

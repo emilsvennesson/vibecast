@@ -6,11 +6,8 @@
 //!
 //! This is the canonical settings type shared by every platform binding. The
 //! desktop CLI populates it from `config.toml` via [`Config::load`]; other
-//! frontends (e.g. the Android FFI) build it programmatically. Per-app config
-//! is stored as [`serde_json::Value`] so it can originate from TOML *or* JSON
-//! without a lossy round-trip.
+//! frontends (e.g. the Android FFI) build it programmatically.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -57,8 +54,6 @@ pub struct Config {
     pub volume: VolumeConfig,
     /// Cast firmware identity + streaming-API capabilities.
     pub cast: CastConfig,
-    /// Per-app config values (`[apps.<key>]`), passed to `AppProvider::configure`.
-    pub apps: HashMap<String, serde_json::Value>,
 }
 
 /// `[device]` section.
@@ -246,8 +241,6 @@ mod tests {
             multizone_supported = false
             [network]
             player_port = 9010
-            [apps.primevideo]
-            marketplace_id = "X"
             "#,
         )
         .unwrap();
@@ -256,9 +249,6 @@ mod tests {
         assert!(!config.device.capabilities.multizone_supported); // overridden
         assert!(config.device.capabilities.cast_connect_supported); // default preserved
         assert_eq!(config.network.player_port, 9010);
-        assert!(config.apps.contains_key("primevideo"));
-        // Per-app tables deserialize into JSON values.
-        assert_eq!(config.apps["primevideo"]["marketplace_id"], "X");
     }
 
     #[test]

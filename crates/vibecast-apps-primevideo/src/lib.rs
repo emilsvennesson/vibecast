@@ -14,13 +14,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde::Deserialize;
 use serde_json::{Map, Value};
 use tokio::sync::Mutex;
 use url::Url;
 use vibecast_sdk::{
-    normalize_stream_type, AppConfig, AppConfigError, AppContext, AppProvider, AppSession, DrmInfo,
-    DrmSystem, LaunchCredentials, LaunchError, LicenseForwarder, LicenseRequest, LicenseResponse,
+    normalize_stream_type, AppContext, AppManifest, AppProvider, AppSession, DrmInfo, DrmSystem,
+    LaunchCredentials, LaunchError, LicenseForwarder, LicenseRequest, LicenseResponse,
     LicenseRoute, LoadRequest, MediaMetadata, MediaResolveCode, MediaResolveError,
     MessageDisposition, PlaybackMedia, PlaybackStream, PlayerCapabilities, StreamSource,
     StreamType,
@@ -37,46 +36,24 @@ use crate::models::{
 const NS_PRIME: &str = "urn:x-cast:com.amazon.primevideo.cast";
 const APP_IDS: &[&str] = &["17608BC8"];
 const ICON_URL: &str = "https://lh3.googleusercontent.com/QYGuZRR5YakSPcLFA65pr9BSwrvCpOjcsWiRaMN58t8374iv1HxlRs1mNQm3o0MEq5jmwMtEarN2CLI";
+const DEFAULT_MARKETPLACE_ID: &str = "A3K6Y4MI8GDYMT";
+const DEFAULT_LOCALE: &str = "en_US";
+const DEFAULT_AUTH_BASE_URL: &str = "https://api.amazon.co.uk";
 
-/// Prime Video app configuration from `[apps.primevideo]`.
-///
-/// Device-capability fields (codecs, resolution, HDCP, HDR, frame rates,
-/// subtitles) are no longer configured here — they are derived from the
-/// selected player's [`PlayerCapabilities`] at launch.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct PrimeVideoConfig {
-    pub marketplace_id: String,
-    pub locale: String,
-    pub auth_base_url: String,
-}
-
-impl Default for PrimeVideoConfig {
-    fn default() -> Self {
-        Self {
-            marketplace_id: "A3K6Y4MI8GDYMT".to_string(),
-            locale: "en_US".to_string(),
-            auth_base_url: "https://api.amazon.co.uk".to_string(),
-        }
-    }
-}
-
-impl PrimeVideoConfig {
-    /// Build the Prime API config, translating the player's neutral
-    /// capabilities into Amazon's request vocabulary.
-    fn api_config(&self, caps: &PlayerCapabilities) -> PrimeApiConfig {
-        PrimeApiConfig {
-            auth_base_url: self.auth_base_url.clone(),
-            display_width: caps.max_resolution.width,
-            display_height: caps.max_resolution.height,
-            hdcp_level: caps.hdcp_level.clone().unwrap_or_else(|| "1.4".to_string()),
-            max_video_resolution: amazon_max_resolution(caps.max_resolution.height),
-            supported_codecs: amazon_codecs(&caps.video_codecs),
-            dynamic_range_formats: amazon_dynamic_range(&caps.hdr_formats),
-            supported_frame_rates: amazon_frame_rates(&caps.frame_rates),
-            supported_subtitle_formats: vec!["TTMLv2".to_string(), "DFXP".to_string()],
-            ..PrimeApiConfig::default()
-        }
+/// Build the Prime API config, translating the player's neutral capabilities
+/// into Amazon's request vocabulary.
+fn api_config(caps: &PlayerCapabilities) -> PrimeApiConfig {
+    PrimeApiConfig {
+        auth_base_url: DEFAULT_AUTH_BASE_URL.to_string(),
+        display_width: caps.max_resolution.width,
+        display_height: caps.max_resolution.height,
+        hdcp_level: caps.hdcp_level.clone().unwrap_or_else(|| "1.4".to_string()),
+        max_video_resolution: amazon_max_resolution(caps.max_resolution.height),
+        supported_codecs: amazon_codecs(&caps.video_codecs),
+        dynamic_range_formats: amazon_dynamic_range(&caps.hdr_formats),
+        supported_frame_rates: amazon_frame_rates(&caps.frame_rates),
+        supported_subtitle_formats: vec!["TTMLv2".to_string(), "DFXP".to_string()],
+        ..PrimeApiConfig::default()
     }
 }
 
@@ -143,52 +120,23 @@ fn amazon_frame_rates(frame_rates: &[u32]) -> Vec<String> {
 }
 
 /// Prime Video app provider.
-#[derive(Debug, Clone)]
-pub struct PrimeVideo {
-    config: PrimeVideoConfig,
-}
-
-impl Default for PrimeVideo {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+#[derive(Debug, Clone, Default)]
+pub struct PrimeVideo;
 
 impl PrimeVideo {
-    /// Construct the provider with default configuration.
+    /// Construct the provider.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            config: PrimeVideoConfig::default(),
-        }
+        Self
     }
 }
 
 #[async_trait]
 impl AppProvider for PrimeVideo {
-    fn app_ids(&self) -> &'static [&'static str] {
-        APP_IDS
-    }
-
-    fn display_name(&self) -> &'static str {
-        "Prime Video"
-    }
-
-    fn app_key(&self) -> &'static str {
-        "primevideo"
-    }
-
-    fn icon_url(&self) -> Option<&'static str> {
-        Some(ICON_URL)
-    }
-
-    fn namespaces(&self) -> &'static [&'static str] {
-        &[NS_PRIME]
-    }
-
-    fn configure(&mut self, config: &AppConfig) -> Result<(), AppConfigError> {
-        self.config = config.deserialize()?;
-        Ok(())
+    fn manifest(&self) -> AppManifest {
+        AppManifest::without_settings("primevideo", APP_IDS, "Prime Video")
+            .with_icon_url(ICON_URL)
+            .with_namespaces(&[NS_PRIME])
     }
 
     async fn launch(
@@ -197,13 +145,10 @@ impl AppProvider for PrimeVideo {
         credentials: LaunchCredentials,
     ) -> Result<Arc<dyn AppSession>, LaunchError> {
         Ok(Arc::new(PrimeSession {
-            api: PrimeVideoApi::new(
-                ctx.http.clone(),
-                self.config.api_config(&ctx.receiver.capabilities),
-            ),
+            api: PrimeVideoApi::new(ctx.http.clone(), api_config(&ctx.receiver.capabilities)),
             state: Mutex::new(PrimeState {
-                marketplace_id: self.config.marketplace_id.clone(),
-                locale: self.config.locale.clone(),
+                marketplace_id: DEFAULT_MARKETPLACE_ID.to_string(),
+                locale: DEFAULT_LOCALE.to_string(),
                 device_id: Some(ctx.receiver.device_id.clone()),
                 actor_access_token: credentials.credentials,
                 ..PrimeState::default()
@@ -820,7 +765,7 @@ mod tests {
             hdcp_level: Some("2.2".to_string()),
         };
 
-        let api = PrimeVideoConfig::default().api_config(&caps);
+        let api = api_config(&caps);
         assert_eq!(api.display_width, 1920);
         assert_eq!(api.display_height, 1080);
         assert_eq!(api.max_video_resolution, "1080p");
@@ -893,21 +838,14 @@ mod tests {
     }
 
     #[test]
-    fn provider_metadata_and_config() {
-        let mut app = PrimeVideo::new();
-        assert_eq!(app.app_ids(), &["17608BC8"]);
-        assert_eq!(app.display_name(), "Prime Video");
-        assert_eq!(app.namespaces(), &[NS_PRIME]);
-
-        app.configure(&AppConfig::from_value(json!({"locale": "sv_SE"})))
-            .unwrap();
-        assert_eq!(app.config.locale, "sv_SE");
-        assert_eq!(app.config.marketplace_id, "A3K6Y4MI8GDYMT");
-
-        let err = app
-            .configure(&AppConfig::from_value(json!({"bogus": true})))
-            .unwrap_err();
-        assert!(err.to_string().contains("unknown field"));
+    fn provider_manifest_has_empty_settings() {
+        let manifest = PrimeVideo::new().manifest();
+        assert_eq!(manifest.app_key, "primevideo");
+        assert_eq!(manifest.app_ids, APP_IDS);
+        assert_eq!(manifest.display_name, "Prime Video");
+        assert_eq!(manifest.icon_url, Some(ICON_URL));
+        assert_eq!(manifest.namespaces, &[NS_PRIME]);
+        assert!(manifest.settings.settings().is_empty());
     }
 
     #[tokio::test]

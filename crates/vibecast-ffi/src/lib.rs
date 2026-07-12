@@ -54,8 +54,6 @@ pub struct ServerConfig {
     /// from `NetworkInterface` enumeration); `None` falls back to the
     /// routed-interface heuristic.
     pub local_ip: Option<String>,
-    /// Per-app config as a JSON object string (`{"<app_key>": { ... }}`).
-    pub apps_config_json: Option<String>,
 }
 
 /// A single Cast TXT record entry, mirrored into the frontend's discovery
@@ -233,7 +231,7 @@ impl ReceiverHandle {
             return Err(ReceiverError::AlreadyRunning);
         }
 
-        let (platform_config, inputs) = build_config(config)?;
+        let (platform_config, inputs) = build_config(config);
 
         // Forward per-player lifecycle to the foreign observer.
         let player_observer: Arc<dyn PlayerObserver> = Arc::new(ForeignObserver {
@@ -276,18 +274,11 @@ impl ReceiverHandle {
 }
 
 /// Map a [`ServerConfig`] onto the shared [`Config`] + [`PlatformInputs`].
-fn build_config(config: ServerConfig) -> Result<(Config, PlatformInputs), ReceiverError> {
+fn build_config(config: ServerConfig) -> (Config, PlatformInputs) {
     let mut platform_config = Config::default();
     platform_config.device.model = config.model;
     platform_config.network.bind_host = config.bind_host;
     platform_config.network.player_port = config.player_port;
-
-    if let Some(json) = config.apps_config_json {
-        platform_config.apps =
-            serde_json::from_str(&json).map_err(|error| ReceiverError::Config {
-                reason: format!("apps_config_json: {error}"),
-            })?;
-    }
 
     let inputs = PlatformInputs {
         data_dir: PathBuf::from(config.data_dir),
@@ -298,7 +289,7 @@ fn build_config(config: ServerConfig) -> Result<(Config, PlatformInputs), Receiv
         advertise_mdns: false,
         local_ip: config.local_ip.filter(|ip| !ip.trim().is_empty()),
     };
-    Ok((platform_config, inputs))
+    (platform_config, inputs)
 }
 
 fn to_txt_entries(pairs: Vec<(String, String)>) -> Vec<TxtEntry> {
@@ -316,9 +307,9 @@ impl From<PlatformError> for ReceiverError {
             PlatformError::Certs(_) | PlatformError::InvalidHeader(_) => {
                 ReceiverError::Certs { reason: message }
             }
-            PlatformError::AppConfig { .. } | PlatformError::Registry(_) => {
-                ReceiverError::Config { reason: message }
-            }
+            PlatformError::Registry(_)
+            | PlatformError::SettingsCatalog(_)
+            | PlatformError::Settings(_) => ReceiverError::Config { reason: message },
             PlatformError::Discovery(_)
             | PlatformError::HttpClient(_)
             | PlatformError::BridgeStart(_)
@@ -381,13 +372,12 @@ mod tests {
             bind_host: "127.0.0.1".to_owned(),
             player_port: 9010,
             local_ip: None,
-            apps_config_json: None,
         }
     }
 
     #[test]
     fn build_config_maps_fields_and_forces_no_mdns() {
-        let (config, inputs) = build_config(base_config()).unwrap();
+        let (config, inputs) = build_config(base_config());
         assert_eq!(config.device.model, "Chromecast");
         assert_eq!(config.network.player_port, 9010);
         assert!(!inputs.advertise_mdns);
@@ -399,31 +389,13 @@ mod tests {
     fn build_config_threads_local_ip_and_treats_blank_as_absent() {
         let mut sc = base_config();
         sc.local_ip = Some("192.168.1.42".to_owned());
-        let (_, inputs) = build_config(sc).unwrap();
+        let (_, inputs) = build_config(sc);
         assert_eq!(inputs.local_ip.as_deref(), Some("192.168.1.42"));
 
         let mut sc = base_config();
         sc.local_ip = Some("   ".to_owned());
-        let (_, inputs) = build_config(sc).unwrap();
+        let (_, inputs) = build_config(sc);
         assert_eq!(inputs.local_ip, None);
-    }
-
-    #[test]
-    fn build_config_parses_apps_json() {
-        let mut sc = base_config();
-        sc.apps_config_json = Some(r#"{"primevideo":{"marketplace_id":"X"}}"#.to_owned());
-        let (config, _) = build_config(sc).unwrap();
-        assert_eq!(config.apps["primevideo"]["marketplace_id"], "X");
-    }
-
-    #[test]
-    fn build_config_rejects_bad_apps_json() {
-        let mut sc = base_config();
-        sc.apps_config_json = Some("not json".to_owned());
-        assert!(matches!(
-            build_config(sc),
-            Err(ReceiverError::Config { .. })
-        ));
     }
 
     #[test]

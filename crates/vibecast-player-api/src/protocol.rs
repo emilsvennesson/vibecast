@@ -4,11 +4,12 @@
 //! bridge. Both are `#[serde(tag = "type")]` enums with camelCase field names
 //! on the wire.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use vibecast_messages::{IdleReason, MediaImage, PlayerState, StreamType};
+use vibecast_settings::SettingValue;
 
 /// Supported DRM key systems (EME key-system identifiers).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,6 +220,201 @@ impl PlayerReport {
     }
 }
 
+/// Player identity and capabilities supplied by the mandatory registration frame.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayerRegistration {
+    pub player_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub capabilities: PlayerCapabilitiesPayload,
+}
+
+/// Complete capability profile sent by a player.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PlayerCapabilitiesPayload {
+    pub platform: Option<String>,
+    pub drm: Vec<DrmCapabilityPayload>,
+    pub video_codecs: Vec<String>,
+    pub audio_codecs: Vec<String>,
+    pub max_resolution: Option<ResolutionPayload>,
+    pub hdr_formats: Vec<String>,
+    pub frame_rates: Vec<u32>,
+    pub subtitle_formats: Vec<String>,
+    pub hdcp_level: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DrmCapabilityPayload {
+    pub system: String,
+    #[serde(default)]
+    pub security_level: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct ResolutionPayload {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// One app setting as rendered by generic player clients.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingPayload {
+    pub key: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub kind: String,
+    pub default: SettingValue,
+    pub value: SettingValue,
+    pub writable: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<SettingOptionPayload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingOptionPayload {
+    pub value: String,
+    pub label: String,
+}
+
+/// Effective settings for one app and player.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettingsPayload {
+    pub app_key: String,
+    pub display_name: String,
+    pub revision: u64,
+    pub settings: Vec<SettingPayload>,
+}
+
+/// Every frame accepted from a connected player.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all_fields = "camelCase")]
+pub enum ClientMessage {
+    #[serde(rename = "register")]
+    Register { player: PlayerRegistration },
+    #[serde(rename = "state")]
+    State {
+        session_id: String,
+        player_state: PlayerState,
+        #[serde(default)]
+        current_time: f64,
+        #[serde(default)]
+        duration: Option<f64>,
+        #[serde(default)]
+        idle_reason: Option<IdleReason>,
+    },
+    #[serde(rename = "error")]
+    Error {
+        session_id: String,
+        code: String,
+        message: String,
+    },
+    #[serde(rename = "settingsUpdate")]
+    SettingsUpdate {
+        request_id: String,
+        app_key: String,
+        expected_revision: u64,
+        changes: BTreeMap<String, Option<SettingValue>>,
+    },
+}
+
+impl ClientMessage {
+    pub fn into_report(self) -> Option<PlayerReport> {
+        match self {
+            Self::State {
+                session_id,
+                player_state,
+                current_time,
+                duration,
+                idle_reason,
+            } => Some(PlayerReport::State {
+                session_id,
+                player_state,
+                current_time,
+                duration,
+                idle_reason,
+            }),
+            Self::Error {
+                session_id,
+                code,
+                message,
+            } => Some(PlayerReport::Error {
+                session_id,
+                code,
+                message,
+            }),
+            Self::Register { .. } | Self::SettingsUpdate { .. } => None,
+        }
+    }
+}
+
+/// Every frame sent from the server to a player.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum ServerMessage {
+    Playback(PlayerCommand),
+    SettingsSnapshot(SettingsSnapshotMessage),
+    SettingsUpdateResult(SettingsUpdateResultMessage),
+}
+
+impl From<PlayerCommand> for ServerMessage {
+    fn from(command: PlayerCommand) -> Self {
+        Self::Playback(command)
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsSnapshotMessage {
+    #[serde(rename = "type")]
+    message_type: &'static str,
+    pub apps: Vec<AppSettingsPayload>,
+}
+
+impl SettingsSnapshotMessage {
+    pub fn new(apps: Vec<AppSettingsPayload>) -> Self {
+        Self {
+            message_type: "settingsSnapshot",
+            apps,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsUpdateResultMessage {
+    #[serde(rename = "type")]
+    message_type: &'static str,
+    pub request_id: String,
+    pub status: SettingsUpdateStatus,
+    pub app: AppSettingsPayload,
+}
+
+impl SettingsUpdateResultMessage {
+    pub fn new(request_id: String, status: SettingsUpdateStatus, app: AppSettingsPayload) -> Self {
+        Self {
+            message_type: "settingsUpdateResult",
+            request_id,
+            status,
+            app,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SettingsUpdateStatus {
+    Applied,
+    Conflict,
+    Rejected,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,5 +495,40 @@ mod tests {
         .unwrap();
         assert!(matches!(report, PlayerReport::Error { .. }));
         assert_eq!(report.session_id(), "s1");
+    }
+
+    #[test]
+    fn registration_uses_nested_player_envelope() {
+        let message: ClientMessage = serde_json::from_value(json!({
+            "type": "register",
+            "player": {
+                "playerId": "p1",
+                "name": "Kodi",
+                "capabilities": { "videoCodecs": ["h264"] }
+            }
+        }))
+        .unwrap();
+        let ClientMessage::Register { player } = message else {
+            panic!("expected registration");
+        };
+        assert_eq!(player.player_id, "p1");
+        assert_eq!(player.capabilities.video_codecs, ["h264"]);
+    }
+
+    #[test]
+    fn settings_update_supports_set_and_reset() {
+        let message: ClientMessage = serde_json::from_value(json!({
+            "type": "settingsUpdate",
+            "requestId": "r1",
+            "appKey": "youtube",
+            "expectedRevision": 2,
+            "changes": { "codec": "vp9", "other": null }
+        }))
+        .unwrap();
+        let ClientMessage::SettingsUpdate { changes, .. } = message else {
+            panic!("expected settings update");
+        };
+        assert_eq!(changes["codec"], Some(SettingValue::String("vp9".into())));
+        assert_eq!(changes["other"], None);
     }
 }

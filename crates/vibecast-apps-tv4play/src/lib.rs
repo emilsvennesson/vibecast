@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use serde_json::{Map, Value};
 use tokio::sync::Mutex;
 use vibecast_sdk::{
-    normalize_stream_type, AppContext, AppProvider, AppSession, DrmInfo, DrmSystem,
+    normalize_stream_type, AppContext, AppManifest, AppProvider, AppSession, DrmInfo, DrmSystem,
     LaunchCredentials, LaunchError, LoadRequest, MediaImage, MediaMetadata, MediaResolveCode,
     MediaResolveError, MessageDisposition, PlaybackMedia, PlaybackState, PlaybackStream,
     StreamSource, StreamType,
@@ -45,20 +45,10 @@ impl Tv4Play {
 
 #[async_trait]
 impl AppProvider for Tv4Play {
-    fn app_ids(&self) -> &'static [&'static str] {
-        APP_IDS
-    }
-    fn display_name(&self) -> &'static str {
-        "TV4 Play v5"
-    }
-    fn app_key(&self) -> &'static str {
-        "tv4play"
-    }
-    fn icon_url(&self) -> Option<&'static str> {
-        Some(ICON_URL)
-    }
-    fn namespaces(&self) -> &'static [&'static str] {
-        &[NS_TV4]
+    fn manifest(&self) -> AppManifest {
+        AppManifest::without_settings("tv4play", APP_IDS, "TV4 Play v5")
+            .with_icon_url(ICON_URL)
+            .with_namespaces(&[NS_TV4])
     }
     async fn launch(
         &self,
@@ -621,12 +611,14 @@ mod tests {
     }
 
     #[test]
-    fn app_metadata() {
-        let app = Tv4Play::new();
-        assert_eq!(app.app_ids(), &["B6470434"]);
-        assert_eq!(app.display_name(), "TV4 Play v5");
-        assert_eq!(app.app_key(), "tv4play");
-        assert_eq!(app.namespaces(), &[NS_TV4]);
+    fn app_manifest() {
+        let manifest = Tv4Play::new().manifest();
+        assert_eq!(manifest.app_ids, APP_IDS);
+        assert_eq!(manifest.display_name, "TV4 Play v5");
+        assert_eq!(manifest.app_key, "tv4play");
+        assert_eq!(manifest.icon_url, Some(ICON_URL));
+        assert_eq!(manifest.namespaces, &[NS_TV4]);
+        assert!(manifest.settings.settings().is_empty());
     }
 
     struct VodRouter {

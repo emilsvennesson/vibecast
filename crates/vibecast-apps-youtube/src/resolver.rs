@@ -6,12 +6,48 @@ use prost::Message as _;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
-use vibecast_sdk::{MediaImage, PlaybackMedia, PlaybackStream, PlayerCapabilities, StreamType};
+use vibecast_sdk::{
+    MediaImage, PlaybackMedia, PlaybackStream, PlayerCapabilities, SettingKey, SettingsSnapshot,
+    StreamType,
+};
 
 const CLIENT_NAME: &str = "ANDROID_VR";
 const CLIENT_VERSION: &str = "1.57";
 const CLIENT_USER_AGENT: &str =
     "com.google.android.apps.youtube.vr.oculus/1.57 (Linux; U; Android 12L; en_US)";
+
+pub(crate) const PREFERRED_VIDEO_CODEC_KEY: SettingKey<String> =
+    SettingKey::new("preferred_video_codec");
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum PreferredVideoCodec {
+    #[default]
+    Auto,
+    Av1,
+    Vp9,
+    H264,
+}
+
+impl PreferredVideoCodec {
+    pub(crate) fn from_snapshot(snapshot: &SettingsSnapshot) -> Self {
+        snapshot
+            .get(PREFERRED_VIDEO_CODEC_KEY)
+            .ok()
+            .flatten()
+            .as_deref()
+            .map(Self::parse)
+            .unwrap_or_default()
+    }
+
+    fn parse(value: &str) -> Self {
+        match value {
+            "av1" => Self::Av1,
+            "vp9" => Self::Vp9,
+            "h264" => Self::H264,
+            _ => Self::Auto,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct Resolver {
@@ -58,6 +94,7 @@ impl Resolver {
         video_id: &str,
         start_time: f64,
         capabilities: &PlayerCapabilities,
+        preferred_video_codec: PreferredVideoCodec,
     ) -> Result<PlaybackMedia, ResolveError> {
         let mut watch_url = Url::parse(&self.endpoints.watch)
             .map_err(|_| ResolveError::Protocol("invalid watch endpoint"))?;
@@ -100,7 +137,7 @@ impl Resolver {
             ));
         }
 
-        playback_media(response, start_time, capabilities)
+        playback_media(response, start_time, capabilities, preferred_video_codec)
     }
 }
 
@@ -112,7 +149,7 @@ pub(crate) enum ResolveError {
     Protocol(&'static str),
     #[error("video is unavailable: {0}")]
     Unplayable(String),
-    #[error("no compatible progressive stream is available")]
+    #[error("no compatible video stream is available")]
     NoCompatibleStream,
 }
 
@@ -343,6 +380,7 @@ fn playback_media(
     response: PlayerResponse,
     start_time: f64,
     capabilities: &PlayerCapabilities,
+    preferred_video_codec: PreferredVideoCodec,
 ) -> Result<PlaybackMedia, ResolveError> {
     let PlayerResponse {
         streaming_data,
@@ -358,7 +396,12 @@ fn playback_media(
         .map(|tracklist| tracklist.caption_tracks)
         .unwrap_or_default();
 
-    let (manifest, stream_duration) = build_dash_manifest(&formats, &caption_tracks, capabilities)?;
+    let (manifest, stream_duration) = build_dash_manifest(
+        &formats,
+        &caption_tracks,
+        capabilities,
+        preferred_video_codec,
+    )?;
 
     let duration = stream_duration.or_else(|| {
         details
@@ -414,9 +457,6 @@ enum VideoCodec {
 }
 
 impl VideoCodec {
-    /// Preference order: AV1 (most efficient) > VP9 > H.264.
-    const PREFERENCE: [VideoCodec; 3] = [VideoCodec::Av1, VideoCodec::Vp9, VideoCodec::H264];
-
     /// The neutral capability token a player advertises.
     fn token(self) -> &'static str {
         match self {
@@ -713,6 +753,7 @@ fn build_dash_manifest(
     formats: &[AdaptiveFormat],
     caption_tracks: &[CaptionTrack],
     capabilities: &PlayerCapabilities,
+    preferred_video_codec: PreferredVideoCodec,
 ) -> Result<(String, Option<f64>), ResolveError> {
     let videos: Vec<VideoRep> = formats
         .iter()
@@ -720,8 +761,14 @@ fn build_dash_manifest(
         .filter(|rep| rep.within_resolution(capabilities))
         .collect();
 
-    // Video codec family: AV1 > VP9 > H.264, gated on advertised support.
-    let family = VideoCodec::PREFERENCE
+    let preference = match preferred_video_codec {
+        PreferredVideoCodec::Auto | PreferredVideoCodec::Av1 => {
+            [VideoCodec::Av1, VideoCodec::Vp9, VideoCodec::H264]
+        }
+        PreferredVideoCodec::Vp9 => [VideoCodec::Vp9, VideoCodec::Av1, VideoCodec::H264],
+        PreferredVideoCodec::H264 => [VideoCodec::H264, VideoCodec::Av1, VideoCodec::Vp9],
+    };
+    let family = preference
         .into_iter()
         .find(|codec| {
             capabilities.supports_video_codec(codec.token())
@@ -1298,7 +1345,16 @@ mod tests {
     }
 
     fn build(caps: &PlayerCapabilities) -> String {
-        build_dash_manifest(&formats(), &[], caps).unwrap().0
+        build_with_preference(caps, PreferredVideoCodec::Auto)
+    }
+
+    fn build_with_preference(
+        caps: &PlayerCapabilities,
+        preferred_video_codec: PreferredVideoCodec,
+    ) -> String {
+        build_dash_manifest(&formats(), &[], caps, preferred_video_codec)
+            .unwrap()
+            .0
     }
 
     #[test]
@@ -1327,6 +1383,48 @@ mod tests {
         assert!(mpd.contains("codecs=\"mp4a.40.2\""));
         assert!(!mpd.contains("av01"));
         assert!(!mpd.contains("avc1"));
+    }
+
+    #[test]
+    fn honors_vp9_and_h264_preferences() {
+        let capabilities = caps(&["av1", "vp9", "h264"], &["aac"], &[], (3840, 2160));
+
+        let vp9 = build_with_preference(&capabilities, PreferredVideoCodec::Vp9);
+        assert!(vp9.contains("codecs=\"vp9\""));
+        assert!(!vp9.contains("av01"));
+        assert!(!vp9.contains("avc1"));
+
+        let h264 = build_with_preference(&capabilities, PreferredVideoCodec::H264);
+        assert!(h264.contains("codecs=\"avc1.640028\""));
+        assert!(!h264.contains("av01"));
+        assert!(!h264.contains("vp9"));
+    }
+
+    #[test]
+    fn unavailable_preference_falls_back_in_declared_order() {
+        let capabilities = caps(&["av1", "h264"], &["aac"], &[], (3840, 2160));
+        let mpd = build_with_preference(&capabilities, PreferredVideoCodec::Vp9);
+
+        assert!(mpd.contains("codecs=\"av01.0.12M.08\""));
+        assert!(!mpd.contains("avc1"));
+    }
+
+    #[test]
+    fn parses_codec_preferences_with_auto_fallback() {
+        assert_eq!(
+            PreferredVideoCodec::parse("auto"),
+            PreferredVideoCodec::Auto
+        );
+        assert_eq!(PreferredVideoCodec::parse("av1"), PreferredVideoCodec::Av1);
+        assert_eq!(PreferredVideoCodec::parse("vp9"), PreferredVideoCodec::Vp9);
+        assert_eq!(
+            PreferredVideoCodec::parse("h264"),
+            PreferredVideoCodec::H264
+        );
+        assert_eq!(
+            PreferredVideoCodec::parse("unexpected"),
+            PreferredVideoCodec::Auto
+        );
     }
 
     #[test]
@@ -1375,6 +1473,7 @@ mod tests {
             &formats(),
             &[],
             &caps(&["hevc"], &["aac"], &[], (3840, 2160)),
+            PreferredVideoCodec::Auto,
         );
         assert!(matches!(result, Err(ResolveError::NoCompatibleStream)));
     }
@@ -1390,9 +1489,14 @@ mod tests {
             "approxDurationMs": "1000"
         }]);
         let formats: Vec<AdaptiveFormat> = serde_json::from_value(raw).unwrap();
-        let mpd = build_dash_manifest(&formats, &[], &caps(&["h264"], &["aac"], &[], (1920, 1080)))
-            .unwrap()
-            .0;
+        let mpd = build_dash_manifest(
+            &formats,
+            &[],
+            &caps(&["h264"], &["aac"], &[], (1920, 1080)),
+            PreferredVideoCodec::Auto,
+        )
+        .unwrap()
+        .0;
         assert!(mpd.contains("<BaseURL>https://media.example/v?a=1&amp;b=2</BaseURL>"));
         assert!(!mpd.contains("a=1&b=2"));
     }
@@ -1412,6 +1516,7 @@ mod tests {
             &multilingual_formats(),
             &[],
             &caps(&["h264"], &["opus", "aac"], &[], (1920, 1080)),
+            PreferredVideoCodec::Auto,
         )
         .unwrap()
         .0;
@@ -1442,9 +1547,14 @@ mod tests {
     fn renders_labeled_vtt_caption_adaptation_sets() {
         let mut capabilities = caps(&["h264"], &["aac"], &[], (1920, 1080));
         capabilities.subtitle_formats = vec!["vtt".into()];
-        let mpd = build_dash_manifest(&multilingual_formats(), &caption_tracks(), &capabilities)
-            .unwrap()
-            .0;
+        let mpd = build_dash_manifest(
+            &multilingual_formats(),
+            &caption_tracks(),
+            &capabilities,
+            PreferredVideoCodec::Auto,
+        )
+        .unwrap()
+        .0;
 
         assert!(mpd.contains("contentType=\"text\" mimeType=\"text/vtt\" lang=\"en\""));
         assert!(mpd.contains("<Label>English</Label>"));
@@ -1461,6 +1571,7 @@ mod tests {
             &multilingual_formats(),
             &caption_tracks(),
             &caps(&["h264"], &["aac"], &[], (1920, 1080)),
+            PreferredVideoCodec::Auto,
         )
         .unwrap()
         .0;
@@ -1508,7 +1619,7 @@ mod tests {
         let mut capabilities = caps(&["av1", "vp9", "h264"], &["opus", "aac"], &[], (3840, 2160));
         capabilities.subtitle_formats = vec!["vtt".into()];
         let media = resolver
-            .resolve("dQw4w9WgXcQ", 12.5, &capabilities)
+            .resolve("dQw4w9WgXcQ", 12.5, &capabilities, PreferredVideoCodec::Vp9)
             .await
             .unwrap();
 
@@ -1519,7 +1630,8 @@ mod tests {
         };
         assert!(manifest.starts_with("<?xml"));
         assert!(manifest.contains("<MPD"));
-        assert!(manifest.contains("av01.0.12M.08"));
+        assert!(manifest.contains("codecs=\"vp9\""));
+        assert!(!manifest.contains("av01"));
         assert!(manifest.contains("<Label>English</Label>"));
         assert_eq!(media.title.as_deref(), Some("Example"));
         assert_eq!(media.subtitle.as_deref(), Some("Channel"));

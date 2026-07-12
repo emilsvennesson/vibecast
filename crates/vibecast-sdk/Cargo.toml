@@ -12,6 +12,7 @@ publish.workspace = true
 # ONLY on this crate. No transport, TLS, or bridge dependencies leak in.
 [dependencies]
 vibecast-messages = { path = "../vibecast-messages" }
+vibecast-settings = { path = "../vibecast-settings" }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

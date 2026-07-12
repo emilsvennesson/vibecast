@@ -3244,16 +3244,14 @@ dependencies = [
  "axum",
  "futures-util",
  "http",
- "serde",
  "serde_json",
- "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",
  "tower",
  "tracing",
  "vibecast-messages",
  "vibecast-player-api",
- "vibecast-sdk",
+ "vibecast-settings",
 ]
 
 [[package]]
@@ -3309,6 +3307,7 @@ dependencies = [
  "vibecast-proto",
  "vibecast-sdk",
  "vibecast-security",
+ "vibecast-settings",
 ]
 
 [[package]]
@@ -3359,6 +3358,7 @@ dependencies = [
 name = "vibecast-platform"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "reqwest",
  "rustls",
  "serde",
@@ -3383,6 +3383,7 @@ dependencies = [
  "vibecast-receiver",
  "vibecast-sdk",
  "vibecast-security",
+ "vibecast-settings",
 ]
 
 [[package]]
@@ -3396,6 +3397,7 @@ dependencies = [
  "thiserror 2.0.18",
  "url",
  "vibecast-messages",
+ "vibecast-settings",
  "xot",
 ]
 
@@ -3441,6 +3443,7 @@ dependencies = [
  "vibecast-player-api",
  "vibecast-sdk",
  "vibecast-security",
+ "vibecast-settings",
 ]
 
 [[package]]
@@ -3456,6 +3459,7 @@ dependencies = [
  "tokio",
  "tracing",
  "vibecast-messages",
+ "vibecast-settings",
 ]
 
 [[package]]
@@ -3475,6 +3479,17 @@ dependencies = [
  "thiserror 2.0.18",
  "vibecast-proto",
  "x509-parser",
+]
+
+[[package]]
+name = "vibecast-settings"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

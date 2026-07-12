@@ -2,7 +2,7 @@
 //!
 //! Every platform binding — the desktop [`vibecast-cli`] binary and the
 //! `vibecast-ffi` cdylib (Android/iOS) — assembles the same portable core the
-//! same way: load certificates, configure apps, build the HTTP client, start
+//! same way: load certificates, register apps, build the HTTP client, start
 //! the player bridge, the device hub, the CastV2 TLS server, and the eureka
 //! HTTP/HTTPS endpoints, then supervise them under one cancellation token.
 //!
@@ -20,13 +20,15 @@
 mod config;
 mod manager;
 
-use std::collections::HashSet;
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::net::{IpAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -40,8 +42,12 @@ use vibecast_core::{AppRegistry, RegistryError};
 use vibecast_discovery::DiscoveryError;
 use vibecast_messages::Volume;
 use vibecast_receiver::ReceiverError;
-use vibecast_sdk::{AppConfig, AppConfigError, AppProvider};
+use vibecast_sdk::AppProvider;
 use vibecast_security::{CertResolver, CertificateStore, SecurityError};
+use vibecast_settings::{
+    CatalogError, PersistedAppSettings, PersistedSettings, PersistenceError, SettingValue,
+    SettingsCatalog, SettingsPersistence, SettingsService, SettingsServiceError,
+};
 
 use manager::{EurekaConfig, ManagerConfig, PlayerManager};
 
@@ -52,6 +58,8 @@ pub use config::{
 pub use manager::{PlayerObserver, PlayerStarted};
 
 const INSTALLATION_ID_FILE: &str = "installation_id";
+const SETTINGS_FILE: &str = "settings.json";
+const SETTINGS_VERSION: u32 = 1;
 
 /// Google endpoint for the Cast device CRL (opaque protobuf blob).
 const CRL_URL: &str = "https://clients3.google.com/cast/chromecast/device/crl";
@@ -111,18 +119,15 @@ pub enum PlatformError {
     /// Loading certificate material or building the TLS config failed.
     #[error("certificate/TLS setup failed")]
     Certs(#[from] SecurityError),
-    /// Configuring a bundled app failed.
-    #[error("configuring app {app}")]
-    AppConfig {
-        /// App key that failed to configure.
-        app: String,
-        /// Underlying config error.
-        #[source]
-        source: AppConfigError,
-    },
     /// Building the app registry failed (e.g. a duplicate app id).
     #[error("building app registry")]
     Registry(#[from] RegistryError),
+    /// Building the app settings catalog failed.
+    #[error("building app settings catalog")]
+    SettingsCatalog(#[from] CatalogError),
+    /// Loading or validating persistent app settings failed.
+    #[error("loading app settings")]
+    Settings(#[from] SettingsServiceError),
     /// Building the eureka discovery server failed.
     #[error("discovery setup failed")]
     Discovery(#[from] DiscoveryError),
@@ -227,21 +232,30 @@ pub async fn run(
     let resolver = CertResolver::new(&bundle)?;
 
     // --- apps ---
-    let providers = build_app_providers(&config)?;
+    let registry = AppRegistry::new(build_app_providers())?;
     tracing::info!(
-        apps = ?providers
+        apps = ?registry
+            .all()
             .iter()
-            .map(|p| (p.app_key(), p.display_name(), p.app_ids()))
+            .map(|app| {
+                let manifest = &app.manifest;
+                (manifest.app_key, manifest.display_name, manifest.app_ids)
+            })
             .collect::<Vec<_>>(),
         "registered app providers"
     );
-    let known_app_keys: HashSet<&str> = providers.iter().map(|p| p.app_key()).collect();
-    for app_key in config.apps.keys() {
-        if !known_app_keys.contains(app_key.as_str()) {
-            tracing::warn!(app = %app_key, "config for an unregistered app is ignored");
-        }
-    }
-    let registry = AppRegistry::new(providers)?;
+    let catalog = SettingsCatalog::new(
+        registry
+            .all()
+            .iter()
+            .map(|app| app.manifest.settings.clone())
+            .collect(),
+    )?;
+    let settings = SettingsService::new(
+        catalog,
+        Arc::new(FileSettingsPersistence::new(data_dir.join(SETTINGS_FILE))),
+    )
+    .await?;
 
     // --- shared HTTP client (User-Agent + CAST-DEVICE-CAPABILITIES + timeout) ---
     let http = build_http_client(&config)?;
@@ -255,6 +269,7 @@ pub async fn run(
         bind_host.clone(),
         config.network.player_port,
         events_tx,
+        settings,
     ));
     bridge.start().await.map_err(PlatformError::BridgeStart)?;
     let player_port = bridge.serving_port().unwrap_or(config.network.player_port);
@@ -367,34 +382,229 @@ pub fn install_default_crypto_provider() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }
 
-/// The compiled-in app providers, configured from `config.apps`.
-fn build_app_providers(config: &Config) -> Result<Vec<Arc<dyn AppProvider>>, PlatformError> {
-    let mut providers: Vec<Box<dyn AppProvider>> = vec![
-        Box::new(SvtPlay::new()),
-        Box::new(Tv4Play::new()),
-        Box::new(Viaplay::new()),
-        Box::new(PrimeVideo::new()),
-        Box::new(YouTube::new()),
-    ];
+/// The compiled-in app providers.
+fn build_app_providers() -> Vec<Arc<dyn AppProvider>> {
+    vec![
+        Arc::new(SvtPlay::new()),
+        Arc::new(Tv4Play::new()),
+        Arc::new(Viaplay::new()),
+        Arc::new(PrimeVideo::new()),
+        Arc::new(YouTube::new()),
+    ]
+}
 
-    for provider in &mut providers {
-        let app_key = provider.app_key();
-        let app_config = match config.apps.get(app_key) {
-            Some(value) => AppConfig::from_value(value.clone()),
-            None => AppConfig::empty(),
-        };
-        provider
-            .configure(&app_config)
-            .map_err(|source| PlatformError::AppConfig {
-                app: app_key.to_string(),
-                source,
-            })?;
+#[derive(Debug)]
+struct FileSettingsPersistence {
+    path: PathBuf,
+}
+
+impl FileSettingsPersistence {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
     }
 
-    Ok(providers
-        .into_iter()
-        .map(Arc::<dyn AppProvider>::from)
-        .collect())
+    fn load_file(&self) -> Result<PersistedSettings, FileSettingsError> {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(PersistedSettings::default())
+            }
+            Err(source) => {
+                return Err(FileSettingsError::Read {
+                    path: self.path.clone(),
+                    source,
+                })
+            }
+        };
+        let file: SettingsFile =
+            serde_json::from_slice(&bytes).map_err(|source| FileSettingsError::Parse {
+                path: self.path.clone(),
+                source,
+            })?;
+        if file.version != SETTINGS_VERSION {
+            return Err(FileSettingsError::UnsupportedVersion {
+                path: self.path.clone(),
+                version: file.version,
+            });
+        }
+        Ok(file.into())
+    }
+
+    fn save_file(&self, settings: &PersistedSettings) -> Result<(), FileSettingsError> {
+        let mut bytes = serde_json::to_vec_pretty(&SettingsFile::from(settings.clone()))
+            .map_err(FileSettingsError::Serialize)?;
+        bytes.push(b'\n');
+
+        let temp_path = self
+            .path
+            .with_file_name(format!(".{SETTINGS_FILE}.{}.tmp", uuid::Uuid::new_v4()));
+        let result = self.write_temp_and_replace(&temp_path, &bytes);
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp_path);
+        }
+        result
+    }
+
+    fn write_temp_and_replace(
+        &self,
+        temp_path: &Path,
+        bytes: &[u8],
+    ) -> Result<(), FileSettingsError> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(temp_path)
+            .map_err(|source| FileSettingsError::Write {
+                path: self.path.clone(),
+                source,
+            })?;
+        file.write_all(bytes)
+            .map_err(|source| FileSettingsError::Write {
+                path: self.path.clone(),
+                source,
+            })?;
+        file.sync_all().map_err(|source| FileSettingsError::Write {
+            path: self.path.clone(),
+            source,
+        })?;
+        std::fs::rename(temp_path, &self.path).map_err(|source| FileSettingsError::Write {
+            path: self.path.clone(),
+            source,
+        })?;
+        if let Some(parent) = self.path.parent() {
+            std::fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|source| FileSettingsError::Write {
+                    path: self.path.clone(),
+                    source,
+                })?;
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl SettingsPersistence for FileSettingsPersistence {
+    async fn load(&self) -> Result<PersistedSettings, PersistenceError> {
+        self.load_file()
+            .map_err(|error| Box::new(error) as PersistenceError)
+    }
+
+    async fn save(&self, settings: &PersistedSettings) -> Result<(), PersistenceError> {
+        self.save_file(settings)
+            .map_err(|error| Box::new(error) as PersistenceError)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum FileSettingsError {
+    #[error("reading settings file {path}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("parsing settings file {path}")]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("unsupported settings file version {version} in {path}")]
+    UnsupportedVersion { path: PathBuf, version: u32 },
+    #[error("serializing settings file")]
+    Serialize(#[source] serde_json::Error),
+    #[error("writing settings file {path}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SettingsFile {
+    version: u32,
+    revision: u64,
+    apps: BTreeMap<String, SettingsFileApp>,
+    players: BTreeMap<String, BTreeMap<String, SettingsFileApp>>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SettingsFileApp {
+    revision: u64,
+    values: BTreeMap<String, SettingValue>,
+}
+
+impl From<PersistedSettings> for SettingsFile {
+    fn from(settings: PersistedSettings) -> Self {
+        Self {
+            version: SETTINGS_VERSION,
+            revision: settings.revision,
+            apps: settings
+                .apps
+                .into_iter()
+                .map(|(app, settings)| (app, settings.into()))
+                .collect(),
+            players: settings
+                .players
+                .into_iter()
+                .map(|(player, apps)| {
+                    (
+                        player,
+                        apps.into_iter()
+                            .map(|(app, settings)| (app, settings.into()))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<SettingsFile> for PersistedSettings {
+    fn from(file: SettingsFile) -> Self {
+        Self {
+            revision: file.revision,
+            apps: file
+                .apps
+                .into_iter()
+                .map(|(app, settings)| (app, settings.into()))
+                .collect(),
+            players: file
+                .players
+                .into_iter()
+                .map(|(player, apps)| {
+                    (
+                        player,
+                        apps.into_iter()
+                            .map(|(app, settings)| (app, settings.into()))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<PersistedAppSettings> for SettingsFileApp {
+    fn from(settings: PersistedAppSettings) -> Self {
+        Self {
+            revision: settings.revision,
+            values: settings.values,
+        }
+    }
+}
+
+impl From<SettingsFileApp> for PersistedAppSettings {
+    fn from(settings: SettingsFileApp) -> Self {
+        Self {
+            revision: settings.revision,
+            values: settings.values,
+        }
+    }
 }
 
 fn initial_volume(config: &Config) -> Volume {
@@ -470,13 +680,76 @@ mod tests {
 
     #[test]
     fn app_providers_are_registered() {
-        let providers = build_app_providers(&Config::default()).unwrap();
-        let keys: Vec<&str> = providers.iter().map(|app| app.app_key()).collect();
+        let providers = build_app_providers();
+        let keys: Vec<&str> = providers.iter().map(|app| app.manifest().app_key).collect();
         assert!(keys.contains(&"svtplay"));
         assert!(keys.contains(&"tv4play"));
         assert!(keys.contains(&"viaplay"));
         assert!(keys.contains(&"primevideo"));
         assert!(keys.contains(&"youtube"));
+    }
+
+    #[tokio::test]
+    async fn settings_file_is_missing_by_default_and_strict_when_present() {
+        let data_dir = temp_data_dir("settings-file-strict");
+        let path = data_dir.join(SETTINGS_FILE);
+        let persistence = Arc::new(FileSettingsPersistence::new(path.clone()));
+
+        SettingsService::new(SettingsCatalog::default(), persistence.clone())
+            .await
+            .unwrap();
+
+        for invalid in [
+            "not json",
+            r#"{"version":2,"revision":0,"apps":{},"players":{}}"#,
+            r#"{"version":1,"revision":0,"apps":{},"players":{},"unknown":true}"#,
+        ] {
+            std::fs::write(&path, invalid).unwrap();
+            assert!(matches!(
+                SettingsService::new(SettingsCatalog::default(), persistence.clone()).await,
+                Err(SettingsServiceError::Persistence(_))
+            ));
+        }
+
+        std::fs::write(
+            &path,
+            r#"{"version":1,"revision":0,"apps":{"unknown":{"revision":0,"values":{}}},"players":{}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            SettingsService::new(SettingsCatalog::default(), persistence).await,
+            Err(SettingsServiceError::InvalidPersisted(_))
+        ));
+
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn settings_file_save_replaces_with_synced_versioned_json() {
+        let data_dir = temp_data_dir("settings-file-save");
+        let path = data_dir.join(SETTINGS_FILE);
+        let persistence = FileSettingsPersistence::new(path.clone());
+        let settings = PersistedSettings {
+            revision: 4,
+            ..PersistedSettings::default()
+        };
+
+        persistence.save(&settings).await.unwrap();
+        assert_eq!(persistence.load().await.unwrap(), settings);
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(json["version"], SETTINGS_VERSION);
+
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    fn temp_data_dir(label: &str) -> PathBuf {
+        let data_dir = std::env::temp_dir().join(format!(
+            "vibecast-platform-{label}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&data_dir).unwrap();
+        data_dir
     }
 
     #[test]
