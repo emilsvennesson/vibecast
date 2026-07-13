@@ -7,6 +7,11 @@
     playerId: null,
     lastStateKey: "",
     autoplayMuted: false,
+    connected: false,
+    settingsReady: false,
+    settingsApps: [],
+    pendingSettings: new Map(),
+    settingsRequestSequence: 0,
   };
 
   const connectionEl = document.getElementById("connection");
@@ -25,6 +30,8 @@
   const textSelectEl = document.getElementById("text-select");
   const btnCopy = document.getElementById("btn-copy");
   const btnClear = document.getElementById("btn-clear");
+  const settingsEl = document.getElementById("settings-apps");
+  const settingsStateEl = document.getElementById("settings-state");
 
   // ---------------------------------------------------------------------------
   // Shaka error code lookup
@@ -153,8 +160,14 @@
   });
 
   function setConnected(connected) {
+    app.connected = connected;
+    if (!connected) {
+      app.settingsReady = false;
+      app.pendingSettings.clear();
+    }
     connectionEl.dataset.connected = String(connected);
     connectionEl.textContent = connected ? "connected" : "disconnected";
+    renderSettings();
   }
 
   function wsUrl() {
@@ -209,20 +222,22 @@
     const screen = window.screen || {};
     return {
       type: "register",
-      playerId: playerId(),
-      name: "Browser",
-      capabilities: {
-        platform: "browser",
-        drm: [{ system: "com.widevine.alpha" }, { system: "org.w3.clearkey" }],
-        videoCodecs: detectVideoCodecs(),
-        audioCodecs: ["aac", "opus"],
-        maxResolution: {
-          width: screen.width || 1920,
-          height: screen.height || 1080,
+      player: {
+        playerId: playerId(),
+        name: "Browser",
+        capabilities: {
+          platform: "browser",
+          drm: [{ system: "com.widevine.alpha" }, { system: "org.w3.clearkey" }],
+          videoCodecs: detectVideoCodecs(),
+          audioCodecs: ["aac", "opus"],
+          maxResolution: {
+            width: screen.width || 1920,
+            height: screen.height || 1080,
+          },
+          hdrFormats: [],
+          frameRates: [24, 25, 30, 50, 60],
+          subtitleFormats: ["vtt", "ttml"],
         },
-        hdrFormats: [],
-        frameRates: [24, 25, 30, 50, 60],
-        subtitleFormats: ["vtt", "ttml"],
       },
     };
   }
@@ -261,7 +276,17 @@
   function wsSend(payload) {
     const json = JSON.stringify(payload);
     app.ws.send(json);
-    pushLog("ws-send", ">> " + payload.type, payload);
+    const logPayload =
+      payload.type === "settingsUpdate"
+        ? {
+            type: payload.type,
+            requestId: payload.requestId,
+            appKey: payload.appKey,
+            expectedRevision: payload.expectedRevision,
+            changedKeys: Object.keys(payload.changes),
+          }
+        : payload;
+    pushLog("ws-send", ">> " + payload.type, logPayload);
   }
 
   function sendError(code, message) {
@@ -347,6 +372,219 @@
     if (options.some((option) => option.value === selectedValue)) {
       select.value = selectedValue;
     }
+  }
+
+  function settingsRequestId() {
+    if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID();
+    app.settingsRequestSequence += 1;
+    return "browser-settings-" + Date.now() + "-" + app.settingsRequestSequence;
+  }
+
+  function settingControl(setting, disabled) {
+    let control;
+    if (setting.kind === "choice") {
+      control = document.createElement("select");
+      for (const option of Array.isArray(setting.options) ? setting.options : []) {
+        const optionEl = document.createElement("option");
+        optionEl.value = option.value;
+        optionEl.textContent = option.label;
+        control.appendChild(optionEl);
+      }
+      control.value = String(setting.value);
+    } else if (setting.kind === "boolean") {
+      control = document.createElement("input");
+      control.type = "checkbox";
+      control.checked = setting.value === true;
+      control.className = "settings-toggle-input";
+    } else {
+      control = document.createElement("input");
+      control.type = setting.kind === "string" ? "text" : "number";
+      if (setting.kind === "integer") control.step = "1";
+      if (setting.kind === "number") control.step = "any";
+      control.value = setting.value === null || setting.value === undefined ? "" : setting.value;
+    }
+    control.disabled = disabled;
+    return control;
+  }
+
+  function settingValue(setting, control) {
+    switch (setting.kind) {
+      case "choice":
+      case "string":
+        return control.value;
+      case "boolean":
+        return control.checked;
+      case "integer":
+        return Number.parseInt(control.value, 10);
+      case "number":
+        return Number(control.value);
+      default:
+        return undefined;
+    }
+  }
+
+  function submitSetting(appSettings, setting, value) {
+    if (
+      setting.writable === false ||
+      !app.connected ||
+      !app.settingsReady ||
+      !canSend() ||
+      app.pendingSettings.has(appSettings.appKey)
+    ) return;
+    if (value === undefined || (typeof value === "number" && !Number.isFinite(value))) return;
+
+    const requestId = settingsRequestId();
+    app.pendingSettings.set(appSettings.appKey, requestId);
+    wsSend({
+      type: "settingsUpdate",
+      requestId,
+      appKey: appSettings.appKey,
+      expectedRevision: appSettings.revision,
+      changes: { [setting.key]: value },
+    });
+    renderSettings();
+  }
+
+  function renderSetting(appSettings, setting, pending) {
+    const row = document.createElement("form");
+    row.className = "setting-row";
+
+    const copy = document.createElement("div");
+    copy.className = "setting-copy";
+    const label = document.createElement("label");
+    label.textContent = setting.label;
+    copy.appendChild(label);
+    if (setting.description) {
+      const description = document.createElement("p");
+      description.textContent = setting.description;
+      copy.appendChild(description);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "setting-actions";
+    const supported = ["choice", "boolean", "string", "integer", "number"].includes(
+      setting.kind,
+    );
+    if (!supported) {
+      const unsupported = document.createElement("span");
+      unsupported.className = "setting-unsupported";
+      unsupported.textContent = "Unsupported type: " + setting.kind;
+      actions.appendChild(unsupported);
+    } else {
+      const readOnly = setting.writable === false;
+      const control = settingControl(
+        setting,
+        readOnly || !app.connected || !app.settingsReady || pending,
+      );
+      const controlId = "setting-" + appSettings.appKey + "-" + setting.key;
+      control.id = controlId;
+      label.htmlFor = controlId;
+
+      if (setting.kind === "boolean") {
+        const toggle = document.createElement("label");
+        toggle.className = "settings-toggle";
+        toggle.htmlFor = controlId;
+        toggle.appendChild(control);
+        const track = document.createElement("span");
+        track.className = "settings-toggle-track";
+        toggle.appendChild(track);
+        actions.appendChild(toggle);
+      } else {
+        actions.appendChild(control);
+      }
+
+      const apply = document.createElement("button");
+      apply.type = "submit";
+      apply.className = "setting-apply";
+      apply.textContent = "Apply";
+      apply.disabled = readOnly || !app.connected || !app.settingsReady || pending;
+      actions.appendChild(apply);
+
+      const reset = document.createElement("button");
+      reset.type = "button";
+      reset.className = "setting-reset";
+      reset.textContent = "Reset";
+      reset.title = "Reset to " + String(setting.default);
+      reset.disabled = readOnly || !app.connected || !app.settingsReady || pending;
+      reset.addEventListener("click", () => submitSetting(appSettings, setting, null));
+      actions.appendChild(reset);
+
+      row.addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!row.reportValidity()) return;
+        submitSetting(appSettings, setting, settingValue(setting, control));
+      });
+    }
+
+    row.append(copy, actions);
+    return row;
+  }
+
+  function renderSettings() {
+    if (!settingsEl || !settingsStateEl) return;
+    settingsStateEl.textContent = app.settingsReady
+      ? "live"
+      : app.connected
+        ? "synchronizing"
+        : "read only";
+    settingsStateEl.dataset.connected = String(app.connected && app.settingsReady);
+    settingsEl.replaceChildren();
+
+    const configurableApps = app.settingsApps.filter(
+      (appSettings) => Array.isArray(appSettings.settings) && appSettings.settings.length > 0,
+    );
+    if (configurableApps.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "settings-empty";
+      if (!app.connected) empty.textContent = "Settings appear when the player connects.";
+      else if (!app.settingsReady) empty.textContent = "Waiting for the settings catalog...";
+      else empty.textContent = "No app settings are available for this player.";
+      settingsEl.appendChild(empty);
+      return;
+    }
+
+    for (const appSettings of configurableApps) {
+      const pending = app.pendingSettings.has(appSettings.appKey);
+      const section = document.createElement("section");
+      section.className = "settings-app";
+
+      const header = document.createElement("header");
+      const heading = document.createElement("h3");
+      heading.textContent = appSettings.displayName;
+      const revision = document.createElement("span");
+      revision.className = "settings-revision";
+      revision.textContent = pending ? "updating" : "rev " + appSettings.revision;
+      header.append(heading, revision);
+      section.appendChild(header);
+
+      for (const setting of Array.isArray(appSettings.settings) ? appSettings.settings : []) {
+        section.appendChild(renderSetting(appSettings, setting, pending));
+      }
+      settingsEl.appendChild(section);
+    }
+  }
+
+  function replaceSettingsSnapshot(message) {
+    if (!Array.isArray(message.apps)) throw new Error("settings snapshot apps must be an array");
+    app.settingsApps = message.apps;
+    app.settingsReady = true;
+    renderSettings();
+  }
+
+  function applySettingsResult(message) {
+    const replacement = message.app;
+    if (!replacement || typeof replacement.appKey !== "string") {
+      throw new Error("settings result must include an app");
+    }
+    if (app.pendingSettings.get(replacement.appKey) !== message.requestId) {
+      throw new Error("settings result does not match a pending request");
+    }
+
+    const index = app.settingsApps.findIndex((candidate) => candidate.appKey === replacement.appKey);
+    if (index === -1) app.settingsApps.push(replacement);
+    else app.settingsApps[index] = replacement;
+    app.pendingSettings.delete(replacement.appKey);
+    renderSettings();
   }
 
   function audioLabel(track) {
@@ -783,6 +1021,28 @@
     if (!command || typeof command.type !== "string") return;
 
     switch (command.type) {
+      case "settingsSnapshot":
+        pushLog(
+          "ws-recv",
+          "<< settingsSnapshot (" + (Array.isArray(command.apps) ? command.apps.length : 0) + " apps)",
+        );
+        try {
+          replaceSettingsSnapshot(command);
+        } catch (error) {
+          pushLog("err", error instanceof Error ? error.message : String(error));
+        }
+        break;
+      case "settingsUpdateResult":
+        pushLog(
+          "ws-recv",
+          "<< settingsUpdateResult " + String(command.status || "unknown"),
+        );
+        try {
+          applySettingsResult(command);
+        } catch (error) {
+          pushLog("err", error instanceof Error ? error.message : String(error));
+        }
+        break;
       case "load":
         pushLog("ws-recv", "<< load", {
           type: command.type,
@@ -863,7 +1123,9 @@
       if (typeof event.data !== "string") return;
       try {
         const command = JSON.parse(event.data);
-        void handleCommand(command);
+        void handleCommand(command).catch((error) => {
+          pushLog("err", "Command failed: " + (error instanceof Error ? error.message : String(error)));
+        });
       } catch {
         pushLog("err", "Malformed WS payload: " + event.data.slice(0, 200));
       }

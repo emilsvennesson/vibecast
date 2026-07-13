@@ -14,6 +14,7 @@ vibecast-cast = { path = "../vibecast-cast" }
 vibecast-messages = { path = "../vibecast-messages" }
 vibecast-player-api = { path = "../vibecast-player-api" }
 vibecast-sdk = { path = "../vibecast-sdk" }
+vibecast-settings = { path = "../vibecast-settings" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

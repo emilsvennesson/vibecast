@@ -116,7 +116,6 @@ class CastReceiverService :
                 // the Rust routing heuristic can't be trusted on a multi-interface
                 // phone); null falls back to that heuristic.
                 localIp = localIpAddress(),
-                appsConfigJson = null,
             )
         ReceiverState.update("Starting…")
         val newHandle = ReceiverHandle()

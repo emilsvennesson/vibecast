@@ -83,6 +83,13 @@ reach app sessions via `ctx.receiver.capabilities`, so apps make conditional
 decisions per selected player (e.g. Prime Video derives its whole device profile
 from them).
 
+Apps declare typed runtime settings in their `AppManifest`. The shared
+`vibecast-settings` service persists overrides in `{data_dir}/settings.json` and
+gives each player an isolated app-settings view. The bridge synchronizes that
+view with generic player UIs; app sessions read live values through
+`ctx.settings`. Do not reintroduce raw per-app JSON configuration or
+app-specific settings branches outside the owning app crate.
+
 The compose/orchestration logic — assemble certs + shared bridge + the
 per-player orchestrator, then start/observe/stop — lives in `vibecast-platform`,
 shared by two platform bindings: `vibecast-cli` (binary name `vibecast`; the
@@ -94,7 +101,7 @@ the Android TV frontend.
 
 ## Workspace layout
 
-Cargo workspace of 19 focused crates under `crates/`. Layering is strict:
+Cargo workspace of focused crates under `crates/`. Layering is strict:
 
 ```
 vibecast-proto        CastV2 protobuf + length-prefixed framing          (leaf)
@@ -102,11 +109,12 @@ vibecast-security     Device-auth material + TLS cert rotation           (leaf)
 vibecast-cast         CastV2 TLS transport: connection actor             (proto, security)
 vibecast-discovery    Cast identity/TXT + eureka HTTP/HTTPS; mDNS (feat) (security)
 vibecast-messages     Cast JSON message models (serde)                   (leaf)
-vibecast-player-api   Player/proxy seams + wire protocol + manifest utils (messages)
-vibecast-sdk          Stable app-author SDK (+ PlayerCapabilities)       (messages)
+vibecast-settings     Typed app schemas + persisted live settings         (leaf)
+vibecast-player-api   Player/proxy seams + wire protocol + manifest utils (messages, settings)
+vibecast-sdk          Stable app-author SDK (+ capabilities/settings)     (messages, settings)
 vibecast-apps-*       Bundled apps (SVT Play, TV4 Play, Viaplay, Prime)  (sdk ONLY)
-vibecast-bridge       Player bridge: registration + routing + proxy      (player-api, sdk)
-vibecast-core         Receiver runtime: device hub + coordinator         (cast, messages, player-api, sdk)
+vibecast-bridge       Player bridge: registration + routing + proxy      (player-api, settings)
+vibecast-core         Receiver runtime: device hub + coordinator         (cast, messages, player-api, sdk, settings)
 vibecast-receiver     Generic per-receiver composition (reusable)        (cast, core, discovery, security, player-api, sdk)
 vibecast-platform     Compose + per-player orchestrator + Config         (receiver, bridge, core, apps, …)
 vibecast-cli          Desktop binding: args + Ctrl-C lifecycle           (platform)

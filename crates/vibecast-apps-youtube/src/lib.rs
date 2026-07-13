@@ -10,12 +10,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::{mpsc, watch};
 use vibecast_sdk::{
-    AppContext, AppProvider, AppSession, LaunchCredentials, LaunchError, LoadRequest,
-    MediaResolveError, PlaybackController, PlaybackMedia, PlaybackState,
+    AppContext, AppManifest, AppProvider, AppSession, AppSettingsReader, AppSettingsSchema,
+    ChoiceOption, LaunchCredentials, LaunchError, LoadRequest, MediaResolveError,
+    PlaybackController, PlaybackMedia, PlaybackState, SettingDescriptor, SettingScope,
 };
 
 use lounge::{LoungeCommand, LoungeConnection, LoungeIdentity};
-use resolver::{ResolveError, Resolver};
+use resolver::{PreferredVideoCodec, ResolveError, Resolver, PREFERRED_VIDEO_CODEC_KEY};
 
 const APP_IDS: &[&str] = &["233637DE"];
 const MDX_NAMESPACE: &str = "urn:x-cast:com.google.youtube.mdx";
@@ -35,24 +36,30 @@ impl YouTube {
 
 #[async_trait]
 impl AppProvider for YouTube {
-    fn app_ids(&self) -> &'static [&'static str] {
-        APP_IDS
-    }
-
-    fn display_name(&self) -> &'static str {
-        "YouTube"
-    }
-
-    fn app_key(&self) -> &'static str {
-        "youtube"
-    }
-
-    fn icon_url(&self) -> Option<&'static str> {
-        Some(ICON_URL)
-    }
-
-    fn namespaces(&self) -> &'static [&'static str] {
-        &[CUSTOM_DATA_NAMESPACE, MDX_NAMESPACE]
+    fn manifest(&self) -> AppManifest {
+        let settings = AppSettingsSchema::with_display_name(
+            "youtube",
+            "YouTube",
+            vec![SettingDescriptor::Choice {
+                key: PREFERRED_VIDEO_CODEC_KEY.as_str().to_owned(),
+                label: "Preferred video codec".to_owned(),
+                description: Some(
+                    "Choose which video codec YouTube should prefer when available.".to_owned(),
+                ),
+                scope: SettingScope::AppPlayer,
+                default: "auto".to_owned(),
+                choices: vec![
+                    ChoiceOption::new("auto", "Automatic"),
+                    ChoiceOption::new("av1", "AV1"),
+                    ChoiceOption::new("vp9", "VP9"),
+                    ChoiceOption::new("h264", "H.264"),
+                ],
+            }],
+        )
+        .expect("static YouTube settings must be valid");
+        AppManifest::new("youtube", APP_IDS, "YouTube", settings)
+            .with_icon_url(ICON_URL)
+            .with_namespaces(&[CUSTOM_DATA_NAMESPACE, MDX_NAMESPACE])
     }
 
     async fn launch(
@@ -73,6 +80,7 @@ impl AppProvider for YouTube {
             resolver,
             playback,
             capabilities,
+            ctx.settings.clone(),
             cancel.subscribe(),
         ));
         tokio::spawn(run_lounge(
@@ -106,13 +114,20 @@ struct YouTubeSession {
 impl AppSession for YouTubeSession {
     async fn resolve_media(
         &self,
-        _ctx: &AppContext,
+        ctx: &AppContext,
         request: &LoadRequest,
     ) -> Result<PlaybackMedia, MediaResolveError> {
+        let settings = ctx.settings.snapshot();
+        let preferred_video_codec = PreferredVideoCodec::from_snapshot(&settings);
         let video_id = resolver::extract_video_id(&request.media.content_id)
             .ok_or_else(|| MediaResolveError::invalid_request("INVALID_YOUTUBE_VIDEO_ID"))?;
         self.resolver
-            .resolve(&video_id, request.current_time, &self.capabilities)
+            .resolve(
+                &video_id,
+                request.current_time,
+                &self.capabilities,
+                preferred_video_codec,
+            )
             .await
             .map_err(map_resolve_error)
     }
@@ -214,6 +229,7 @@ async fn run_commands(
     resolver: Resolver,
     playback: Arc<dyn PlaybackController>,
     capabilities: vibecast_sdk::PlayerCapabilities,
+    settings: AppSettingsReader,
     mut cancel: watch::Receiver<bool>,
 ) {
     let mut queue = QueueState::default();
@@ -291,7 +307,12 @@ async fn run_commands(
         };
 
         if let Some((video_id, start_time)) = load {
-            match resolver.resolve(&video_id, start_time, &capabilities).await {
+            let snapshot = settings.snapshot();
+            let preferred_video_codec = PreferredVideoCodec::from_snapshot(&snapshot);
+            match resolver
+                .resolve(&video_id, start_time, &capabilities, preferred_video_codec)
+                .await
+            {
                 Ok(media) => playback.load(media).await,
                 Err(error) => {
                     tracing::warn!(%video_id, %error, "failed to resolve YouTube video");
@@ -354,11 +375,32 @@ mod tests {
 
     #[test]
     fn provider_declares_captured_identity() {
-        let provider = YouTube::new();
-        assert_eq!(provider.app_ids(), &["233637DE"]);
-        assert_eq!(provider.display_name(), "YouTube");
-        assert!(provider.namespaces().contains(&MDX_NAMESPACE));
-        assert!(provider.namespaces().contains(&CUSTOM_DATA_NAMESPACE));
+        let manifest = YouTube::new().manifest();
+        assert_eq!(manifest.app_key, "youtube");
+        assert_eq!(manifest.app_ids, APP_IDS);
+        assert_eq!(manifest.display_name, "YouTube");
+        assert_eq!(manifest.icon_url, Some(ICON_URL));
+        assert!(manifest.namespaces.contains(&MDX_NAMESPACE));
+        assert!(manifest.namespaces.contains(&CUSTOM_DATA_NAMESPACE));
+        assert_eq!(manifest.settings.settings().len(), 1);
+        assert_eq!(
+            manifest.settings.settings()[0],
+            SettingDescriptor::Choice {
+                key: "preferred_video_codec".to_owned(),
+                label: "Preferred video codec".to_owned(),
+                description: Some(
+                    "Choose which video codec YouTube should prefer when available.".to_owned()
+                ),
+                scope: SettingScope::AppPlayer,
+                default: "auto".to_owned(),
+                choices: vec![
+                    ChoiceOption::new("auto", "Automatic"),
+                    ChoiceOption::new("av1", "AV1"),
+                    ChoiceOption::new("vp9", "VP9"),
+                    ChoiceOption::new("h264", "H.264"),
+                ],
+            }
+        );
     }
 
     #[tokio::test]
@@ -371,6 +413,20 @@ mod tests {
             Resolver::new(reqwest::Client::new()),
             playback.clone(),
             vibecast_sdk::PlayerCapabilities::default(),
+            vibecast_sdk::AppContext::new(
+                "session",
+                "transport",
+                APP_IDS[0],
+                reqwest::Client::new(),
+                vibecast_sdk::ReceiverContext::new(
+                    "YouTube test",
+                    "Test",
+                    "test-device",
+                    std::path::PathBuf::new(),
+                ),
+                Arc::new(vibecast_sdk::NoopSenderChannel),
+            )
+            .settings,
             cancel_rx,
         ));
 

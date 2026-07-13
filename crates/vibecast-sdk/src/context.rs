@@ -9,6 +9,7 @@ use serde_json::Value;
 
 use crate::capabilities::PlayerCapabilities;
 use crate::types::PlaybackMedia;
+use crate::AppSettingsReader;
 
 /// Sends custom-namespace messages on behalf of an app callback.
 ///
@@ -112,6 +113,8 @@ pub struct AppContext {
     pub http: reqwest::Client,
     /// Receiver metadata.
     pub receiver: ReceiverContext,
+    /// Live effective settings for this app and player.
+    pub settings: AppSettingsReader,
     sender: Arc<dyn SenderChannel>,
     playback: Arc<dyn PlaybackController>,
 }
@@ -127,15 +130,24 @@ impl AppContext {
         receiver: ReceiverContext,
         sender: Arc<dyn SenderChannel>,
     ) -> Self {
+        let app_id = app_id.into();
         Self {
             session_id: session_id.into(),
             transport_id: transport_id.into(),
-            app_id: app_id.into(),
+            settings: vibecast_settings::SettingsService::empty_reader(app_id.clone()),
+            app_id,
             http,
             receiver,
             sender,
             playback: Arc::new(NoopPlaybackController),
         }
+    }
+
+    /// Bind this context to the app's live effective settings.
+    #[must_use]
+    pub fn with_settings(mut self, settings: AppSettingsReader) -> Self {
+        self.settings = settings;
+        self
     }
 
     /// Bind this context to a live playback controller.
@@ -260,5 +272,16 @@ mod tests {
         assert_eq!(broadcast[0].0, "urn:test:broadcast");
         assert_eq!(broadcast[0].1, json!({"status":"IDLE","progress":1.0}));
         assert!(channel.sent.lock().expect("sent not poisoned").is_empty());
+    }
+
+    #[test]
+    fn new_context_has_cloneable_empty_settings() {
+        let ctx = ctx(Arc::new(CapturingChannel::default()));
+        let cloned = ctx.clone();
+
+        assert_eq!(ctx.settings.snapshot().app_id(), "APP");
+        assert_eq!(ctx.settings.snapshot().revision(), 0);
+        assert!(ctx.settings.snapshot().values().is_empty());
+        assert_eq!(cloned.settings.snapshot(), ctx.settings.snapshot());
     }
 }

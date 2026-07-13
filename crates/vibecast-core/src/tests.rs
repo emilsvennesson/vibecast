@@ -15,11 +15,14 @@ use vibecast_messages::{PlayerState, Volume};
 use vibecast_player_api::{LicenseHandler, ManifestHandler, Player, PlayerCommand, PlayerReport};
 use vibecast_proto::CastCodec;
 use vibecast_sdk::{
-    AppContext, AppProvider, AppSession, LaunchCredentials, LaunchError, LoadRequest,
-    MediaResolveError, PlaybackMedia, PlaybackStream, PlayerCapabilities, ReceiverContext,
-    StreamType,
+    AppContext, AppManifest, AppProvider, AppSession, AppSettingsSchema, LaunchCredentials,
+    LaunchError, LoadRequest, MediaResolveError, PlaybackMedia, PlaybackStream, PlayerCapabilities,
+    ReceiverContext, SettingDescriptor, SettingKey, SettingScope, StreamType,
 };
 use vibecast_security::CertificateBundle;
+use vibecast_settings::{
+    MemorySettingsPersistence, PlayerSettings, SettingsCatalog, SettingsService,
+};
 
 use crate::{AppRegistry, DeviceHub, DeviceHubHandle, DeviceIdentity, HubConfig, ProxyRegistrar};
 
@@ -77,27 +80,48 @@ impl ProxyRegistrar for FakeProxy {
     }
 }
 
-struct FakeApp;
+const FAKE_SETTING: SettingKey<String> = SettingKey::new("playerValue");
+
+struct FakeApp {
+    launched_setting: Arc<Mutex<Option<String>>>,
+}
+
+fn fake_manifest() -> AppManifest {
+    let settings = AppSettingsSchema::with_display_name(
+        "fake",
+        "Fake App",
+        vec![SettingDescriptor::String {
+            key: FAKE_SETTING.as_str().to_string(),
+            label: "Player value".to_string(),
+            description: None,
+            scope: SettingScope::AppPlayer,
+            default: "default".to_string(),
+            min_length: None,
+            max_length: None,
+        }],
+    )
+    .expect("fake settings schema");
+    AppManifest::new("fake", &["APP1"], "Fake App", settings)
+        .with_icon_url("https://example.test/fake.png")
+        .with_namespaces(&[FAKE_NS])
+}
 
 #[async_trait]
 impl AppProvider for FakeApp {
-    fn app_ids(&self) -> &'static [&'static str] {
-        &["APP1"]
+    fn manifest(&self) -> AppManifest {
+        fake_manifest()
     }
-    fn display_name(&self) -> &'static str {
-        "Fake App"
-    }
-    fn app_key(&self) -> &'static str {
-        "fake"
-    }
-    fn namespaces(&self) -> &'static [&'static str] {
-        &[FAKE_NS]
-    }
+
     async fn launch(
         &self,
-        _ctx: &AppContext,
+        ctx: &AppContext,
         _credentials: LaunchCredentials,
     ) -> Result<Arc<dyn AppSession>, LaunchError> {
+        *self.launched_setting.lock().unwrap() = ctx
+            .settings
+            .snapshot()
+            .get(FAKE_SETTING)
+            .expect("fake setting has string type");
         Ok(Arc::new(FakeSession))
     }
 }
@@ -195,6 +219,7 @@ struct Harness {
     hub: DeviceHubHandle,
     player: Arc<FakePlayer>,
     proxy: Arc<FakeProxy>,
+    launched_setting: Arc<Mutex<Option<String>>>,
 }
 
 fn attenuation_volume() -> Volume {
@@ -207,6 +232,30 @@ fn attenuation_volume() -> Volume {
 }
 
 async fn setup() -> Harness {
+    let catalog = SettingsCatalog::new(vec![fake_manifest().settings]).expect("settings catalog");
+    let service = SettingsService::new(catalog, Arc::new(MemorySettingsPersistence::default()))
+        .await
+        .expect("settings service");
+    let player_settings = service.player("player-1").expect("player settings");
+    let revision = player_settings
+        .reader("fake")
+        .await
+        .expect("fake settings reader")
+        .snapshot()
+        .revision();
+    player_settings
+        .compare_and_set_value(
+            "fake",
+            revision,
+            FAKE_SETTING,
+            "player override".to_string(),
+        )
+        .await
+        .expect("player setting update");
+    setup_with_player_settings(player_settings).await
+}
+
+async fn setup_with_player_settings(player_settings: PlayerSettings) -> Harness {
     let (server_end, client_end) = tokio::io::duplex(64 * 1024);
     let (events_tx, mut events_rx) = mpsc::channel::<ServerEvent>(32);
     tokio::spawn(run_connection(
@@ -219,9 +268,13 @@ async fn setup() -> Harness {
 
     let player = Arc::new(FakePlayer::default());
     let proxy = Arc::new(FakeProxy::default());
+    let launched_setting = Arc::new(Mutex::new(None));
     let hub = DeviceHub::new(HubConfig {
         identity: DeviceIdentity::new("Living Room".into(), "Chromecast".into(), "dev-1".into()),
-        registry: AppRegistry::new(vec![Arc::new(FakeApp)]).expect("registry"),
+        registry: AppRegistry::new(vec![Arc::new(FakeApp {
+            launched_setting: launched_setting.clone(),
+        })])
+        .expect("registry"),
         player: player.clone(),
         proxy: proxy.clone(),
         http: reqwest::Client::new(),
@@ -230,6 +283,7 @@ async fn setup() -> Harness {
         user_agent: String::new(),
         cast_device_capabilities: String::new(),
         capabilities: PlayerCapabilities::default(),
+        player_settings,
     });
     let hub_handle = hub.handle();
     {
@@ -249,6 +303,7 @@ async fn setup() -> Harness {
         hub: hub_handle,
         player,
         proxy,
+        launched_setting,
     }
 }
 
@@ -294,10 +349,60 @@ async fn launch(client: &mut Framed<DuplexStream, CastCodec>) -> String {
     let app = &status["status"]["applications"][0];
     assert_eq!(app["appId"], "APP1");
     assert_eq!(app["displayName"], "Fake App");
+    assert_eq!(app["iconUrl"], "https://example.test/fake.png");
+    assert_eq!(
+        app["namespaces"],
+        serde_json::json!([
+            {"name": FAKE_NS},
+            {"name": ns::MEDIA},
+        ])
+    );
     app["transportId"].as_str().unwrap().to_string()
 }
 
 // -- tests -----------------------------------------------------------------
+
+#[tokio::test]
+async fn launch_injects_player_scoped_settings() {
+    let mut harness = setup().await;
+    launch(&mut harness.client).await;
+
+    assert_eq!(
+        harness.launched_setting.lock().unwrap().as_deref(),
+        Some("player override")
+    );
+}
+
+#[tokio::test]
+async fn unavailable_app_settings_return_launch_error() {
+    let service = SettingsService::new(
+        SettingsCatalog::default(),
+        Arc::new(MemorySettingsPersistence::default()),
+    )
+    .await
+    .expect("settings service");
+    let player_settings = service.player("player-1").expect("player settings");
+    let mut harness = setup_with_player_settings(player_settings).await;
+
+    send(
+        &mut harness.client,
+        ns::CONNECTION,
+        "receiver-0",
+        r#"{"type":"CONNECT"}"#,
+    )
+    .await;
+    send(
+        &mut harness.client,
+        ns::RECEIVER,
+        "receiver-0",
+        r#"{"type":"LAUNCH","requestId":7,"appId":"APP1"}"#,
+    )
+    .await;
+
+    let response = next_json(&mut harness.client).await;
+    assert_eq!(response["type"], "LAUNCH_ERROR");
+    assert_eq!(response["requestId"], 7);
+}
 
 #[tokio::test]
 async fn launch_load_and_play_end_to_end() {

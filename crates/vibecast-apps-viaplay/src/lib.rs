@@ -20,7 +20,7 @@ use tokio::sync::{watch, Mutex};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use vibecast_sdk::{
-    normalize_stream_type, AppContext, AppProvider, AppSession, DrmInfo, DrmSystem,
+    normalize_stream_type, AppContext, AppManifest, AppProvider, AppSession, DrmInfo, DrmSystem,
     LaunchCredentials, LaunchError, LoadRequest, MediaResolveCode, MediaResolveError,
     MessageDisposition, PlaybackMedia, PlaybackState, PlaybackStream, PlayerState, StreamSource,
     StreamType,
@@ -54,20 +54,10 @@ impl Viaplay {
 
 #[async_trait]
 impl AppProvider for Viaplay {
-    fn app_ids(&self) -> &'static [&'static str] {
-        APP_IDS
-    }
-    fn display_name(&self) -> &'static str {
-        "Viaplay"
-    }
-    fn app_key(&self) -> &'static str {
-        "viaplay"
-    }
-    fn icon_url(&self) -> Option<&'static str> {
-        Some(ICON_URL)
-    }
-    fn namespaces(&self) -> &'static [&'static str] {
-        &[NS_VIAPLAY]
+    fn manifest(&self) -> AppManifest {
+        AppManifest::without_settings("viaplay", APP_IDS, "Viaplay")
+            .with_icon_url(ICON_URL)
+            .with_namespaces(&[NS_VIAPLAY])
     }
     async fn launch(
         &self,
@@ -954,12 +944,14 @@ mod tests {
     // -- Tests --------------------------------------------------------------
 
     #[test]
-    fn app_metadata() {
-        let app = Viaplay::new();
-        assert_eq!(app.app_ids(), &["6313CF39", "2DB7CC49"]);
-        assert_eq!(app.display_name(), "Viaplay");
-        assert_eq!(app.app_key(), "viaplay");
-        assert_eq!(app.namespaces(), &[NS_VIAPLAY]);
+    fn app_manifest() {
+        let manifest = Viaplay::new().manifest();
+        assert_eq!(manifest.app_ids, APP_IDS);
+        assert_eq!(manifest.display_name, "Viaplay");
+        assert_eq!(manifest.app_key, "viaplay");
+        assert_eq!(manifest.icon_url, Some(ICON_URL));
+        assert_eq!(manifest.namespaces, &[NS_VIAPLAY]);
+        assert!(manifest.settings.settings().is_empty());
     }
 
     // -- Auth flow: SETUP_INFO triggers session check -----------------------

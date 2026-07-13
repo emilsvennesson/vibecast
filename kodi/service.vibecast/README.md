@@ -9,6 +9,8 @@ vibecast gives this player its own Cast device named `<player name> [vibecast]`
 (the `[vibecast]` suffix is added by the server; the base name defaults to
 `Kodi` and is configurable under the add-on's **Player** settings, along with
 resolution, codecs, HDR, and Widevine level — all auto-detected by default).
+Server-provided app settings are available through **Player** -> **App settings...**.
+They remain server-authoritative and become read-only while disconnected.
 
 ## Requirements
 

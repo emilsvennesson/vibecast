@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import threading
 import time
 import uuid
@@ -15,6 +16,17 @@ import xbmc
 import xbmcaddon
 import xbmcgui
 import xbmcvfs
+
+from protocol import (
+    PLAYBACK_MESSAGE_TYPES,
+    SETTINGS_SNAPSHOT,
+    SETTINGS_UPDATE_RESULT,
+    ProtocolError,
+    decode_server_message,
+    registration_message,
+)
+from settings_model import SettingsCatalog
+from settings_ui import AppSettingsDialog
 
 ADDON_ID = "service.vibecast"
 ADDON_NAME = "vibecast"
@@ -267,17 +279,29 @@ class VibecastPlayer(xbmc.Player):
         self._service.on_playback_error()
 
 
+class VibecastMonitor(xbmc.Monitor):
+    def __init__(self, service: VibecastService) -> None:
+        super().__init__()
+        self._service = service
+
+    def onNotification(self, sender: str, method: str, _data: str) -> None:  # noqa: N802
+        if sender != ADDON_ID or method.rsplit(".", 1)[-1] != "open_app_settings":
+            return
+        self._service.enqueue_open_app_settings()
+
+
 class VibecastService:
     def __init__(self) -> None:
         self._addon = xbmcaddon.Addon(id=ADDON_ID)
         self._config = ServiceConfig.from_addon(self._addon)
         self._player_id = self._ensure_player_id()
-        self._monitor = xbmc.Monitor()
+        self._settings_catalog = SettingsCatalog()
+        self._settings_dialog: AppSettingsDialog | None = None
+        self._monitor = VibecastMonitor(self)
         self._player = VibecastPlayer(self)
 
         self._state_lock = threading.RLock()
         self._ws_lock = threading.Lock()
-        self._queue_lock = threading.Lock()
         self._stop_event = threading.Event()
 
         self._ws: websocket.WebSocketApp | None = None
@@ -289,7 +313,7 @@ class VibecastService:
         self._active_session_id: str | None = None
         self._active_media: dict[str, Any] | None = None
         self._stream_queue: deque[dict[str, Any]] = deque()
-        self._command_queue: deque[dict[str, Any]] = deque()
+        self._command_queue: queue.Queue[dict[str, Any]] = queue.Queue()
 
         self._state_hint = PLAYER_STATE_IDLE
         self._is_paused = False
@@ -323,6 +347,8 @@ class VibecastService:
 
     def stop(self) -> None:
         self._stop_event.set()
+        if self._settings_dialog is not None:
+            self._settings_dialog.close()
         self._close_websocket()
         ws_thread = self._ws_thread
         if ws_thread is not None and ws_thread.is_alive():
@@ -392,11 +418,10 @@ class VibecastService:
 
     def _build_register_frame(self) -> dict[str, Any]:
         cfg = self._config
-        return {
-            "type": "register",
-            "playerId": self._player_id,
-            "name": cfg.player_name or "Kodi",
-            "capabilities": {
+        return registration_message(
+            self._player_id,
+            cfg.player_name or "Kodi",
+            {
                 "platform": cfg.platform,
                 "drm": [
                     {
@@ -412,7 +437,7 @@ class VibecastService:
                 "frameRates": [24, 25, 30, 50, 60],
                 "subtitleFormats": ["ttml", "vtt"],
             },
-        }
+        )
 
     def _on_ws_open(self, ws: websocket.WebSocketApp) -> None:
         # The first frame must be the registration announcing this player's
@@ -444,16 +469,12 @@ class VibecastService:
             return
 
         try:
-            payload = json.loads(message)
-        except json.JSONDecodeError:
+            server_message = decode_server_message(message)
+        except ProtocolError:
             log("ignoring malformed websocket payload", xbmc.LOGWARNING)
             return
 
-        if not isinstance(payload, dict):
-            return
-
-        with self._queue_lock:
-            self._command_queue.append(payload)
+        self._command_queue.put(server_message.payload)
 
     def _on_ws_error(self, _ws: websocket.WebSocketApp, error: Any) -> None:
         error_text = str(error)
@@ -499,8 +520,10 @@ class VibecastService:
             "event": event,
         }
         payload.update(data)
-        with self._queue_lock:
-            self._command_queue.append(payload)
+        self._command_queue.put(payload)
+
+    def enqueue_open_app_settings(self) -> None:
+        self._enqueue_internal_event("open_app_settings")
 
     def _handle_command(self, payload: dict[str, Any]) -> None:
         command_type = _coerce_str(payload.get("type"))
@@ -511,9 +534,18 @@ class VibecastService:
             self._handle_internal_event(payload)
             return
 
+        if command_type == SETTINGS_SNAPSHOT:
+            self._handle_settings_snapshot(payload)
+            return
+        if command_type == SETTINGS_UPDATE_RESULT:
+            self._handle_settings_update_result(payload)
+            return
+
         if self._config.debug_logging:
             log(f"command: {command_type}", xbmc.LOGDEBUG)
 
+        if command_type not in PLAYBACK_MESSAGE_TYPES:
+            return
         if command_type == "load":
             self._handle_load(payload)
             return
@@ -545,6 +577,9 @@ class VibecastService:
             close_message = payload.get("closeMessage")
             self._handle_ws_close_event(status_code, close_message)
             return
+        if event_name == "open_app_settings":
+            self._open_app_settings()
+            return
         if event_name == "ws_error" and self._config.debug_logging:
             error_text = _coerce_str(payload.get("error"))
             if error_text is not None:
@@ -555,6 +590,8 @@ class VibecastService:
             return
 
         self._connection_state = CONNECTION_STATE_CONNECTED
+        self._settings_catalog.set_connected(False)
+        self._refresh_settings_dialog()
         endpoint = f"{self._config.host}:{self._config.port}"
         log(f"connected to vibecast player endpoint {endpoint}")
         self._notify(
@@ -564,6 +601,8 @@ class VibecastService:
 
     def _handle_ws_close_event(self, status_code: Any, close_message: Any) -> None:
         endpoint = f"{self._config.host}:{self._config.port}"
+        self._settings_catalog.set_connected(False)
+        self._refresh_settings_dialog()
         last_error: str | None
         with self._ws_lock:
             last_error = self._last_ws_error
@@ -595,6 +634,65 @@ class VibecastService:
                 f"Could not connect to vibecast yet ({endpoint}).",
                 xbmcgui.NOTIFICATION_WARNING,
             )
+
+    def _handle_settings_snapshot(self, payload: dict[str, Any]) -> None:
+        try:
+            self._settings_catalog.replace_snapshot(payload)
+        except ProtocolError as exc:
+            log(f"ignoring invalid settings snapshot: {exc}", xbmc.LOGWARNING)
+            return
+        self._refresh_settings_dialog()
+
+    def _handle_settings_update_result(self, payload: dict[str, Any]) -> None:
+        try:
+            status = self._settings_catalog.apply_update_result(payload)
+        except ProtocolError as exc:
+            log(f"ignoring invalid settings update result: {exc}", xbmc.LOGWARNING)
+            return
+        self._refresh_settings_dialog()
+        if self._config.debug_logging:
+            log(f"settings update result: {status}", xbmc.LOGDEBUG)
+        self._notify(f"App settings update: {status}", xbmcgui.NOTIFICATION_INFO)
+
+    def _open_app_settings(self) -> None:
+        if self._settings_dialog is None:
+            addon_path = self._addon.getAddonInfo("path")
+            dialog = AppSettingsDialog(
+                "AppSettings.xml",
+                addon_path,
+                "Default",
+                "1080i",
+            )
+            dialog.bind(self._settings_catalog, self._submit_settings_change)
+            self._settings_dialog = dialog
+
+        self._settings_dialog.show()
+        self._settings_dialog.refresh()
+
+    def _refresh_settings_dialog(self) -> None:
+        if self._settings_dialog is not None:
+            self._settings_dialog.refresh()
+
+    def _submit_settings_change(
+        self,
+        app_key: str,
+        setting_key: str,
+        value: Any,
+    ) -> None:
+        try:
+            payload = self._settings_catalog.begin_update(
+                str(uuid.uuid4()),
+                app_key,
+                setting_key,
+                value,
+            )
+        except ProtocolError as exc:
+            log(f"settings update rejected locally: {exc}", xbmc.LOGWARNING)
+            return
+
+        if not self._send_payload(payload):
+            self._settings_catalog.set_connected(False)
+        self._refresh_settings_dialog()
 
     def _notify(self, message: str, icon: int) -> None:
         if not self._config.show_notifications:
@@ -1062,18 +1160,19 @@ class VibecastService:
             return None
         return duration
 
-    def _send_payload(self, payload: dict[str, Any]) -> None:
+    def _send_payload(self, payload: dict[str, Any]) -> bool:
         message = json.dumps(payload, separators=(",", ":"))
         with self._ws_lock:
             ws = self._ws
             connected = self._ws_connected
         if ws is None or not connected:
-            return
+            return False
 
         try:
             ws.send(message)
         except (OSError, websocket.WebSocketException):
-            return
+            return False
+        return True
 
     def _execute_json_rpc(self, method: str, params: dict[str, Any]) -> None:
         payload = {
@@ -1186,9 +1285,11 @@ class VibecastService:
 
     def _tick(self) -> None:
         queued_commands: list[dict[str, Any]] = []
-        with self._queue_lock:
-            while self._command_queue:
-                queued_commands.append(self._command_queue.popleft())
+        while True:
+            try:
+                queued_commands.append(self._command_queue.get_nowait())
+            except queue.Empty:
+                break
 
         for command in self._coalesce_seek_commands(queued_commands):
             self._handle_command(command)

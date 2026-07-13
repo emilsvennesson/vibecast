@@ -33,6 +33,7 @@ use vibecast_sdk::{
     NoopSenderChannel, PlaybackController, PlaybackMedia, PlaybackState, PlayerCapabilities,
     ReceiverContext, SenderChannel,
 };
+use vibecast_settings::PlayerSettings;
 
 use crate::coordinator::{loading_media_info, media_info, Coordinator};
 use crate::identity::DeviceIdentity;
@@ -290,6 +291,8 @@ pub struct HubConfig {
     pub cast_device_capabilities: String,
     /// Capabilities of the player bound to this receiver.
     pub capabilities: PlayerCapabilities,
+    /// Live settings scoped to the player bound to this receiver.
+    pub player_settings: PlayerSettings,
 }
 
 /// The device hub actor.
@@ -304,6 +307,7 @@ pub struct DeviceHub {
     user_agent: String,
     cast_device_capabilities: String,
     capabilities: PlayerCapabilities,
+    player_settings: PlayerSettings,
     connections: HashMap<u64, ConnectionHandle>,
     /// `(connection, sender)` -> transport id.
     subscriptions: HashMap<(u64, String), String>,
@@ -330,6 +334,7 @@ impl DeviceHub {
             user_agent: config.user_agent,
             cast_device_capabilities: config.cast_device_capabilities,
             capabilities: config.capabilities,
+            player_settings: config.player_settings,
             connections: HashMap::new(),
             subscriptions: HashMap::new(),
             sessions: HashMap::new(),
@@ -495,13 +500,30 @@ impl DeviceHub {
             request_id = request.request_id,
             "LAUNCH request"
         );
-        let Some(provider) = self.registry.get(&request.app_id) else {
+        let Some(registered) = self.registry.get(&request.app_id) else {
             tracing::warn!(app_id = %request.app_id, "LAUNCH_ERROR: app not registered");
             let response =
                 LaunchErrorResponse::new(request.request_id, "Application not available");
             self.send_to(conn_id, RECEIVER_0, source, ns::RECEIVER, &response)
                 .await;
             return;
+        };
+        let manifest = &registered.manifest;
+        let settings = match self.player_settings.reader(manifest.app_key).await {
+            Ok(settings) => settings,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    app_id = %request.app_id,
+                    app_key = %manifest.app_key,
+                    "LAUNCH_ERROR: app settings unavailable"
+                );
+                let response =
+                    LaunchErrorResponse::new(request.request_id, "Application launch failed");
+                self.send_to(conn_id, RECEIVER_0, source, ns::RECEIVER, &response)
+                    .await;
+                return;
+            }
         };
 
         // LAUNCH replaces the current app: stop existing sessions first.
@@ -511,7 +533,7 @@ impl DeviceHub {
 
         let session_id = Uuid::new_v4().to_string();
         let (credentials, credentials_type) = request.resolved_credentials();
-        let app_key = provider.app_key();
+        let app_key = manifest.app_key;
         let data_dir = self.data_dir.join("apps").join(app_key);
         let _ = std::fs::create_dir_all(&data_dir);
 
@@ -533,12 +555,14 @@ impl DeviceHub {
             },
             Arc::new(NoopSenderChannel),
         )
+        .with_settings(settings)
         .with_playback_controller(Arc::new(HubPlaybackController {
             tx: self.self_tx.clone(),
             session_id: session_id.clone(),
         }));
 
-        let app: Arc<dyn AppSession> = match provider
+        let app: Arc<dyn AppSession> = match registered
+            .provider
             .launch(
                 &ctx,
                 LaunchCredentials {
@@ -567,8 +591,8 @@ impl DeviceHub {
             }
         };
 
-        let mut namespaces: Vec<String> = provider
-            .namespaces()
+        let mut namespaces: Vec<String> = manifest
+            .namespaces
             .iter()
             .filter(|name| **name != ns::MEDIA)
             .map(|name| (*name).to_string())
@@ -584,9 +608,9 @@ impl DeviceHub {
         let session = Session {
             app_id: request.app_id.clone(),
             app_key: app_key.to_string(),
-            display_name: provider.display_name().to_string(),
-            icon_url: provider.icon_url().map(str::to_string),
-            status_text: provider.display_name().to_string(),
+            display_name: manifest.display_name.to_string(),
+            icon_url: manifest.icon_url.map(str::to_string),
+            status_text: manifest.display_name.to_string(),
             namespaces,
             app,
             ctx,
@@ -1254,6 +1278,7 @@ impl DeviceHub {
             session.ctx.receiver.clone(),
             sender,
         )
+        .with_settings(session.ctx.settings.clone())
         .with_playback_controller(session.ctx.playback_controller())
     }
 

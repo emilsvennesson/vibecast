@@ -31,6 +31,7 @@ use vibecast_messages::Volume;
 use vibecast_player_api::{Player, PlayerReport, ProxyRegistrar};
 use vibecast_sdk::PlayerCapabilities;
 use vibecast_security::{server_config, CertResolver, CertificateBundle, SecurityError};
+use vibecast_settings::PlayerSettings;
 
 /// Everything needed to compose one receiver instance.
 pub struct ReceiverParams {
@@ -58,6 +59,8 @@ pub struct ReceiverParams {
     pub cast_device_capabilities: String,
     /// Capabilities of the player bound to this receiver.
     pub capabilities: PlayerCapabilities,
+    /// Live settings scoped to the player bound to this receiver.
+    pub player_settings: PlayerSettings,
     /// Shared TLS cert resolver (rotation updates this once for all receivers).
     pub resolver: Arc<CertResolver>,
     /// Active certificate bundle (device-auth material + digest source).
@@ -215,6 +218,7 @@ pub async fn spawn(params: ReceiverParams) -> Result<RunningReceiver, ReceiverEr
         user_agent,
         cast_device_capabilities,
         capabilities,
+        player_settings,
         resolver,
         bundle,
         crl,
@@ -286,6 +290,7 @@ pub async fn spawn(params: ReceiverParams) -> Result<RunningReceiver, ReceiverEr
         user_agent,
         cast_device_capabilities,
         capabilities,
+        player_settings,
     });
     let hub_handle = hub.handle();
 

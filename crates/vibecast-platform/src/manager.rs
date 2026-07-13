@@ -21,11 +21,15 @@ use vibecast_cast::AuthMaterial;
 use vibecast_core::{AppRegistry, DeviceIdentity};
 use vibecast_discovery::{DeviceCapabilities, EurekaIdentity};
 use vibecast_messages::Volume;
-use vibecast_player_api::{Player, PlayerReport};
+use vibecast_player_api::{Player, PlayerCapabilitiesPayload, PlayerReport};
 use vibecast_receiver::{
     spawn as spawn_receiver, ReceiverParams, RunningReceiver as ReceiverInstance,
 };
+use vibecast_sdk::{
+    DrmCapability, DrmSecurityLevel, DrmSystem, Platform, PlayerCapabilities, Resolution,
+};
 use vibecast_security::{CertResolver, CertificateStore};
+use vibecast_settings::PlayerSettings;
 
 /// Facts about a player's receiver, reported to a frontend that owns discovery
 /// (e.g. Android `NsdManager`) so it can advertise the service per player.
@@ -127,8 +131,14 @@ impl PlayerManager {
                 () = shutdown.cancelled() => break,
                 _ = ticker.tick() => self.rotate_certificates().await,
                 event = events.recv() => match event {
-                    Some(PlayerEvent::Registered { registration, player, reports, epoch }) => {
-                        self.on_registered(epoch, *registration, player, reports).await;
+                    Some(PlayerEvent::Registered {
+                        registration,
+                        player,
+                        reports,
+                        settings,
+                        epoch,
+                    }) => {
+                        self.on_registered(epoch, *registration, player, reports, settings).await;
                     }
                     Some(PlayerEvent::Disconnected { player_id, epoch }) => {
                         self.on_disconnected(&player_id, epoch).await;
@@ -152,6 +162,7 @@ impl PlayerManager {
         registration: PlayerRegistration,
         player: Arc<dyn Player>,
         reports: mpsc::Receiver<PlayerReport>,
+        settings: PlayerSettings,
     ) {
         let player_id = registration.player_id.clone();
 
@@ -180,7 +191,8 @@ impl PlayerManager {
             volume: self.config.volume.clone(),
             user_agent: self.config.user_agent.clone(),
             cast_device_capabilities: self.config.cast_device_capabilities.clone(),
-            capabilities: registration.capabilities,
+            capabilities: player_capabilities(registration.capabilities),
+            player_settings: settings,
             resolver: self.config.resolver.clone(),
             bundle: self.bundle.clone(),
             crl: self.config.crl.clone(),
@@ -293,6 +305,63 @@ impl PlayerManager {
     }
 }
 
+fn player_capabilities(payload: PlayerCapabilitiesPayload) -> PlayerCapabilities {
+    let default = PlayerCapabilities::default();
+    PlayerCapabilities {
+        platform: payload.platform.map_or(default.platform, parse_platform),
+        drm: payload
+            .drm
+            .into_iter()
+            .filter_map(|drm| {
+                let system = match drm.system.as_str() {
+                    "com.widevine.alpha" => DrmSystem::Widevine,
+                    "com.microsoft.playready" => DrmSystem::PlayReady,
+                    "org.w3.clearkey" => DrmSystem::ClearKey,
+                    "com.apple.fps" | "com.apple.fps.1_0" => DrmSystem::FairPlay,
+                    _ => return None,
+                };
+                let security_level = drm.security_level.as_deref().and_then(|level| match level {
+                    "L1" => Some(DrmSecurityLevel::L1),
+                    "L2" => Some(DrmSecurityLevel::L2),
+                    "L3" => Some(DrmSecurityLevel::L3),
+                    _ => None,
+                });
+                Some(DrmCapability::new(system, security_level))
+            })
+            .collect(),
+        video_codecs: non_empty_or(payload.video_codecs, default.video_codecs),
+        audio_codecs: non_empty_or(payload.audio_codecs, default.audio_codecs),
+        max_resolution: payload
+            .max_resolution
+            .map_or(default.max_resolution, |resolution| {
+                Resolution::new(resolution.width, resolution.height)
+            }),
+        hdr_formats: payload.hdr_formats,
+        frame_rates: non_empty_or(payload.frame_rates, default.frame_rates),
+        subtitle_formats: payload.subtitle_formats,
+        hdcp_level: payload.hdcp_level,
+    }
+}
+
+fn parse_platform(raw: String) -> Platform {
+    match raw.as_str() {
+        "android" => Platform::Android,
+        "linux" => Platform::Linux,
+        "macos" => Platform::MacOs,
+        "windows" => Platform::Windows,
+        "browser" => Platform::Browser,
+        _ => Platform::Other(raw),
+    }
+}
+
+fn non_empty_or<T>(value: Vec<T>, fallback: Vec<T>) -> Vec<T> {
+    if value.is_empty() {
+        fallback
+    } else {
+        value
+    }
+}
+
 fn player_device_id(installation_id: &uuid::Uuid, player_id: &str) -> String {
     uuid::Uuid::new_v5(installation_id, player_id.as_bytes()).to_string()
 }
@@ -307,6 +376,7 @@ fn unix_now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vibecast_player_api::{DrmCapabilityPayload, ResolutionPayload};
 
     #[test]
     fn player_device_ids_are_stable_and_installation_scoped() {
@@ -321,5 +391,38 @@ mod tests {
         let parsed = uuid::Uuid::parse_str(&first).unwrap();
         assert_eq!(parsed.get_version(), Some(uuid::Version::Sha1));
         assert_eq!(parsed.to_string(), first);
+    }
+
+    #[test]
+    fn capability_payload_uses_bridge_mapping_and_fallbacks() {
+        let capabilities = player_capabilities(PlayerCapabilitiesPayload {
+            platform: Some("android".to_owned()),
+            drm: vec![
+                DrmCapabilityPayload {
+                    system: "com.widevine.alpha".to_owned(),
+                    security_level: Some("L1".to_owned()),
+                },
+                DrmCapabilityPayload {
+                    system: "unknown".to_owned(),
+                    security_level: None,
+                },
+            ],
+            max_resolution: Some(ResolutionPayload {
+                width: 3840,
+                height: 2160,
+            }),
+            ..PlayerCapabilitiesPayload::default()
+        });
+
+        assert_eq!(capabilities.platform, Platform::Android);
+        assert_eq!(capabilities.drm.len(), 1);
+        assert_eq!(
+            capabilities.drm_level(DrmSystem::Widevine),
+            Some(DrmSecurityLevel::L1)
+        );
+        assert_eq!(capabilities.video_codecs, ["h264", "hevc"]);
+        assert_eq!(capabilities.audio_codecs, ["aac"]);
+        assert_eq!(capabilities.max_resolution, Resolution::new(3840, 2160));
+        assert_eq!(capabilities.frame_rates, [24, 25, 30, 50, 60]);
     }
 }

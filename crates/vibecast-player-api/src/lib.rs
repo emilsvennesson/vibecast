@@ -26,7 +26,10 @@ pub use manifest::{
 };
 pub use player::Player;
 pub use protocol::{
-    DrmPayload, DrmSystem, PlaybackMediaPayload, PlaybackStreamPayload, PlayerCommand, PlayerReport,
+    AppSettingsPayload, ClientMessage, DrmCapabilityPayload, DrmPayload, DrmSystem,
+    PlaybackMediaPayload, PlaybackStreamPayload, PlayerCapabilitiesPayload, PlayerCommand,
+    PlayerRegistration, PlayerReport, ResolutionPayload, ServerMessage, SettingOptionPayload,
+    SettingPayload, SettingsSnapshotMessage, SettingsUpdateResultMessage, SettingsUpdateStatus,
 };
 pub use proxy::{
     LicenseHandler, LicenseRequest, LicenseResponse, ManifestHandler, ManifestProxyRequest,

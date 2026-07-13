@@ -12,7 +12,7 @@
 //! The license/manifest handler registries are plain maps keyed by session id
 //! (session ids are globally unique), shared across all players' receivers.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -26,31 +26,22 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use vibecast_player_api::headers::{filter_upstream_headers, filter_upstream_response_headers};
 use vibecast_player_api::{
-    LicenseHandler, LicenseRequest, ManifestHandler, ManifestProxyRequest, Player, PlayerCommand,
-    PlayerReport, ProxyRegistrar, RouteId,
+    AppSettingsPayload, ClientMessage, LicenseHandler, LicenseRequest, ManifestHandler,
+    ManifestProxyRequest, Player, PlayerCommand, PlayerRegistration, PlayerReport, ProxyRegistrar,
+    RouteId, ServerMessage, SettingOptionPayload, SettingPayload, SettingsSnapshotMessage,
+    SettingsUpdateResultMessage, SettingsUpdateStatus,
 };
-use vibecast_sdk::{
-    DrmCapability, DrmSecurityLevel, DrmSystem, Platform, PlayerCapabilities, Resolution,
+use vibecast_settings::{
+    AppSettingsReader, AppSettingsSchema, PlayerSettings, SettingDescriptor, SettingMutation,
+    SettingValue, SettingsService, SettingsServiceError, SettingsSnapshot,
 };
 
 use crate::web::{PLAYER_HTML, PLAYER_HTML_CONTENT_TYPE, PLAYER_JS, PLAYER_JS_CONTENT_TYPE};
-
-/// Identity and capabilities a player reports when it registers.
-#[derive(Debug, Clone)]
-pub struct PlayerRegistration {
-    /// Stable id the player chose for itself (persisted across reconnects).
-    pub player_id: String,
-    /// Human-readable base name (the orchestrator appends its own suffix).
-    pub name: String,
-    /// What the player can decode / output / protect.
-    pub capabilities: PlayerCapabilities,
-}
 
 /// Lifecycle events emitted by the bridge as players connect and disconnect.
 ///
@@ -70,6 +61,8 @@ pub enum PlayerEvent {
         player: Arc<dyn Player>,
         /// Playback reports from this player.
         reports: mpsc::Receiver<PlayerReport>,
+        /// Settings scoped to this player's stable id.
+        settings: PlayerSettings,
         /// Per-connection token identifying the socket this registration came
         /// from.
         epoch: u64,
@@ -92,133 +85,12 @@ struct PlayerSink {
 #[async_trait]
 impl Player for PlayerSink {
     async fn send(&self, command: PlayerCommand) {
-        match serde_json::to_string(&command) {
+        match serde_json::to_string(&ServerMessage::Playback(command)) {
             Ok(text) => {
                 let _ = self.out.send(text).await;
             }
             Err(error) => tracing::error!(%error, "failed to serialize player command"),
         }
-    }
-}
-
-// -- register frame wire format --------------------------------------------
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RegisterFrame {
-    #[serde(rename = "type")]
-    frame_type: String,
-    player_id: String,
-    name: String,
-    #[serde(default)]
-    capabilities: CapabilitiesDto,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-struct CapabilitiesDto {
-    platform: Option<String>,
-    drm: Vec<DrmDto>,
-    video_codecs: Vec<String>,
-    audio_codecs: Vec<String>,
-    max_resolution: Option<ResolutionDto>,
-    hdr_formats: Vec<String>,
-    frame_rates: Vec<u32>,
-    subtitle_formats: Vec<String>,
-    hdcp_level: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DrmDto {
-    system: String,
-    #[serde(default)]
-    security_level: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ResolutionDto {
-    width: u32,
-    height: u32,
-}
-
-fn parse_register(text: &str) -> Option<PlayerRegistration> {
-    let frame: RegisterFrame = serde_json::from_str(text).ok()?;
-    if frame.frame_type != "register" {
-        return None;
-    }
-    // The player id keys the orchestrator's receiver map and the name becomes an
-    // advertised friendly name, so reject empty/whitespace values rather than let
-    // them collide or advertise a device named " [vibecast]".
-    let player_id = frame.player_id.trim().to_string();
-    let name = frame.name.trim().to_string();
-    if player_id.is_empty() || name.is_empty() {
-        return None;
-    }
-    Some(PlayerRegistration {
-        player_id,
-        name,
-        capabilities: frame.capabilities.into_sdk(),
-    })
-}
-
-impl CapabilitiesDto {
-    fn into_sdk(self) -> PlayerCapabilities {
-        let default = PlayerCapabilities::default();
-        PlayerCapabilities {
-            platform: self.platform.map_or(default.platform, parse_platform),
-            drm: self.drm.into_iter().filter_map(DrmDto::into_sdk).collect(),
-            video_codecs: non_empty_or(self.video_codecs, default.video_codecs),
-            audio_codecs: non_empty_or(self.audio_codecs, default.audio_codecs),
-            max_resolution: self.max_resolution.map_or(default.max_resolution, |r| {
-                Resolution::new(r.width, r.height)
-            }),
-            hdr_formats: self.hdr_formats,
-            frame_rates: non_empty_or(self.frame_rates, default.frame_rates),
-            subtitle_formats: self.subtitle_formats,
-            hdcp_level: self.hdcp_level,
-        }
-    }
-}
-
-impl DrmDto {
-    fn into_sdk(self) -> Option<DrmCapability> {
-        let system = match self.system.as_str() {
-            "com.widevine.alpha" => DrmSystem::Widevine,
-            "com.microsoft.playready" => DrmSystem::PlayReady,
-            "org.w3.clearkey" => DrmSystem::ClearKey,
-            "com.apple.fps" | "com.apple.fps.1_0" => DrmSystem::FairPlay,
-            _ => return None,
-        };
-        let security_level = self
-            .security_level
-            .as_deref()
-            .and_then(|level| match level {
-                "L1" => Some(DrmSecurityLevel::L1),
-                "L2" => Some(DrmSecurityLevel::L2),
-                "L3" => Some(DrmSecurityLevel::L3),
-                _ => None,
-            });
-        Some(DrmCapability::new(system, security_level))
-    }
-}
-
-fn parse_platform(raw: String) -> Platform {
-    match raw.as_str() {
-        "android" => Platform::Android,
-        "linux" => Platform::Linux,
-        "macos" => Platform::MacOs,
-        "windows" => Platform::Windows,
-        "browser" => Platform::Browser,
-        _ => Platform::Other(raw),
-    }
-}
-
-fn non_empty_or<T>(value: Vec<T>, fallback: Vec<T>) -> Vec<T> {
-    if value.is_empty() {
-        fallback
-    } else {
-        value
     }
 }
 
@@ -228,6 +100,7 @@ fn non_empty_or<T>(value: Vec<T>, fallback: Vec<T>) -> Vec<T> {
 #[derive(Clone)]
 struct BridgeState {
     events: mpsc::Sender<PlayerEvent>,
+    settings: SettingsService,
     licenses: Arc<Mutex<HashMap<String, Arc<dyn LicenseHandler>>>>,
     manifests: Arc<Mutex<HashMap<String, Arc<dyn ManifestHandler>>>>,
     resolved_host: Arc<str>,
@@ -235,6 +108,8 @@ struct BridgeState {
     port: Arc<AtomicU16>,
     /// Monotonic counter handing each socket a unique per-connection epoch.
     epochs: Arc<AtomicU64>,
+    /// Current writable connection epoch for each stable player id.
+    current_epochs: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl BridgeState {
@@ -271,9 +146,15 @@ pub struct PlayerBridge {
 impl PlayerBridge {
     /// Create a bridge. Construction is side-effect free: no tasks are spawned
     /// and no runtime is required until [`start`](Self::start). Player lifecycle
-    /// events are delivered on `events`.
+    /// events are delivered on `events`, and `settings` supplies each registered
+    /// player with its scoped app settings.
     #[must_use]
-    pub fn new(host: impl Into<String>, port: u16, events: mpsc::Sender<PlayerEvent>) -> Self {
+    pub fn new(
+        host: impl Into<String>,
+        port: u16,
+        events: mpsc::Sender<PlayerEvent>,
+        settings: SettingsService,
+    ) -> Self {
         let host = host.into();
         let resolved_host = if host == "0.0.0.0" || host == "::" {
             "127.0.0.1".to_string()
@@ -283,12 +164,14 @@ impl PlayerBridge {
 
         let state = BridgeState {
             events,
+            settings,
             licenses: Arc::new(Mutex::new(HashMap::new())),
             manifests: Arc::new(Mutex::new(HashMap::new())),
             resolved_host: Arc::from(resolved_host.as_str()),
             configured_port: port,
             port: Arc::new(AtomicU16::new(0)),
             epochs: Arc::new(AtomicU64::new(0)),
+            current_epochs: Arc::new(Mutex::new(HashMap::new())),
         };
 
         Self {
@@ -456,32 +339,212 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<BridgeState>) -> R
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
+async fn settings_snapshot(
+    service: &SettingsService,
+    settings: &PlayerSettings,
+) -> Result<SettingsSnapshotMessage, SettingsServiceError> {
+    let mut apps = Vec::new();
+    for schema in service.catalog().apps() {
+        let snapshot = settings.reader(schema.app_id()).await?.snapshot();
+        apps.push(app_settings_payload(schema, &snapshot));
+    }
+    Ok(SettingsSnapshotMessage::new(apps))
+}
+
+fn app_settings_payload(
+    schema: &AppSettingsSchema,
+    snapshot: &SettingsSnapshot,
+) -> AppSettingsPayload {
+    let settings = schema
+        .settings()
+        .iter()
+        .map(|descriptor| {
+            let (kind, options) = match descriptor {
+                SettingDescriptor::Boolean { .. } => ("boolean", Vec::new()),
+                SettingDescriptor::Choice { choices, .. } => (
+                    "choice",
+                    choices
+                        .iter()
+                        .map(|choice| SettingOptionPayload {
+                            value: choice.value.clone(),
+                            label: choice.label.clone(),
+                        })
+                        .collect(),
+                ),
+                SettingDescriptor::Integer { .. } => ("integer", Vec::new()),
+                SettingDescriptor::Number { .. } => ("number", Vec::new()),
+                SettingDescriptor::String { .. } => ("string", Vec::new()),
+            };
+            SettingPayload {
+                key: descriptor.key().to_owned(),
+                label: descriptor.label().to_owned(),
+                description: descriptor.description().map(str::to_owned),
+                kind: kind.to_owned(),
+                default: descriptor.default_value(),
+                value: snapshot
+                    .values()
+                    .get(descriptor.key())
+                    .cloned()
+                    .unwrap_or_else(|| descriptor.default_value()),
+                writable: descriptor.scope() == vibecast_settings::SettingScope::AppPlayer,
+                options,
+            }
+        })
+        .collect();
+
+    AppSettingsPayload {
+        app_key: schema.app_id().to_owned(),
+        display_name: schema.display_name().to_owned(),
+        revision: snapshot.revision(),
+        settings,
+    }
+}
+
+async fn current_app_settings_payload(
+    service: &SettingsService,
+    settings: &PlayerSettings,
+    app_key: &str,
+) -> Option<AppSettingsPayload> {
+    let schema = service.catalog().app(app_key)?;
+    let snapshot = settings.reader(app_key).await.ok()?.snapshot();
+    Some(app_settings_payload(schema, &snapshot))
+}
+
+async fn apply_settings_update(
+    service: &SettingsService,
+    settings: &PlayerSettings,
+    request_id: String,
+    app_key: String,
+    expected_revision: u64,
+    changes: std::collections::BTreeMap<String, Option<vibecast_settings::SettingValue>>,
+) -> ServerMessage {
+    let schema = service.catalog().app(&app_key);
+    let mutations = changes
+        .into_iter()
+        .map(|(key, value)| match value {
+            Some(value) => {
+                let value = match (schema.and_then(|schema| schema.setting(&key)), value) {
+                    (Some(SettingDescriptor::Number { .. }), SettingValue::Integer(value)) => {
+                        SettingValue::Number(value as f64)
+                    }
+                    (_, value) => value,
+                };
+                SettingMutation::Set { key, value }
+            }
+            None => SettingMutation::Reset { key },
+        })
+        .collect();
+
+    let result = settings
+        .compare_and_set(&app_key, expected_revision, mutations)
+        .await;
+    let (status, app) = match result {
+        Ok(snapshot) => {
+            let app = service
+                .catalog()
+                .app(&app_key)
+                .map(|schema| app_settings_payload(schema, &snapshot));
+            (SettingsUpdateStatus::Applied, app)
+        }
+        Err(SettingsServiceError::Conflict { .. }) => (
+            SettingsUpdateStatus::Conflict,
+            current_app_settings_payload(service, settings, &app_key).await,
+        ),
+        Err(_) => {
+            tracing::warn!(app_key, "player settings update rejected");
+            (
+                SettingsUpdateStatus::Rejected,
+                current_app_settings_payload(service, settings, &app_key).await,
+            )
+        }
+    };
+    let app = app.unwrap_or_else(|| AppSettingsPayload {
+        app_key: app_key.clone(),
+        display_name: app_key,
+        revision: 0,
+        settings: Vec::new(),
+    });
+
+    ServerMessage::SettingsUpdateResult(SettingsUpdateResultMessage::new(request_id, status, app))
+}
+
 async fn handle_socket(socket: WebSocket, state: BridgeState) {
     let (mut sink, mut stream) = socket.split();
 
-    // The first meaningful frame must be a `register` message.
-    let registration = loop {
-        match stream.next().await {
-            Some(Ok(Message::Text(text))) => match parse_register(text.as_str()) {
-                Some(registration) => break registration,
-                None => {
-                    tracing::warn!("first player frame was not a valid register message");
-                    return;
-                }
-            },
-            Some(Ok(Message::Close(_))) | None => return,
-            Some(Ok(_)) => {}
-            Some(Err(_)) => return,
-        }
+    // The first frame must be a `register` client message.
+    let Some(Ok(Message::Text(first_frame))) = stream.next().await else {
+        return;
+    };
+    let Ok(ClientMessage::Register {
+        player: mut registration,
+    }) = serde_json::from_str::<ClientMessage>(first_frame.as_str())
+    else {
+        tracing::warn!("first player frame was not a valid register message");
+        return;
     };
 
+    registration.player_id = registration.player_id.trim().to_owned();
+    registration.name = registration.name.trim().to_owned();
+    if registration.player_id.is_empty() || registration.name.is_empty() {
+        tracing::warn!("player registration has an empty id or name");
+        return;
+    }
+
     let player_id = registration.player_id.clone();
-    // A per-connection epoch so a stale socket's Disconnected can't tear down a
-    // newer receiver that reused the same player_id.
     let epoch = state.epochs.fetch_add(1, Ordering::Relaxed);
+    let player_settings = match state.settings.player(player_id.clone()) {
+        Ok(settings) => settings,
+        Err(_) => return,
+    };
+    let mut settings_readers = Vec::new();
+    for schema in state.settings.catalog().apps() {
+        match player_settings.reader(schema.app_id()).await {
+            Ok(reader) => settings_readers.push(reader),
+            Err(_) => {
+                tracing::warn!(player_id, "failed to subscribe to player settings");
+                return;
+            }
+        }
+    }
+    let snapshot = match settings_snapshot(&state.settings, &player_settings).await {
+        Ok(snapshot) => snapshot,
+        Err(_) => {
+            tracing::warn!(player_id, "failed to build player settings snapshot");
+            return;
+        }
+    };
+    let mut last_settings_revisions = snapshot
+        .apps
+        .iter()
+        .map(|app| (app.app_key.clone(), app.revision))
+        .collect::<BTreeMap<_, _>>();
+    let snapshot = ServerMessage::SettingsSnapshot(snapshot);
+    let snapshot = match serde_json::to_string(&snapshot) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::error!(%error, "failed to serialize player settings snapshot");
+            return;
+        }
+    };
+    if sink.send(Message::Text(snapshot.into())).await.is_err() {
+        return;
+    }
+
+    let (settings_changed_tx, mut settings_changed_rx) = mpsc::channel::<()>(1);
+    let mut settings_watch_tasks = Vec::new();
+    for reader in settings_readers {
+        settings_watch_tasks.push(spawn_settings_watch(reader, settings_changed_tx.clone()));
+    }
+    drop(settings_changed_tx);
+
     let (out_tx, mut out_rx) = mpsc::channel::<String>(64);
     let (reports_tx, reports_rx) = mpsc::channel::<PlayerReport>(64);
     let player: Arc<dyn Player> = Arc::new(PlayerSink { out: out_tx });
+    let previous_epoch = state
+        .current_epochs
+        .lock()
+        .unwrap()
+        .insert(player_id.clone(), epoch);
 
     if state
         .events
@@ -489,11 +552,23 @@ async fn handle_socket(socket: WebSocket, state: BridgeState) {
             registration: Box::new(registration),
             player,
             reports: reports_rx,
+            settings: player_settings.clone(),
             epoch,
         })
         .await
         .is_err()
     {
+        let mut current_epochs = state.current_epochs.lock().unwrap();
+        if current_epochs.get(&player_id).copied() == Some(epoch) {
+            match previous_epoch {
+                Some(previous_epoch) => {
+                    current_epochs.insert(player_id, previous_epoch);
+                }
+                None => {
+                    current_epochs.remove(&player_id);
+                }
+            }
+        }
         return;
     }
     tracing::info!(player_id = %player_id, "player registered");
@@ -510,14 +585,86 @@ async fn handle_socket(socket: WebSocket, state: BridgeState) {
                     None => break,
                 }
             }
+            changed = settings_changed_rx.recv() => {
+                if changed.is_none() {
+                    break;
+                }
+                let snapshot = match settings_snapshot(&state.settings, &player_settings).await {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        tracing::warn!(%error, player_id, "failed to refresh player settings snapshot");
+                        continue;
+                    }
+                };
+                if snapshot.apps.iter().all(|app| {
+                    last_settings_revisions.get(&app.app_key).copied() == Some(app.revision)
+                }) {
+                    continue;
+                }
+                last_settings_revisions = snapshot
+                    .apps
+                    .iter()
+                    .map(|app| (app.app_key.clone(), app.revision))
+                    .collect();
+                let snapshot = ServerMessage::SettingsSnapshot(snapshot);
+                match serde_json::to_string(&snapshot) {
+                    Ok(text) => {
+                        if sink.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => tracing::error!(%error, "failed to serialize player settings snapshot"),
+                }
+            }
             incoming = stream.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
-                        match serde_json::from_str::<PlayerReport>(text.as_str()) {
-                            Ok(report) => {
-                                let _ = reports_tx.send(report).await;
+                        match serde_json::from_str::<ClientMessage>(text.as_str()) {
+                            Ok(message @ ClientMessage::State { .. })
+                            | Ok(message @ ClientMessage::Error { .. }) => {
+                                if let Some(report) = message.into_report() {
+                                    let _ = reports_tx.send(report).await;
+                                }
                             }
-                            Err(_) => tracing::warn!("invalid player report payload"),
+                            Ok(ClientMessage::SettingsUpdate {
+                                request_id,
+                                app_key,
+                                expected_revision,
+                                changes,
+                            }) => {
+                                if state.current_epochs.lock().unwrap().get(&player_id).copied()
+                                    != Some(epoch)
+                                {
+                                    tracing::warn!(player_id, "rejecting settings update from stale player connection");
+                                    break;
+                                }
+                                let response = apply_settings_update(
+                                    &state.settings,
+                                    &player_settings,
+                                    request_id,
+                                    app_key,
+                                    expected_revision,
+                                    changes,
+                                ).await;
+                                if let ServerMessage::SettingsUpdateResult(result) = &response {
+                                    last_settings_revisions
+                                        .insert(result.app.app_key.clone(), result.app.revision);
+                                }
+                                match serde_json::to_string(&response) {
+                                    Ok(text) => {
+                                        if sink.send(Message::Text(text.into())).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Err(error) => {
+                                        tracing::error!(%error, "failed to serialize settings update result");
+                                    }
+                                }
+                            }
+                            Ok(ClientMessage::Register { .. }) => {
+                                tracing::warn!(player_id, "ignoring repeated player registration");
+                            }
+                            Err(_) => tracing::warn!("invalid player message payload"),
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => break,
@@ -528,6 +675,10 @@ async fn handle_socket(socket: WebSocket, state: BridgeState) {
         }
     }
 
+    for task in settings_watch_tasks {
+        task.abort();
+    }
+
     let _ = state
         .events
         .send(PlayerEvent::Disconnected {
@@ -535,7 +686,24 @@ async fn handle_socket(socket: WebSocket, state: BridgeState) {
             epoch,
         })
         .await;
+    let mut current_epochs = state.current_epochs.lock().unwrap();
+    if current_epochs.get(&player_id).copied() == Some(epoch) {
+        current_epochs.remove(&player_id);
+    }
     tracing::info!(player_id = %player_id, "player disconnected");
+}
+
+fn spawn_settings_watch(
+    mut reader: AppSettingsReader,
+    changed: mpsc::Sender<()>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        while reader.changed().await.is_ok() {
+            if changed.send(()).await.is_err() {
+                break;
+            }
+        }
+    })
 }
 
 async fn license_handler(
@@ -648,6 +816,10 @@ mod tests {
         LicenseResponse, ManifestProxyResponse, PlaybackMediaPayload, PlaybackStreamPayload,
         ProxyError, ProxyResult,
     };
+    use vibecast_settings::{
+        AppSettingsSchema, ChoiceOption, MemorySettingsPersistence, SettingDescriptor,
+        SettingScope, SettingValue, SettingsCatalog,
+    };
 
     fn media() -> PlaybackMediaPayload {
         PlaybackMediaPayload {
@@ -661,9 +833,49 @@ mod tests {
         }
     }
 
-    fn bridge() -> (PlayerBridge, mpsc::Receiver<PlayerEvent>) {
+    fn settings_catalog() -> SettingsCatalog {
+        SettingsCatalog::new(vec![AppSettingsSchema::with_display_name(
+            "test-app",
+            "Test App",
+            vec![
+                SettingDescriptor::Choice {
+                    key: "quality".to_owned(),
+                    label: "Quality".to_owned(),
+                    description: Some("Preferred playback quality".to_owned()),
+                    scope: SettingScope::AppPlayer,
+                    default: "auto".to_owned(),
+                    choices: vec![
+                        ChoiceOption::new("auto", "Automatic"),
+                        ChoiceOption::new("high", "High"),
+                    ],
+                },
+                SettingDescriptor::Number {
+                    key: "volume".to_owned(),
+                    label: "Volume".to_owned(),
+                    description: None,
+                    scope: SettingScope::AppPlayer,
+                    default: 0.5,
+                    min: Some(0.0),
+                    max: Some(1.0),
+                },
+            ],
+        )
+        .unwrap()])
+        .unwrap()
+    }
+
+    async fn bridge() -> (PlayerBridge, mpsc::Receiver<PlayerEvent>) {
         let (events_tx, events_rx) = mpsc::channel(16);
-        (PlayerBridge::new("127.0.0.1", 0, events_tx), events_rx)
+        let settings = SettingsService::new(
+            settings_catalog(),
+            Arc::new(MemorySettingsPersistence::default()),
+        )
+        .await
+        .unwrap();
+        (
+            PlayerBridge::new("127.0.0.1", 0, events_tx, settings),
+            events_rx,
+        )
     }
 
     async fn http_get(bridge: &PlayerBridge, uri: &str) -> (StatusCode, HeaderMap, Vec<u8>) {
@@ -698,7 +910,7 @@ mod tests {
 
     #[tokio::test]
     async fn serves_default_shaka_player_page() {
-        let (bridge, _events) = bridge();
+        let (bridge, _events) = bridge().await;
         let (status, headers, body) = http_get(&bridge, "/").await;
         assert_eq!(status, StatusCode::OK);
         assert!(content_type(&headers).starts_with("text/html"));
@@ -707,7 +919,7 @@ mod tests {
 
     #[tokio::test]
     async fn serves_player_script() {
-        let (bridge, _events) = bridge();
+        let (bridge, _events) = bridge().await;
         let (status, headers, body) = http_get(&bridge, "/player.js").await;
         assert_eq!(status, StatusCode::OK);
         assert!(content_type(&headers).contains("javascript"));
@@ -716,7 +928,7 @@ mod tests {
 
     #[tokio::test]
     async fn start_and_stop() {
-        let (bridge, _events) = bridge();
+        let (bridge, _events) = bridge().await;
         bridge.start().await.expect("start");
         assert!(bridge.serving_port().is_some());
         bridge.stop().await;
@@ -726,39 +938,18 @@ mod tests {
     fn register_frame() -> String {
         json!({
             "type": "register",
-            "playerId": "player-1",
-            "name": "Test Player",
-            "capabilities": {
-                "platform": "android",
-                "drm": [{ "system": "com.widevine.alpha", "securityLevel": "L1" }],
-                "videoCodecs": ["hevc", "h264"],
-                "maxResolution": { "width": 1920, "height": 1080 }
+            "player": {
+                "playerId": "  player-1  ",
+                "name": "  Test Player  ",
+                "capabilities": {
+                    "platform": "android",
+                    "drm": [{ "system": "com.widevine.alpha", "securityLevel": "L1" }],
+                    "videoCodecs": ["hevc", "h264"],
+                    "maxResolution": { "width": 1920, "height": 1080 }
+                }
             }
         })
         .to_string()
-    }
-
-    #[test]
-    fn parse_register_trims_values_and_rejects_empty_identity() {
-        let parsed = parse_register(
-            &json!({ "type": "register", "playerId": "  p-1  ", "name": "  Kodi  " }).to_string(),
-        )
-        .expect("valid registration");
-        assert_eq!(parsed.player_id, "p-1");
-        assert_eq!(parsed.name, "Kodi");
-
-        for bad in [
-            json!({ "type": "register", "playerId": "", "name": "Kodi" }),
-            json!({ "type": "register", "playerId": "   ", "name": "Kodi" }),
-            json!({ "type": "register", "playerId": "p-1", "name": "" }),
-            json!({ "type": "register", "playerId": "p-1", "name": "  " }),
-            json!({ "type": "hello", "playerId": "p-1", "name": "Kodi" }),
-        ] {
-            assert!(
-                parse_register(&bad.to_string()).is_none(),
-                "should reject: {bad}"
-            );
-        }
     }
 
     async fn connect(bridge: &PlayerBridge) -> WebSocketStream<MaybeTlsStream<TcpStream>> {
@@ -789,7 +980,7 @@ mod tests {
 
     #[tokio::test]
     async fn registration_delivers_capabilities_command_sink_and_reports() {
-        let (bridge, mut events) = bridge();
+        let (bridge, mut events) = bridge().await;
         bridge.start().await.expect("start");
         let mut ws = connect(&bridge).await;
 
@@ -798,29 +989,35 @@ mod tests {
             .await
             .expect("send register");
 
-        // The bridge emits a Registered event with parsed capabilities.
+        let snapshot = next_json(&mut ws).await;
+        assert_eq!(snapshot["type"], "settingsSnapshot");
+
+        // The bridge emits the protocol registration and a player-scoped settings handle.
         let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
             .await
             .expect("event within timeout")
             .expect("event");
-        let (registration, player, mut reports) = match event {
+        let (registration, player, mut reports, settings) = match event {
             PlayerEvent::Registered {
                 registration,
                 player,
                 reports,
+                settings,
                 ..
-            } => (registration, player, reports),
+            } => (registration, player, reports, settings),
             PlayerEvent::Disconnected { .. } => panic!("expected Registered"),
         };
         assert_eq!(registration.player_id, "player-1");
         assert_eq!(registration.name, "Test Player");
-        assert_eq!(registration.capabilities.platform, Platform::Android);
-        assert!(registration.capabilities.supports_drm(DrmSystem::Widevine));
         assert_eq!(
-            registration.capabilities.drm_level(DrmSystem::Widevine),
-            Some(DrmSecurityLevel::L1)
+            registration.capabilities.platform.as_deref(),
+            Some("android")
         );
-        assert_eq!(registration.capabilities.max_resolution.height, 1080);
+        assert_eq!(
+            registration.capabilities.drm[0].system,
+            "com.widevine.alpha"
+        );
+        assert_eq!(settings.player_id(), "player-1");
 
         // A command sent to this player's sink reaches its socket.
         player
@@ -832,6 +1029,12 @@ mod tests {
         let command = next_json(&mut ws).await;
         assert_eq!(command["type"], "load");
         assert_eq!(command["sessionId"], "s1");
+        assert!(command.get("playback").is_none());
+
+        // Re-registering is ignored and does not replace this connection.
+        ws.send(WsMessage::Text(register_frame_with_id("other").into()))
+            .await
+            .expect("send repeated register");
 
         // A report from the socket reaches this player's report stream.
         ws.send(WsMessage::Text(
@@ -877,8 +1080,214 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn settings_snapshot_update_reset_rejection_and_conflict() {
+        let (bridge, mut events) = bridge().await;
+        bridge.start().await.expect("start");
+        let mut ws = connect(&bridge).await;
+        ws.send(WsMessage::Text(register_frame().into()))
+            .await
+            .expect("send register");
+
+        let snapshot = next_json(&mut ws).await;
+        assert_eq!(snapshot["type"], "settingsSnapshot");
+        assert_eq!(snapshot["apps"][0]["appKey"], "test-app");
+        assert_eq!(snapshot["apps"][0]["displayName"], "Test App");
+        assert_eq!(snapshot["apps"][0]["revision"], 0);
+        assert_eq!(snapshot["apps"][0]["settings"][0]["key"], "quality");
+        assert_eq!(snapshot["apps"][0]["settings"][0]["kind"], "choice");
+        assert_eq!(snapshot["apps"][0]["settings"][0]["default"], "auto");
+        assert_eq!(snapshot["apps"][0]["settings"][0]["value"], "auto");
+        assert_eq!(
+            snapshot["apps"][0]["settings"][0]["options"],
+            json!([
+                { "value": "auto", "label": "Automatic" },
+                { "value": "high", "label": "High" }
+            ])
+        );
+
+        let (_player, _reports, settings) = match recv_event(&mut events).await {
+            PlayerEvent::Registered {
+                player,
+                reports,
+                settings,
+                ..
+            } => (player, reports, settings),
+            PlayerEvent::Disconnected { .. } => panic!("expected Registered"),
+        };
+        assert_eq!(settings.player_id(), "player-1");
+
+        ws.send(WsMessage::Text(
+            json!({
+                "type": "settingsUpdate",
+                "requestId": "set",
+                "appKey": "test-app",
+                "expectedRevision": 0,
+                "changes": { "quality": "high" }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send update");
+        let applied = next_json(&mut ws).await;
+        assert_eq!(applied["type"], "settingsUpdateResult");
+        assert_eq!(applied["requestId"], "set");
+        assert_eq!(applied["status"], "applied");
+        assert_eq!(applied["app"]["revision"], 1);
+        assert_eq!(applied["app"]["settings"][0]["value"], "high");
+
+        ws.send(WsMessage::Text(
+            json!({
+                "type": "settingsUpdate",
+                "requestId": "reset",
+                "appKey": "test-app",
+                "expectedRevision": 1,
+                "changes": { "quality": null }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send reset");
+        let reset = next_json(&mut ws).await;
+        assert_eq!(reset["status"], "applied");
+        assert_eq!(reset["app"]["revision"], 2);
+        assert_eq!(reset["app"]["settings"][0]["value"], "auto");
+
+        ws.send(WsMessage::Text(
+            json!({
+                "type": "settingsUpdate",
+                "requestId": "conflict",
+                "appKey": "test-app",
+                "expectedRevision": 1,
+                "changes": { "quality": "high" }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send conflicting update");
+        let conflict = next_json(&mut ws).await;
+        assert_eq!(conflict["status"], "conflict");
+        assert_eq!(conflict["app"]["revision"], 2);
+        assert_eq!(conflict["app"]["settings"][0]["value"], "auto");
+
+        ws.send(WsMessage::Text(
+            json!({
+                "type": "settingsUpdate",
+                "requestId": "invalid",
+                "appKey": "test-app",
+                "expectedRevision": 2,
+                "changes": { "quality": "invalid" }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send invalid update");
+        let rejected = next_json(&mut ws).await;
+        assert_eq!(rejected["status"], "rejected");
+        assert_eq!(rejected["app"]["revision"], 2);
+        assert_eq!(rejected["app"]["settings"][0]["value"], "auto");
+
+        drop(ws);
+        bridge.stop().await;
+    }
+
+    #[tokio::test]
+    async fn initial_snapshot_precedes_and_integral_number_update_is_applied() {
+        use vibecast_settings::SettingKey;
+
+        let (bridge, mut events) = bridge().await;
+        bridge.start().await.expect("start");
+        let mut ws = connect(&bridge).await;
+        ws.send(WsMessage::Text(register_frame().into()))
+            .await
+            .expect("send register");
+        ws.send(WsMessage::Text(
+            json!({
+                "type": "settingsUpdate",
+                "requestId": "number",
+                "appKey": "test-app",
+                "expectedRevision": 0,
+                "changes": { "volume": 1 }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send update");
+
+        let snapshot = next_json(&mut ws).await;
+        assert_eq!(snapshot["type"], "settingsSnapshot");
+        assert_eq!(snapshot["apps"][0]["revision"], 0);
+
+        let settings = match recv_event(&mut events).await {
+            PlayerEvent::Registered { settings, .. } => settings,
+            PlayerEvent::Disconnected { .. } => panic!("expected Registered"),
+        };
+        let applied = next_json(&mut ws).await;
+        assert_eq!(applied["type"], "settingsUpdateResult");
+        assert_eq!(applied["requestId"], "number");
+        assert_eq!(applied["status"], "applied");
+        assert_eq!(applied["app"]["revision"], 1);
+
+        let stored = settings.reader("test-app").await.unwrap().snapshot();
+        assert_eq!(
+            stored
+                .get(SettingKey::<f64>::new("volume"))
+                .expect("number type"),
+            Some(1.0)
+        );
+
+        drop(ws);
+        bridge.stop().await;
+    }
+
+    #[tokio::test]
+    async fn external_settings_change_pushes_a_fresh_snapshot() {
+        let (bridge, mut events) = bridge().await;
+        bridge.start().await.expect("start");
+        let mut ws = connect(&bridge).await;
+        ws.send(WsMessage::Text(register_frame().into()))
+            .await
+            .expect("send register");
+        let initial = next_json(&mut ws).await;
+        assert_eq!(initial["apps"][0]["revision"], 0);
+
+        let (_player, _reports, settings) = match recv_event(&mut events).await {
+            PlayerEvent::Registered {
+                player,
+                reports,
+                settings,
+                ..
+            } => (player, reports, settings),
+            PlayerEvent::Disconnected { .. } => panic!("expected Registered"),
+        };
+        settings
+            .compare_and_set(
+                "test-app",
+                0,
+                vec![SettingMutation::Set {
+                    key: "quality".to_owned(),
+                    value: SettingValue::String("high".to_owned()),
+                }],
+            )
+            .await
+            .expect("external update");
+
+        let pushed = next_json(&mut ws).await;
+        assert_eq!(pushed["type"], "settingsSnapshot");
+        assert_eq!(pushed["apps"][0]["revision"], 1);
+        assert_eq!(pushed["apps"][0]["settings"][0]["value"], "high");
+
+        drop(ws);
+        bridge.stop().await;
+    }
+
+    #[tokio::test]
     async fn non_register_first_frame_is_rejected() {
-        let (bridge, mut events) = bridge();
+        let (bridge, mut events) = bridge().await;
         bridge.start().await.expect("start");
         let mut ws = connect(&bridge).await;
 
@@ -897,8 +1306,36 @@ mod tests {
         bridge.stop().await;
     }
 
+    #[tokio::test]
+    async fn empty_registration_identity_is_rejected() {
+        let (bridge, mut events) = bridge().await;
+        bridge.start().await.expect("start");
+
+        for player in [
+            json!({ "playerId": "   ", "name": "Kodi" }),
+            json!({ "playerId": "p1", "name": "   " }),
+        ] {
+            let mut ws = connect(&bridge).await;
+            ws.send(WsMessage::Text(
+                json!({ "type": "register", "player": player })
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("send invalid registration");
+        }
+
+        let event = tokio::time::timeout(Duration::from_millis(300), events.recv()).await;
+        assert!(event.is_err(), "no event should be emitted");
+        bridge.stop().await;
+    }
+
     fn register_frame_with_id(player_id: &str) -> String {
-        json!({ "type": "register", "playerId": player_id, "name": "Dup Player" }).to_string()
+        json!({
+            "type": "register",
+            "player": { "playerId": player_id, "name": "Dup Player" }
+        })
+        .to_string()
     }
 
     async fn recv_event(events: &mut mpsc::Receiver<PlayerEvent>) -> PlayerEvent {
@@ -910,7 +1347,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_player_id_gets_distinct_epochs() {
-        let (bridge, mut events) = bridge();
+        let (bridge, mut events) = bridge().await;
         bridge.start().await.expect("start");
 
         // Two sockets reuse the same player_id (e.g. two browser tabs, or an
@@ -927,6 +1364,7 @@ mod tests {
                 player,
                 reports,
                 epoch,
+                ..
             } => {
                 assert_eq!(registration.player_id, "dup");
                 (epoch, player, reports)
@@ -951,10 +1389,23 @@ mod tests {
         // Each connection is tagged with a distinct epoch.
         assert_ne!(epoch1, epoch2);
 
-        // Closing the *older* socket reports its own epoch, so the orchestrator
-        // can tell it apart from the newer connection that replaced it and avoid
-        // tearing down the newer receiver.
-        ws1.close(None).await.ok();
+        // Consume both initial snapshots, then prove the older socket cannot
+        // mutate the stable player's settings after the newer epoch took over.
+        let _ = next_json(&mut ws1).await;
+        let _ = next_json(&mut ws2).await;
+        ws1.send(WsMessage::Text(
+            json!({
+                "type": "settingsUpdate",
+                "requestId": "stale",
+                "appKey": "test-app",
+                "expectedRevision": 0,
+                "changes": { "quality": "high" }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send stale update");
         match recv_event(&mut events).await {
             PlayerEvent::Disconnected { player_id, epoch } => {
                 assert_eq!(player_id, "dup");
@@ -962,6 +1413,12 @@ mod tests {
             }
             PlayerEvent::Registered { .. } => panic!("expected Disconnected"),
         }
+        let settings = bridge.state.settings.player("dup").unwrap();
+        let reader = settings.reader("test-app").await.unwrap();
+        assert_eq!(
+            reader.snapshot().values()["quality"],
+            SettingValue::String("auto".to_owned())
+        );
 
         drop(ws2);
         bridge.stop().await;
@@ -978,7 +1435,7 @@ mod tests {
 
     #[tokio::test]
     async fn license_proxy_round_trip() {
-        let (bridge, _events) = bridge();
+        let (bridge, _events) = bridge().await;
         bridge.register_license_handler("sess", Arc::new(EchoLicense));
         let request = Request::builder()
             .method(Method::POST)
@@ -993,7 +1450,7 @@ mod tests {
 
     #[tokio::test]
     async fn license_proxy_missing_handler_returns_404() {
-        let (bridge, _events) = bridge();
+        let (bridge, _events) = bridge().await;
         let request = Request::builder()
             .method(Method::POST)
             .uri("/license/unknown")
@@ -1018,7 +1475,7 @@ mod tests {
 
     #[tokio::test]
     async fn license_proxy_preserves_explicit_error_response() {
-        let (bridge, _events) = bridge();
+        let (bridge, _events) = bridge().await;
         bridge.register_license_handler("sess", Arc::new(ErrorLicense));
         let request = Request::builder()
             .method(Method::POST)
@@ -1041,7 +1498,7 @@ mod tests {
 
     #[tokio::test]
     async fn license_proxy_unhandled_error_returns_500() {
-        let (bridge, _events) = bridge();
+        let (bridge, _events) = bridge().await;
         bridge.register_license_handler("sess", Arc::new(PanicLicense));
         let request = Request::builder()
             .method(Method::POST)
@@ -1071,7 +1528,7 @@ mod tests {
 
     #[tokio::test]
     async fn manifest_proxy_round_trip() {
-        let (bridge, _events) = bridge();
+        let (bridge, _events) = bridge().await;
         bridge.register_manifest_handler("sess", Arc::new(StaticManifest));
         let (status, headers, body) = http_get(&bridge, "/manifest/sess/m0.mpd").await;
         assert_eq!(status, StatusCode::OK);
@@ -1081,7 +1538,7 @@ mod tests {
 
     #[tokio::test]
     async fn manifest_proxy_head_request() {
-        let (bridge, _events) = bridge();
+        let (bridge, _events) = bridge().await;
         bridge.register_manifest_handler("sess", Arc::new(StaticManifest));
         let request = Request::builder()
             .method(Method::HEAD)
@@ -1115,7 +1572,7 @@ mod tests {
 
     #[tokio::test]
     async fn manifest_proxy_filters_hop_by_hop_response_headers() {
-        let (bridge, _events) = bridge();
+        let (bridge, _events) = bridge().await;
         bridge.register_manifest_handler("sess", Arc::new(HeaderManifest));
         let (status, headers, _body) = http_get(&bridge, "/manifest/sess/m0.mpd").await;
         assert_eq!(status, StatusCode::OK);

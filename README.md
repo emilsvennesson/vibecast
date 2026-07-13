@@ -15,12 +15,12 @@ for playback. A Kodi add-on is included for boxes that prefer Kodi's player.
 ## Quick start
 
 ```sh
-cargo run -p vibecast-cli -- --name "Living Room"
+cargo run -p vibecast-cli
 ```
 
-That's it — the receiver binds the standard Cast ports (8009/8008/8010) and
-shows up in nearby Cast senders. Drop a `--name` flag or set
-`[device] friendly_name` in `config.toml` to customize it.
+Open `http://localhost:8010/` for the bundled browser player, or connect the
+Kodi add-on. Each connected player becomes its own advertised Cast receiver
+named `<player name> [vibecast]`; Cast and eureka ports are assigned dynamically.
 
 You'll need a Cast device-auth certificate bundle (`certs.json`) in the data
 directory (`$HOME/.vibecast` by default). Vibecast uses pre-harvested static
@@ -51,30 +51,33 @@ Build, CI, and release details live in [`docs/ci-cd.md`](docs/ci-cd.md).
 | TV4 Play | OAuth refresh, Yospace ad-stitching, Widevine |
 | Viaplay | Device-code auth, Widevine |
 | Prime Video | Custom Widevine license flow, VOD + live |
+| YouTube | Lounge control, generated DASH manifests, per-player codec preference |
 
 ## Configuration
 
-Config lives at `{data_dir}/config.toml` (default data dir: `$HOME/.vibecast`).
-A missing file yields Chromecast-like defaults; partial config overrides only
-the keys you name. CLI flags (`--name`, `--cast-port`, `--bind-host`, etc.)
-override config for one run.
+Receiver config lives at `{data_dir}/config.toml` (default data dir:
+`$HOME/.vibecast`). A missing file yields Chromecast-like defaults; partial
+config overrides only the keys you name. CLI flags override config for one run.
 
 ```toml
 [device]
-friendly_name = "Living Room"
+model = "Chromecast"
 
-[apps.primevideo]
-marketplace_id = "ATVPDKIKX0DER"
-locale = "en-US"
+[network]
+player_port = 8010
 ```
+
+Apps declare typed runtime settings in their manifests. Values are stored in
+`{data_dir}/settings.json` and synchronized with each connected player. The
+bundled browser player and Kodi add-on render those settings generically.
 
 ## Writing an app
 
-App crates depend only on `vibecast-sdk`. Implement `AppProvider` (a factory)
-and `AppSession` (an owned per-launch session) — `resolve_media` turns a Cast
-`LOAD` request into playable streams + DRM info. Model new apps on
-`vibecast-apps-svtplay` (the reference app) and register them in
-`crates/vibecast-cli/src/main.rs::apps`.
+App crates depend only on `vibecast-sdk`. Implement `AppProvider` (a manifest +
+factory) and `AppSession` (an owned per-launch session) — `resolve_media` turns
+a Cast `LOAD` request into playable streams + DRM info. Model new apps on
+`vibecast-apps-svtplay` and register them in
+`crates/vibecast-platform/src/lib.rs::build_app_providers`.
 
 ```sh
 cargo doc -p vibecast-sdk --open   # full app-author docs
