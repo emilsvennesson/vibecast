@@ -1222,8 +1222,10 @@ mod tests {
         assert_eq!(snapshot["type"], "settingsSnapshot");
         assert_eq!(snapshot["apps"][0]["revision"], 0);
 
-        let settings = match recv_event(&mut events).await {
-            PlayerEvent::Registered { settings, .. } => settings,
+        let (settings, player) = match recv_event(&mut events).await {
+            PlayerEvent::Registered {
+                settings, player, ..
+            } => (settings, player),
             PlayerEvent::Disconnected { .. } => panic!("expected Registered"),
         };
         let applied = next_json(&mut ws).await;
@@ -1240,6 +1242,7 @@ mod tests {
             Some(1.0)
         );
 
+        drop(player);
         drop(ws);
         bridge.stop().await;
     }
