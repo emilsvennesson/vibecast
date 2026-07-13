@@ -51,7 +51,7 @@ Build, CI, and release details live in [`docs/ci-cd.md`](docs/ci-cd.md).
 | TV4 Play | OAuth refresh, Yospace ad-stitching, Widevine |
 | Viaplay | Device-code auth, Widevine |
 | Prime Video | Custom Widevine license flow, VOD + live |
-| YouTube | Lounge control, generated DASH manifests, per-player codec preference |
+| YouTube | Lounge control, generated DASH manifests, codec preference, optional SponsorBlock |
 | DAZN | `urn:x-cast:DAZN` session/playback control, Widevine, per-player quality (auto / highest) |
 
 ## Configuration
