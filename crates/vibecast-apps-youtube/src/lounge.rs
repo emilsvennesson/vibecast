@@ -13,6 +13,8 @@ const LOUNGE_BASE: &str = "https://www.youtube.com/api/lounge";
 const USER_AGENT: &str =
     "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 Chrome/120 Safari/537.36 CrKey/1.56";
 const MAX_FRAME_LENGTH: usize = 1024 * 1024;
+const NO_DATA_INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
+const NO_DATA_MAX_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LoungeCommand {
@@ -197,8 +199,14 @@ impl LoungeConnection {
         self.post(Outbound::NowPlaying).await?;
         self.post(Outbound::DiscoveryDeviceId).await?;
 
+        let mut next_poll_at = tokio::time::Instant::now();
+        let mut no_data_retry_delay = NO_DATA_INITIAL_RETRY_DELAY;
         loop {
-            let poll = poll_commands(&self.http, &self.bind_url, &self.bound);
+            let poll_at = next_poll_at;
+            let poll = async {
+                tokio::time::sleep_until(poll_at).await;
+                poll_commands(&self.http, &self.bind_url, &self.bound).await
+            };
             tokio::select! {
                 result = cancel.changed() => {
                     if result.is_err() || *cancel.borrow() {
@@ -211,10 +219,28 @@ impl LoungeConnection {
                     self.post(Outbound::State(state)).await?;
                 }
                 result = poll => {
-                    let batch = match result {
-                        Ok(batch) => batch,
-                        Err(LoungeError::Http(error)) if error.is_timeout() => continue,
+                    let outcome = match result {
+                        Ok(outcome) => outcome,
+                        Err(LoungeError::Http(error)) if error.is_timeout() => {
+                            next_poll_at = tokio::time::Instant::now();
+                            no_data_retry_delay = NO_DATA_INITIAL_RETRY_DELAY;
+                            continue;
+                        }
                         Err(error) => return Err(error),
+                    };
+                    let batch = match outcome {
+                        PollOutcome::Batch(batch) => {
+                            next_poll_at = tokio::time::Instant::now();
+                            no_data_retry_delay = NO_DATA_INITIAL_RETRY_DELAY;
+                            batch
+                        }
+                        PollOutcome::NoData => {
+                            next_poll_at = tokio::time::Instant::now() + no_data_retry_delay;
+                            no_data_retry_delay = no_data_retry_delay
+                                .saturating_mul(2)
+                                .min(NO_DATA_MAX_RETRY_DELAY);
+                            continue;
+                        }
                     };
                     self.bound.aid = self.bound.aid.max(batch.aid);
                     for incoming in batch.messages {
@@ -468,7 +494,7 @@ async fn poll_commands(
     http: &reqwest::Client,
     bind_url: &Url,
     bound: &BoundSession,
-) -> Result<IncomingBatch, LoungeError> {
+) -> Result<PollOutcome, LoungeError> {
     let mut url = bind_url.clone();
     append_bound_query(&mut url, bound, "rpc");
     url.query_pairs_mut()
@@ -500,6 +526,11 @@ struct IncomingBatch {
     messages: Vec<Incoming>,
 }
 
+enum PollOutcome {
+    Batch(IncomingBatch),
+    NoData,
+}
+
 enum Incoming {
     Command(LoungeCommand),
     GetNowPlaying,
@@ -509,7 +540,7 @@ enum Incoming {
     Ignored,
 }
 
-fn parse_incoming(bytes: &[u8]) -> Result<IncomingBatch, LoungeError> {
+fn parse_incoming(bytes: &[u8]) -> Result<PollOutcome, LoungeError> {
     let mut aid = 0;
     let mut messages = Vec::new();
     for frame in decode_frames(bytes)? {
@@ -527,7 +558,11 @@ fn parse_incoming(bytes: &[u8]) -> Result<IncomingBatch, LoungeError> {
             messages.push(parse_message(message));
         }
     }
-    Ok(IncomingBatch { aid, messages })
+    if messages.is_empty() {
+        Ok(PollOutcome::NoData)
+    } else {
+        Ok(PollOutcome::Batch(IncomingBatch { aid, messages }))
+    }
 }
 
 fn parse_message(message: &[Value]) -> Incoming {
@@ -793,7 +828,9 @@ mod tests {
             frame(r#"[[16,["pause"]],[17,["play"]],[18,["seekTo",{"newTime":"111"}]]]"#),
         ]
         .concat();
-        let batch = parse_incoming(body.as_bytes()).unwrap();
+        let PollOutcome::Batch(batch) = parse_incoming(body.as_bytes()).unwrap() else {
+            panic!("captured commands were treated as no data");
+        };
 
         assert_eq!(batch.aid, 18);
         assert!(matches!(
@@ -831,6 +868,25 @@ mod tests {
             parse_initial_bind(missing.as_bytes()),
             Err(LoungeError::Protocol("initial bind omitted gsessionid"))
         ));
+    }
+
+    #[test]
+    fn empty_poll_responses_are_no_data() {
+        for body in ["", " \r\n\t", &frame("[]")] {
+            assert!(matches!(
+                parse_incoming(body.as_bytes()),
+                Ok(PollOutcome::NoData)
+            ));
+        }
+
+        let PollOutcome::Batch(batch) =
+            parse_incoming(frame(r#"[[5,["noop"]]]"#).as_bytes()).unwrap()
+        else {
+            panic!("noop was treated as no data");
+        };
+        assert_eq!(batch.aid, 5);
+        assert_eq!(batch.messages.len(), 1);
+        assert!(matches!(batch.messages[0], Incoming::Ignored));
     }
 
     #[test]
@@ -926,5 +982,61 @@ mod tests {
         connection.bound.aid = 4;
         connection.post(Outbound::NowPlaying).await.unwrap();
         assert_eq!(connection.bound.aid, 4, "forward ACK must not advance AID");
+    }
+
+    #[tokio::test]
+    async fn empty_polls_do_not_spin() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/lounge/bc/bind"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let poll = Mock::given(method("GET"))
+            .and(path("/api/lounge/bc/bind"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount_as_scoped(&server)
+            .await;
+
+        let mut connection = LoungeConnection {
+            http: reqwest::Client::new(),
+            bind_url: Url::parse(&format!("{}/api/lounge/bc/bind", server.uri())).unwrap(),
+            bound: BoundSession {
+                sid: "SID".to_string(),
+                gsession_id: "GSID".to_string(),
+                aid: 0,
+                rid: 1,
+                ofs: 0,
+            },
+            screen_id: "screen-id".to_string(),
+            device_id: "lounge-device".to_string(),
+            discovery_device_id: "CAST-ID".to_string(),
+            current: CurrentMedia::default(),
+        };
+        let (command_tx, _command_rx) = mpsc::channel(1);
+        let (_playback_tx, mut playback_rx) = mpsc::channel(1);
+        let (cancel_tx, mut cancel_rx) = watch::channel(false);
+        let task = tokio::spawn(async move {
+            connection
+                .run_bound(&command_tx, &mut playback_rx, &mut cancel_rx)
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while poll.received_requests().await.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first poll was not sent");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(poll.received_requests().await.len(), 1);
+
+        cancel_tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("Lounge loop did not stop after cancellation")
+            .unwrap()
+            .unwrap();
     }
 }
