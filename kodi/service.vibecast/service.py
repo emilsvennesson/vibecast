@@ -255,7 +255,8 @@ class VibecastPlayer(xbmc.Player):
         self._service.on_av_started()
 
     def onPlayBackStarted(self) -> None:  # noqa: N802
-        self._service.on_playback_started()
+        # InputStream is not seekable until onAVStarted fires.
+        pass
 
     def onPlayBackPaused(self) -> None:  # noqa: N802
         self._service.on_playback_paused()
@@ -1341,9 +1342,6 @@ class VibecastService:
             return
 
         self._report_state(session_id, PLAYER_STATE_PLAYING, force=True)
-
-    def on_playback_started(self) -> None:
-        self.on_av_started()
 
     def on_playback_paused(self) -> None:
         with self._state_lock:

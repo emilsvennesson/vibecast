@@ -4,6 +4,7 @@
 
 mod lounge;
 mod resolver;
+mod sponsorblock;
 
 use std::sync::Arc;
 
@@ -17,6 +18,7 @@ use vibecast_sdk::{
 
 use lounge::{LoungeCommand, LoungeConnection, LoungeIdentity};
 use resolver::{PreferredVideoCodec, ResolveError, Resolver, PREFERRED_VIDEO_CODEC_KEY};
+use sponsorblock::SponsorBlock;
 
 const APP_IDS: &[&str] = &["233637DE"];
 const MDX_NAMESPACE: &str = "urn:x-cast:com.google.youtube.mdx";
@@ -37,26 +39,24 @@ impl YouTube {
 #[async_trait]
 impl AppProvider for YouTube {
     fn manifest(&self) -> AppManifest {
-        let settings = AppSettingsSchema::with_display_name(
-            "youtube",
-            "YouTube",
-            vec![SettingDescriptor::Choice {
-                key: PREFERRED_VIDEO_CODEC_KEY.as_str().to_owned(),
-                label: "Preferred video codec".to_owned(),
-                description: Some(
-                    "Choose which video codec YouTube should prefer when available.".to_owned(),
-                ),
-                scope: SettingScope::AppPlayer,
-                default: "auto".to_owned(),
-                choices: vec![
-                    ChoiceOption::new("auto", "Automatic"),
-                    ChoiceOption::new("av1", "AV1"),
-                    ChoiceOption::new("vp9", "VP9"),
-                    ChoiceOption::new("h264", "H.264"),
-                ],
-            }],
-        )
-        .expect("static YouTube settings must be valid");
+        let mut descriptors = vec![SettingDescriptor::Choice {
+            key: PREFERRED_VIDEO_CODEC_KEY.as_str().to_owned(),
+            label: "Preferred video codec".to_owned(),
+            description: Some(
+                "Choose which video codec YouTube should prefer when available.".to_owned(),
+            ),
+            scope: SettingScope::AppPlayer,
+            default: "auto".to_owned(),
+            choices: vec![
+                ChoiceOption::new("auto", "Automatic"),
+                ChoiceOption::new("av1", "AV1"),
+                ChoiceOption::new("vp9", "VP9"),
+                ChoiceOption::new("h264", "H.264"),
+            ],
+        }];
+        descriptors.extend(sponsorblock::setting_descriptors());
+        let settings = AppSettingsSchema::with_display_name("youtube", "YouTube", descriptors)
+            .expect("static YouTube settings must be valid");
         AppManifest::new("youtube", APP_IDS, "YouTube", settings)
             .with_icon_url(ICON_URL)
             .with_namespaces(&[CUSTOM_DATA_NAMESPACE, MDX_NAMESPACE])
@@ -70,6 +70,7 @@ impl AppProvider for YouTube {
         let resolver = Resolver::new(ctx.http.clone());
         let playback = ctx.playback_controller();
         let capabilities = ctx.receiver.capabilities.clone();
+        let sponsorblock = SponsorBlock::new(ctx.http.clone());
 
         let (command_tx, command_rx) = mpsc::channel(32);
         let (playback_tx, playback_rx) = mpsc::channel(32);
@@ -78,9 +79,10 @@ impl AppProvider for YouTube {
         tokio::spawn(run_commands(
             command_rx,
             resolver,
-            playback,
+            playback.clone(),
             capabilities,
             ctx.settings.clone(),
+            sponsorblock.clone(),
             cancel.subscribe(),
         ));
         tokio::spawn(run_lounge(
@@ -97,6 +99,8 @@ impl AppProvider for YouTube {
             capabilities: ctx.receiver.capabilities.clone(),
             identity,
             playback_tx,
+            playback,
+            sponsorblock,
             cancel,
         }))
     }
@@ -107,6 +111,8 @@ struct YouTubeSession {
     capabilities: vibecast_sdk::PlayerCapabilities,
     identity: watch::Receiver<Option<LoungeIdentity>>,
     playback_tx: mpsc::Sender<PlaybackState>,
+    playback: Arc<dyn PlaybackController>,
+    sponsorblock: SponsorBlock,
     cancel: watch::Sender<bool>,
 }
 
@@ -121,15 +127,17 @@ impl AppSession for YouTubeSession {
         let preferred_video_codec = PreferredVideoCodec::from_snapshot(&settings);
         let video_id = resolver::extract_video_id(&request.media.content_id)
             .ok_or_else(|| MediaResolveError::invalid_request("INVALID_YOUTUBE_VIDEO_ID"))?;
-        self.resolver
-            .resolve(
-                &video_id,
-                request.current_time,
-                &self.capabilities,
-                preferred_video_codec,
-            )
-            .await
-            .map_err(map_resolve_error)
+        let resolve = self.resolver.resolve(
+            &video_id,
+            request.current_time,
+            &self.capabilities,
+            preferred_video_codec,
+        );
+        let prepare = self.sponsorblock.prepare(&video_id, &settings);
+        let (media, prepared) = tokio::join!(resolve, prepare);
+        let media = media.map_err(map_resolve_error)?;
+        self.sponsorblock.activate(prepared).await;
+        Ok(media)
     }
 
     async fn on_sender_connected(&self, ctx: &AppContext, _sender_id: &str) {
@@ -171,7 +179,16 @@ impl AppSession for YouTubeSession {
     }
 
     async fn on_playback_update(&self, _ctx: &AppContext, state: PlaybackState) {
+        let player_state = state.player_state;
+        let current_time = state.current_time;
         let _ = self.playback_tx.try_send(state);
+        if let Some(target) = self
+            .sponsorblock
+            .skip_target(player_state, current_time)
+            .await
+        {
+            self.playback.seek(target).await;
+        }
     }
 
     async fn on_stop(&self, _ctx: &AppContext) {
@@ -230,6 +247,7 @@ async fn run_commands(
     playback: Arc<dyn PlaybackController>,
     capabilities: vibecast_sdk::PlayerCapabilities,
     settings: AppSettingsReader,
+    sponsorblock: SponsorBlock,
     mut cancel: watch::Receiver<bool>,
 ) {
     let mut queue = QueueState::default();
@@ -309,11 +327,15 @@ async fn run_commands(
         if let Some((video_id, start_time)) = load {
             let snapshot = settings.snapshot();
             let preferred_video_codec = PreferredVideoCodec::from_snapshot(&snapshot);
-            match resolver
-                .resolve(&video_id, start_time, &capabilities, preferred_video_codec)
-                .await
-            {
-                Ok(media) => playback.load(media).await,
+            let resolve =
+                resolver.resolve(&video_id, start_time, &capabilities, preferred_video_codec);
+            let prepare = sponsorblock.prepare(&video_id, &snapshot);
+            let (media, prepared) = tokio::join!(resolve, prepare);
+            match media {
+                Ok(media) => {
+                    sponsorblock.activate(prepared).await;
+                    playback.load(media).await;
+                }
                 Err(error) => {
                     tracing::warn!(%video_id, %error, "failed to resolve YouTube video");
                     playback.stop().await;
@@ -342,6 +364,7 @@ fn map_resolve_error(error: ResolveError) -> MediaResolveError {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+    use vibecast_sdk::PlayerState;
 
     #[derive(Default)]
     struct RecordingPlayback {
@@ -382,7 +405,7 @@ mod tests {
         assert_eq!(manifest.icon_url, Some(ICON_URL));
         assert!(manifest.namespaces.contains(&MDX_NAMESPACE));
         assert!(manifest.namespaces.contains(&CUSTOM_DATA_NAMESPACE));
-        assert_eq!(manifest.settings.settings().len(), 1);
+        assert_eq!(manifest.settings.settings().len(), 11);
         assert_eq!(
             manifest.settings.settings()[0],
             SettingDescriptor::Choice {
@@ -401,6 +424,33 @@ mod tests {
                 ],
             }
         );
+        let sponsorblock_settings = &manifest.settings.settings()[1..];
+        assert!(matches!(
+            &sponsorblock_settings[0],
+            SettingDescriptor::Boolean {
+                key,
+                default: false,
+                scope: SettingScope::AppPlayer,
+                ..
+            } if key == "sponsorblock_enabled"
+        ));
+        assert!(matches!(
+            &sponsorblock_settings[1],
+            SettingDescriptor::Boolean {
+                key,
+                default: true,
+                scope: SettingScope::AppPlayer,
+                ..
+            } if key == "sponsorblock_sponsor"
+        ));
+        assert!(sponsorblock_settings[2..].iter().all(|setting| matches!(
+            setting,
+            SettingDescriptor::Boolean {
+                default: false,
+                scope: SettingScope::AppPlayer,
+                ..
+            }
+        )));
     }
 
     #[tokio::test]
@@ -427,6 +477,7 @@ mod tests {
                 Arc::new(vibecast_sdk::NoopSenderChannel),
             )
             .settings,
+            SponsorBlock::new(reqwest::Client::new()),
             cancel_rx,
         ));
 
@@ -440,5 +491,68 @@ mod tests {
             *playback.operations.lock().unwrap(),
             ["pause", "seek:42", "play"]
         );
+    }
+
+    #[tokio::test]
+    async fn playback_updates_skip_each_continuous_crossing() {
+        let playback = Arc::new(RecordingPlayback::default());
+        let sponsorblock = SponsorBlock::new(reqwest::Client::new());
+        sponsorblock.activate_for_test(&[(10.0, 20.0)]).await;
+        let (_identity_tx, identity) = watch::channel(None);
+        let (playback_tx, mut playback_rx) = mpsc::channel(4);
+        let (cancel, _) = watch::channel(false);
+        let session = YouTubeSession {
+            resolver: Resolver::new(reqwest::Client::new()),
+            capabilities: vibecast_sdk::PlayerCapabilities::default(),
+            identity,
+            playback_tx,
+            playback: playback.clone(),
+            sponsorblock,
+            cancel,
+        };
+        let ctx = vibecast_sdk::AppContext::new(
+            "session",
+            "transport",
+            APP_IDS[0],
+            reqwest::Client::new(),
+            vibecast_sdk::ReceiverContext::new(
+                "YouTube test",
+                "Test",
+                "test-device",
+                std::path::PathBuf::new(),
+            ),
+            Arc::new(vibecast_sdk::NoopSenderChannel),
+        );
+        let paused = PlaybackState {
+            player_state: PlayerState::Paused,
+            current_time: 12.0,
+            duration: Some(100.0),
+            idle_reason: None,
+        };
+
+        session.on_playback_update(&ctx, paused.clone()).await;
+        assert!(playback.operations.lock().unwrap().is_empty());
+        assert_eq!(playback_rx.try_recv().unwrap(), paused);
+
+        let playing_before = PlaybackState {
+            player_state: PlayerState::Playing,
+            current_time: 9.9,
+            duration: Some(100.0),
+            idle_reason: None,
+        };
+        let playing_inside = PlaybackState {
+            current_time: 10.1,
+            ..playing_before.clone()
+        };
+        session
+            .on_playback_update(&ctx, playing_before.clone())
+            .await;
+        session
+            .on_playback_update(&ctx, playing_inside.clone())
+            .await;
+        session.on_playback_update(&ctx, playing_before).await;
+        session.on_playback_update(&ctx, playing_inside).await;
+
+        assert_eq!(*playback.operations.lock().unwrap(), ["seek:20", "seek:20"]);
     }
 }
