@@ -118,7 +118,7 @@ class SettingsCatalog:
         if len({app.app_key for app in apps}) != len(apps):
             raise ProtocolError("settings snapshot contains duplicate app keys")
         self._apps = apps
-        self._pending.clear()
+        self._connected = True
 
     def apply_update_result(self, payload: dict[str, Any]) -> str:
         request_id = _required_string(payload, "requestId")

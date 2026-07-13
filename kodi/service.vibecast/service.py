@@ -590,7 +590,7 @@ class VibecastService:
             return
 
         self._connection_state = CONNECTION_STATE_CONNECTED
-        self._settings_catalog.set_connected(True)
+        self._settings_catalog.set_connected(False)
         self._refresh_settings_dialog()
         endpoint = f"{self._config.host}:{self._config.port}"
         log(f"connected to vibecast player endpoint {endpoint}")

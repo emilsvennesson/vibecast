@@ -137,6 +137,46 @@ class SettingsCatalogTests(unittest.TestCase):
         self.assertEqual(self.catalog.app("example").revision, 8)
         self.assertIsNone(self.catalog.app("example").setting("quality").value)
 
+    def test_reconnect_remains_read_only_until_fresh_snapshot(self):
+        self.catalog.set_connected(False)
+
+        with self.assertRaisesRegex(ValueError, "read-only"):
+            self.catalog.begin_update("stale", "example", "quality", "highest")
+
+        self.catalog.replace_snapshot(
+            {
+                "type": "settingsSnapshot",
+                "apps": [app_wire(revision=4, value="highest")],
+            }
+        )
+        message = self.catalog.begin_update(
+            "fresh", "example", "quality", "balanced"
+        )
+        self.assertEqual(message["expectedRevision"], 4)
+
+    def test_snapshot_does_not_complete_pending_update(self):
+        self.catalog.begin_update("request-1", "example", "quality", "highest")
+
+        self.catalog.replace_snapshot(
+            {
+                "type": "settingsSnapshot",
+                "apps": [app_wire(revision=3, value="balanced")],
+            }
+        )
+        self.assertTrue(self.catalog.app_has_pending_update("example"))
+
+        self.catalog.apply_update_result(
+            {
+                "type": "settingsUpdateResult",
+                "requestId": "request-1",
+                "status": "applied",
+                "app": app_wire(revision=4, value="highest"),
+            }
+        )
+        self.assertEqual(self.catalog.app("example").revision, 4)
+        self.assertEqual(self.catalog.app("example").setting("quality").value, "highest")
+        self.assertFalse(self.catalog.app_has_pending_update("example"))
+
 
 if __name__ == "__main__":
     unittest.main()

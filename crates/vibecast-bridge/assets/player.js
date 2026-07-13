@@ -8,6 +8,7 @@
     lastStateKey: "",
     autoplayMuted: false,
     connected: false,
+    settingsReady: false,
     settingsApps: [],
     pendingSettings: new Map(),
     settingsRequestSequence: 0,
@@ -160,7 +161,10 @@
 
   function setConnected(connected) {
     app.connected = connected;
-    if (!connected) app.pendingSettings.clear();
+    if (!connected) {
+      app.settingsReady = false;
+      app.pendingSettings.clear();
+    }
     connectionEl.dataset.connected = String(connected);
     connectionEl.textContent = connected ? "connected" : "disconnected";
     renderSettings();
@@ -423,6 +427,7 @@
     if (
       setting.writable === false ||
       !app.connected ||
+      !app.settingsReady ||
       !canSend() ||
       app.pendingSettings.has(appSettings.appKey)
     ) return;
@@ -467,7 +472,10 @@
       actions.appendChild(unsupported);
     } else {
       const readOnly = setting.writable === false;
-      const control = settingControl(setting, readOnly || !app.connected || pending);
+      const control = settingControl(
+        setting,
+        readOnly || !app.connected || !app.settingsReady || pending,
+      );
       const controlId = "setting-" + appSettings.appKey + "-" + setting.key;
       control.id = controlId;
       label.htmlFor = controlId;
@@ -489,7 +497,7 @@
       apply.type = "submit";
       apply.className = "setting-apply";
       apply.textContent = "Apply";
-      apply.disabled = readOnly || !app.connected || pending;
+      apply.disabled = readOnly || !app.connected || !app.settingsReady || pending;
       actions.appendChild(apply);
 
       const reset = document.createElement("button");
@@ -497,7 +505,7 @@
       reset.className = "setting-reset";
       reset.textContent = "Reset";
       reset.title = "Reset to " + String(setting.default);
-      reset.disabled = readOnly || !app.connected || pending;
+      reset.disabled = readOnly || !app.connected || !app.settingsReady || pending;
       reset.addEventListener("click", () => submitSetting(appSettings, setting, null));
       actions.appendChild(reset);
 
@@ -514,8 +522,12 @@
 
   function renderSettings() {
     if (!settingsEl || !settingsStateEl) return;
-    settingsStateEl.textContent = app.connected ? "live" : "read only";
-    settingsStateEl.dataset.connected = String(app.connected);
+    settingsStateEl.textContent = app.settingsReady
+      ? "live"
+      : app.connected
+        ? "synchronizing"
+        : "read only";
+    settingsStateEl.dataset.connected = String(app.connected && app.settingsReady);
     settingsEl.replaceChildren();
 
     const configurableApps = app.settingsApps.filter(
@@ -525,7 +537,7 @@
       const empty = document.createElement("p");
       empty.className = "settings-empty";
       if (!app.connected) empty.textContent = "Settings appear when the player connects.";
-      else if (app.settingsApps.length === 0) empty.textContent = "Waiting for the settings catalog...";
+      else if (!app.settingsReady) empty.textContent = "Waiting for the settings catalog...";
       else empty.textContent = "No app settings are available for this player.";
       settingsEl.appendChild(empty);
       return;
@@ -555,7 +567,7 @@
   function replaceSettingsSnapshot(message) {
     if (!Array.isArray(message.apps)) throw new Error("settings snapshot apps must be an array");
     app.settingsApps = message.apps;
-    app.pendingSettings.clear();
+    app.settingsReady = true;
     renderSettings();
   }
 

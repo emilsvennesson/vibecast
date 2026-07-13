@@ -690,7 +690,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settings_file_is_missing_by_default_and_strict_when_present() {
+    async fn settings_file_is_missing_by_default_strict_and_reconciled() {
         let data_dir = temp_data_dir("settings-file-strict");
         let path = data_dir.join(SETTINGS_FILE);
         let persistence = Arc::new(FileSettingsPersistence::new(path.clone()));
@@ -716,10 +716,12 @@ mod tests {
             r#"{"version":1,"revision":0,"apps":{"unknown":{"revision":0,"values":{}}},"players":{}}"#,
         )
         .unwrap();
-        assert!(matches!(
-            SettingsService::new(SettingsCatalog::default(), persistence).await,
-            Err(SettingsServiceError::InvalidPersisted(_))
-        ));
+        SettingsService::new(SettingsCatalog::default(), persistence)
+            .await
+            .unwrap();
+        let normalized: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(normalized["apps"], serde_json::json!({}));
 
         std::fs::remove_dir_all(data_dir).unwrap();
     }

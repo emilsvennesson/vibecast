@@ -772,7 +772,9 @@ fn build_dash_manifest(
         .into_iter()
         .find(|codec| {
             capabilities.supports_video_codec(codec.token())
-                && videos.iter().any(|rep| rep.family == *codec)
+                && videos.iter().any(|rep| {
+                    rep.family == *codec && (rep.hdr.is_none() || rep.hdr_advertised(capabilities))
+                })
         })
         .ok_or(ResolveError::NoCompatibleStream)?;
 
@@ -1407,6 +1409,27 @@ mod tests {
 
         assert!(mpd.contains("codecs=\"av01.0.12M.08\""));
         assert!(!mpd.contains("avc1"));
+    }
+
+    #[test]
+    fn preferred_family_with_only_incompatible_hdr_falls_back() {
+        let mut formats = formats();
+        formats.retain(|format| !matches!(format.itag, Some(313 | 248)));
+
+        for hdr_formats in [&[][..], &["hlg"][..]] {
+            let mpd = build_dash_manifest(
+                &formats,
+                &[],
+                &caps(&["vp9", "av1", "h264"], &["aac"], hdr_formats, (3840, 2160)),
+                PreferredVideoCodec::Vp9,
+            )
+            .unwrap()
+            .0;
+
+            assert!(mpd.contains("codecs=\"av01.0.12M.08\""));
+            assert!(!mpd.contains("vp09.02.51.10.01.09.16.09.00"));
+            assert!(!mpd.contains("avc1"));
+        }
     }
 
     #[test]

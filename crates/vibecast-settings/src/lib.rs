@@ -708,11 +708,17 @@ impl SettingsService {
         catalog: SettingsCatalog,
         persistence: Arc<dyn SettingsPersistence>,
     ) -> Result<Self, SettingsServiceError> {
-        let persisted = persistence
+        let mut persisted = persistence
             .load()
             .await
             .map_err(SettingsServiceError::Persistence)?;
-        validate_persisted(&catalog, &persisted)?;
+        validate_persisted_structure(&persisted)?;
+        if reconcile_persisted(&catalog, &mut persisted) {
+            persistence
+                .save(&persisted)
+                .await
+                .map_err(SettingsServiceError::Persistence)?;
+        }
         Ok(Self {
             inner: Arc::new(ServiceInner {
                 catalog: Arc::new(catalog),
@@ -899,6 +905,7 @@ impl ServiceInner {
     ) -> Result<AppSettingsReader, SettingsServiceError> {
         let schema = self.schema(app_id)?;
         let mut state = self.state.lock().await;
+        prune_watchers(&mut state);
         let key = WatchKey {
             app_id: app_id.to_owned(),
             player_id: player_id.map(str::to_owned),
@@ -1096,6 +1103,7 @@ fn publish_app(
     app_id: &str,
     player_id: Option<&str>,
 ) {
+    prune_watchers(state);
     let Some(schema) = catalog.app(app_id) else {
         return;
     };
@@ -1120,18 +1128,15 @@ fn publish_app(
     }
 }
 
-fn validate_persisted(
-    catalog: &SettingsCatalog,
-    persisted: &PersistedSettings,
-) -> Result<(), SettingsServiceError> {
+fn prune_watchers(state: &mut ServiceState) {
+    state
+        .watchers
+        .retain(|_, sender| sender.receiver_count() > 0);
+}
+
+fn validate_persisted_structure(persisted: &PersistedSettings) -> Result<(), SettingsServiceError> {
     for (app_id, settings) in &persisted.apps {
-        validate_stored(
-            catalog,
-            app_id,
-            settings,
-            SettingScope::App,
-            persisted.revision,
-        )?;
+        validate_stored_revision(app_id, settings, persisted.revision)?;
     }
     for (player_id, apps) in &persisted.players {
         if player_id.is_empty() {
@@ -1140,23 +1145,15 @@ fn validate_persisted(
             ));
         }
         for (app_id, settings) in apps {
-            validate_stored(
-                catalog,
-                app_id,
-                settings,
-                SettingScope::AppPlayer,
-                persisted.revision,
-            )?;
+            validate_stored_revision(app_id, settings, persisted.revision)?;
         }
     }
     Ok(())
 }
 
-fn validate_stored(
-    catalog: &SettingsCatalog,
+fn validate_stored_revision(
     app_id: &str,
     settings: &PersistedAppSettings,
-    scope: SettingScope,
     latest_revision: u64,
 ) -> Result<(), SettingsServiceError> {
     if settings.revision > latest_revision {
@@ -1164,27 +1161,38 @@ fn validate_stored(
             "app {app_id:?} revision exceeds the persisted revision"
         )));
     }
-    let schema = catalog
-        .app(app_id)
-        .ok_or_else(|| SettingsServiceError::InvalidPersisted(format!("unknown app {app_id:?}")))?;
-    for (key, value) in &settings.values {
-        let descriptor = schema.setting(key).ok_or_else(|| {
-            SettingsServiceError::InvalidPersisted(format!(
-                "unknown setting {key:?} for app {app_id:?}"
-            ))
-        })?;
-        if descriptor.scope() != scope {
-            return Err(SettingsServiceError::InvalidPersisted(format!(
-                "setting {key:?} is stored in the wrong scope"
-            )));
-        }
-        descriptor.validate_value(value).map_err(|error| {
-            SettingsServiceError::InvalidPersisted(format!(
-                "invalid setting {key:?} for app {app_id:?}: {error}"
-            ))
-        })?;
-    }
     Ok(())
+}
+
+fn reconcile_persisted(catalog: &SettingsCatalog, persisted: &mut PersistedSettings) -> bool {
+    let original = persisted.clone();
+    persisted.apps.retain(|app_id, settings| {
+        let Some(schema) = catalog.app(app_id) else {
+            return false;
+        };
+        settings.values.retain(|key, value| {
+            schema.setting(key).is_some_and(|descriptor| {
+                descriptor.scope() == SettingScope::App && descriptor.validate_value(value).is_ok()
+            })
+        });
+        true
+    });
+    for apps in persisted.players.values_mut() {
+        apps.retain(|app_id, settings| {
+            let Some(schema) = catalog.app(app_id) else {
+                return false;
+            };
+            settings.values.retain(|key, value| {
+                schema.setting(key).is_some_and(|descriptor| {
+                    descriptor.scope() == SettingScope::AppPlayer
+                        && descriptor.validate_value(value).is_ok()
+                })
+            });
+            true
+        });
+    }
+    persisted.players.retain(|_, apps| !apps.is_empty());
+    *persisted != original
 }
 
 #[derive(Debug, Error)]
@@ -1485,6 +1493,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inactive_watchers_are_pruned_during_reader_churn() {
+        let (service, _) = service().await;
+
+        for index in 0..100 {
+            let player = service.player(format!("player-{index}")).unwrap();
+            let reader = player.reader("app").await.unwrap();
+            assert_eq!(service.inner.state.lock().await.watchers.len(), 1);
+            drop(reader);
+        }
+
+        service.host().set("app", ENABLED, false).await.unwrap();
+        assert!(service.inner.state.lock().await.watchers.is_empty());
+    }
+
+    #[tokio::test]
     async fn resets_remove_overrides_and_preserve_fallbacks() {
         let (service, _) = service().await;
         let host = service.host();
@@ -1555,6 +1578,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconciliation_save_failure_prevents_startup() {
+        let mut state = PersistedSettings::default();
+        state
+            .apps
+            .insert("removed-app".to_owned(), PersistedAppSettings::default());
+        let persistence = Arc::new(FailingPersistence {
+            state: Mutex::new(state),
+            fail_save: AtomicBool::new(true),
+        });
+
+        let result = SettingsService::new(catalog(), persistence).await;
+        assert!(matches!(result, Err(SettingsServiceError::Persistence(_))));
+    }
+
+    #[tokio::test]
     async fn failed_save_does_not_publish_or_change_state() {
         let persistence = Arc::new(FailingPersistence {
             state: Mutex::new(PersistedSettings::default()),
@@ -1577,38 +1615,123 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persisted_state_is_loaded_and_validated() {
+    async fn persisted_state_is_loaded_and_reconciled() {
         let mut state = PersistedSettings {
-            revision: 3,
+            revision: 4,
             ..PersistedSettings::default()
         };
         state.apps.insert(
             "app".to_owned(),
             PersistedAppSettings {
                 revision: 3,
-                values: BTreeMap::from([("enabled".to_owned(), SettingValue::Bool(false))]),
+                values: BTreeMap::from([
+                    ("enabled".to_owned(), SettingValue::Bool(false)),
+                    (
+                        "quality".to_owned(),
+                        SettingValue::String("high".to_owned()),
+                    ),
+                    ("retries".to_owned(), SettingValue::Integer(10)),
+                    ("removed".to_owned(), SettingValue::Bool(true)),
+                ]),
             },
         );
+        state.apps.insert(
+            "removed-app".to_owned(),
+            PersistedAppSettings {
+                revision: 2,
+                values: BTreeMap::new(),
+            },
+        );
+        state.players.insert(
+            "living-room".to_owned(),
+            BTreeMap::from([(
+                "app".to_owned(),
+                PersistedAppSettings {
+                    revision: 4,
+                    values: BTreeMap::from([
+                        (
+                            "quality".to_owned(),
+                            SettingValue::String("high".to_owned()),
+                        ),
+                        ("volume".to_owned(), SettingValue::Integer(1)),
+                        ("enabled".to_owned(), SettingValue::Bool(true)),
+                        ("removed".to_owned(), SettingValue::Bool(true)),
+                    ]),
+                },
+            )]),
+        );
+        state.players.insert(
+            "orphan".to_owned(),
+            BTreeMap::from([("removed-app".to_owned(), PersistedAppSettings::default())]),
+        );
         let persistence = Arc::new(MemorySettingsPersistence::new(state));
-        let service = SettingsService::new(catalog(), persistence).await.unwrap();
+        let service = SettingsService::new(catalog(), persistence.clone())
+            .await
+            .unwrap();
         let snapshot = service.host().reader("app").await.unwrap().snapshot();
         assert_eq!(snapshot.revision(), 3);
         assert_eq!(snapshot.get(ENABLED).unwrap(), Some(false));
+        assert_eq!(snapshot.get(RETRIES).unwrap(), Some(2));
+        let player_snapshot = service
+            .player("living-room")
+            .unwrap()
+            .reader("app")
+            .await
+            .unwrap()
+            .snapshot();
+        assert_eq!(player_snapshot.revision(), 4);
+        assert_eq!(
+            player_snapshot.get(QUALITY).unwrap(),
+            Some("high".to_owned())
+        );
+        assert_eq!(player_snapshot.get(VOLUME).unwrap(), Some(0.5));
 
-        let mut invalid = PersistedSettings::default();
-        invalid.apps.insert(
+        let persisted = persistence.state();
+        assert_eq!(persisted.revision, 4);
+        assert_eq!(persisted.apps["app"].revision, 3);
+        assert_eq!(
+            persisted.apps["app"].values,
+            BTreeMap::from([("enabled".to_owned(), SettingValue::Bool(false))])
+        );
+        assert!(!persisted.apps.contains_key("removed-app"));
+        assert_eq!(persisted.players["living-room"]["app"].revision, 4);
+        assert_eq!(
+            persisted.players["living-room"]["app"].values,
+            BTreeMap::from([(
+                "quality".to_owned(),
+                SettingValue::String("high".to_owned())
+            )])
+        );
+        assert!(!persisted.players.contains_key("orphan"));
+    }
+
+    #[tokio::test]
+    async fn structurally_invalid_persisted_state_is_rejected() {
+        let mut future_revision = PersistedSettings::default();
+        future_revision.apps.insert(
             "app".to_owned(),
             PersistedAppSettings {
-                revision: 0,
-                values: BTreeMap::from([(
-                    "quality".to_owned(),
-                    SettingValue::String("high".to_owned()),
-                )]),
+                revision: 1,
+                values: BTreeMap::new(),
             },
         );
-        let result =
-            SettingsService::new(catalog(), Arc::new(MemorySettingsPersistence::new(invalid)))
-                .await;
+        let result = SettingsService::new(
+            catalog(),
+            Arc::new(MemorySettingsPersistence::new(future_revision)),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(SettingsServiceError::InvalidPersisted(_))
+        ));
+
+        let mut empty_player = PersistedSettings::default();
+        empty_player.players.insert(String::new(), BTreeMap::new());
+        let result = SettingsService::new(
+            catalog(),
+            Arc::new(MemorySettingsPersistence::new(empty_player)),
+        )
+        .await;
         assert!(matches!(
             result,
             Err(SettingsServiceError::InvalidPersisted(_))

@@ -38,7 +38,7 @@ use vibecast_player_api::{
 };
 use vibecast_settings::{
     AppSettingsReader, AppSettingsSchema, PlayerSettings, SettingDescriptor, SettingMutation,
-    SettingsService, SettingsServiceError, SettingsSnapshot,
+    SettingValue, SettingsService, SettingsServiceError, SettingsSnapshot,
 };
 
 use crate::web::{PLAYER_HTML, PLAYER_HTML_CONTENT_TYPE, PLAYER_JS, PLAYER_JS_CONTENT_TYPE};
@@ -418,10 +418,19 @@ async fn apply_settings_update(
     expected_revision: u64,
     changes: std::collections::BTreeMap<String, Option<vibecast_settings::SettingValue>>,
 ) -> ServerMessage {
+    let schema = service.catalog().app(&app_key);
     let mutations = changes
         .into_iter()
         .map(|(key, value)| match value {
-            Some(value) => SettingMutation::Set { key, value },
+            Some(value) => {
+                let value = match (schema.and_then(|schema| schema.setting(&key)), value) {
+                    (Some(SettingDescriptor::Number { .. }), SettingValue::Integer(value)) => {
+                        SettingValue::Number(value as f64)
+                    }
+                    (_, value) => value,
+                };
+                SettingMutation::Set { key, value }
+            }
             None => SettingMutation::Reset { key },
         })
         .collect();
@@ -828,17 +837,28 @@ mod tests {
         SettingsCatalog::new(vec![AppSettingsSchema::with_display_name(
             "test-app",
             "Test App",
-            vec![SettingDescriptor::Choice {
-                key: "quality".to_owned(),
-                label: "Quality".to_owned(),
-                description: Some("Preferred playback quality".to_owned()),
-                scope: SettingScope::AppPlayer,
-                default: "auto".to_owned(),
-                choices: vec![
-                    ChoiceOption::new("auto", "Automatic"),
-                    ChoiceOption::new("high", "High"),
-                ],
-            }],
+            vec![
+                SettingDescriptor::Choice {
+                    key: "quality".to_owned(),
+                    label: "Quality".to_owned(),
+                    description: Some("Preferred playback quality".to_owned()),
+                    scope: SettingScope::AppPlayer,
+                    default: "auto".to_owned(),
+                    choices: vec![
+                        ChoiceOption::new("auto", "Automatic"),
+                        ChoiceOption::new("high", "High"),
+                    ],
+                },
+                SettingDescriptor::Number {
+                    key: "volume".to_owned(),
+                    label: "Volume".to_owned(),
+                    description: None,
+                    scope: SettingScope::AppPlayer,
+                    default: 0.5,
+                    min: Some(0.0),
+                    max: Some(1.0),
+                },
+            ],
         )
         .unwrap()])
         .unwrap()
@@ -1169,6 +1189,56 @@ mod tests {
         assert_eq!(rejected["status"], "rejected");
         assert_eq!(rejected["app"]["revision"], 2);
         assert_eq!(rejected["app"]["settings"][0]["value"], "auto");
+
+        drop(ws);
+        bridge.stop().await;
+    }
+
+    #[tokio::test]
+    async fn initial_snapshot_precedes_and_integral_number_update_is_applied() {
+        use vibecast_settings::SettingKey;
+
+        let (bridge, mut events) = bridge().await;
+        bridge.start().await.expect("start");
+        let mut ws = connect(&bridge).await;
+        ws.send(WsMessage::Text(register_frame().into()))
+            .await
+            .expect("send register");
+        ws.send(WsMessage::Text(
+            json!({
+                "type": "settingsUpdate",
+                "requestId": "number",
+                "appKey": "test-app",
+                "expectedRevision": 0,
+                "changes": { "volume": 1 }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send update");
+
+        let snapshot = next_json(&mut ws).await;
+        assert_eq!(snapshot["type"], "settingsSnapshot");
+        assert_eq!(snapshot["apps"][0]["revision"], 0);
+
+        let settings = match recv_event(&mut events).await {
+            PlayerEvent::Registered { settings, .. } => settings,
+            PlayerEvent::Disconnected { .. } => panic!("expected Registered"),
+        };
+        let applied = next_json(&mut ws).await;
+        assert_eq!(applied["type"], "settingsUpdateResult");
+        assert_eq!(applied["requestId"], "number");
+        assert_eq!(applied["status"], "applied");
+        assert_eq!(applied["app"]["revision"], 1);
+
+        let stored = settings.reader("test-app").await.unwrap().snapshot();
+        assert_eq!(
+            stored
+                .get(SettingKey::<f64>::new("volume"))
+                .expect("number type"),
+            Some(1.0)
+        );
 
         drop(ws);
         bridge.stop().await;

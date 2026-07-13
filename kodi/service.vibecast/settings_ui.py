@@ -15,6 +15,9 @@ SETTING_LIST_ID = 200
 RESET_BUTTON_ID = 201
 CLOSE_BUTTON_ID = 300
 
+ACTION_PREVIOUS_MENU = 10
+ACTION_NAV_BACK = 92
+
 
 class AppSettingsDialog(xbmcgui.WindowXMLDialog):
     def bind(
@@ -45,7 +48,10 @@ class AppSettingsDialog(xbmcgui.WindowXMLDialog):
         if control_id == CLOSE_BUTTON_ID:
             self.close()
 
-    def onAction(self, _action: xbmcgui.Action) -> None:  # noqa: N802
+    def onAction(self, action: xbmcgui.Action) -> None:  # noqa: N802
+        if action.getId() in {ACTION_PREVIOUS_MENU, ACTION_NAV_BACK}:
+            self.close()
+            return
         if not self._initialized or self.getFocusId() != APP_LIST_ID:
             return
         previous_key = self._selected_app_key
