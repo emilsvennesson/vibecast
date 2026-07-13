@@ -52,7 +52,7 @@ tokio-rustls = "0.26"
 rustls-pki-types = { version = "1", features = ["std"] }
 x509-parser = "0.16"
 arc-swap = "1"
-md-5 = "0.10"
+md-5 = "0.11"
 sha2 = "0.10"
 hex = "0.4"
 
