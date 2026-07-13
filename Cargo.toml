@@ -105,7 +105,7 @@ tracing-logcat = "0.1"
 
 # Dev / test
 proptest = "1"
-rcgen = "0.13"
+rcgen = "0.14"
 tower = "0.5"
 
 [profile.release]
