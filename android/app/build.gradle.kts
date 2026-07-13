@@ -20,7 +20,7 @@ val rustAbis = listOf("arm64-v8a", "x86_64")
 
 // Single source of truth for the app version; release-please bumps the literal
 // below on release (see release-please-config.json extra-files).
-val appVersionName = "0.1.0" // x-release-please-version
+val appVersionName = "1.0.0" // x-release-please-version
 
 // Derive a monotonic versionCode from the semver name
 // (MAJOR*10000 + MINOR*100 + PATCH), ignoring any prerelease suffix. Floored at
