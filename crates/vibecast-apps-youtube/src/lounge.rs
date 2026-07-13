@@ -762,9 +762,8 @@ struct LoungeTokenScreen {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
     use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn frame(value: &str) -> String {
         format!("{}\n{}\n", value.len(), value)
@@ -931,31 +930,17 @@ mod tests {
     #[tokio::test]
     async fn discovery_identity_follows_the_server_request() {
         let server = MockServer::start().await;
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let captured = Arc::clone(&requests);
-        Mock::given(path("/api/lounge/bc/bind"))
-            .respond_with(move |request: &Request| {
-                let label = if request.method.as_str() == "GET" {
-                    "poll"
-                } else {
-                    let body = String::from_utf8_lossy(&request.body);
-                    if body.contains("req0__sc=nowPlaying") {
-                        "nowPlaying"
-                    } else if body.contains("req0__sc=setDiscoveryDeviceId") {
-                        "setDiscoveryDeviceId"
-                    } else {
-                        "other"
-                    }
-                };
-                captured.lock().unwrap().push(label);
-
-                if request.method.as_str() == "GET" {
-                    ResponseTemplate::new(200)
-                        .set_body_string(frame(r#"[[5,["onSetDiscoveryDeviceId"]]]"#))
-                } else {
-                    ResponseTemplate::new(200)
-                }
-            })
+        Mock::given(method("POST"))
+            .and(path("/api/lounge/bc/bind"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/lounge/bc/bind"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(frame(r#"[[5,["onSetDiscoveryDeviceId"]]]"#)),
+            )
             .mount(&server)
             .await;
 
@@ -985,7 +970,7 @@ mod tests {
 
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                if requests.lock().unwrap().len() >= 3 {
+                if server.received_requests().await.unwrap().len() >= 3 {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -1001,9 +986,19 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(
-            &requests.lock().unwrap()[..3],
-            &["nowPlaying", "poll", "setDiscoveryDeviceId"]
-        );
+        let requests = server.received_requests().await.unwrap();
+        let sequence = requests[..3]
+            .iter()
+            .map(|request| {
+                if request.method.as_str() == "GET" {
+                    "poll"
+                } else if String::from_utf8_lossy(&request.body).contains("req0__sc=nowPlaying") {
+                    "nowPlaying"
+                } else {
+                    "setDiscoveryDeviceId"
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sequence, &["nowPlaying", "poll", "setDiscoveryDeviceId"]);
     }
 }
