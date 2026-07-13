@@ -195,7 +195,6 @@ impl LoungeConnection {
         cancel: &mut watch::Receiver<bool>,
     ) -> Result<(), LoungeError> {
         self.post(Outbound::NowPlaying).await?;
-        self.post(Outbound::DiscoveryDeviceId).await?;
 
         loop {
             let poll = poll_commands(&self.http, &self.bind_url, &self.bound);
@@ -926,5 +925,80 @@ mod tests {
         connection.bound.aid = 4;
         connection.post(Outbound::NowPlaying).await.unwrap();
         assert_eq!(connection.bound.aid, 4, "forward ACK must not advance AID");
+    }
+
+    #[tokio::test]
+    async fn discovery_identity_follows_the_server_request() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/lounge/bc/bind"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/lounge/bc/bind"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(frame(r#"[[5,["onSetDiscoveryDeviceId"]]]"#)),
+            )
+            .mount(&server)
+            .await;
+
+        let mut connection = LoungeConnection {
+            http: reqwest::Client::new(),
+            bind_url: Url::parse(&format!("{}/api/lounge/bc/bind", server.uri())).unwrap(),
+            bound: BoundSession {
+                sid: "SID".to_string(),
+                gsession_id: "GSID".to_string(),
+                aid: 0,
+                rid: 1,
+                ofs: 0,
+            },
+            screen_id: "screen-id".to_string(),
+            device_id: "lounge-device".to_string(),
+            discovery_device_id: "CAST-ID".to_string(),
+            current: CurrentMedia::default(),
+        };
+        let (command_tx, _command_rx) = mpsc::channel(1);
+        let (_playback_tx, mut playback_rx) = mpsc::channel(1);
+        let (cancel_tx, mut cancel_rx) = watch::channel(false);
+        let task = tokio::spawn(async move {
+            connection
+                .run_bound(&command_tx, &mut playback_rx, &mut cancel_rx)
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if server.received_requests().await.unwrap().len() >= 3 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("discovery response was not sent");
+
+        cancel_tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("Lounge loop did not stop after cancellation")
+            .unwrap()
+            .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let sequence = requests[..3]
+            .iter()
+            .map(|request| {
+                if request.method.as_str() == "GET" {
+                    "poll"
+                } else if String::from_utf8_lossy(&request.body).contains("req0__sc=nowPlaying") {
+                    "nowPlaying"
+                } else {
+                    "setDiscoveryDeviceId"
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sequence, &["nowPlaying", "poll", "setDiscoveryDeviceId"]);
     }
 }
