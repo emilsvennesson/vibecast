@@ -29,3 +29,4 @@ uuid.workspace = true
 vibecast-security = { path = "../vibecast-security" }
 tokio-util.workspace = true
 futures-util.workspace = true
+wiremock = "0.6"

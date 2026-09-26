@@ -91,6 +91,7 @@ impl AppSession for SvtSession {
                     content_type,
                     drm,
                     segment_query: None,
+                    request_headers: Default::default(),
                 },
             )
             .collect();

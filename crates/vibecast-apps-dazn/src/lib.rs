@@ -460,11 +460,14 @@ fn build_media(
         .ok_or(DaznError::MissingField("ManifestUrl"))?;
     // DAZN's player appends the CDN token to the manifest and every segment
     // request; the CDN rejects untokenised segments with 401.
-    let mut stream = match cdn_token_query(detail) {
+    let stream = match cdn_token_query(detail) {
         Some(query) => PlaybackStream::url(with_query(manifest_url, &query), DASH_CONTENT_TYPE)
             .with_segment_query(query),
         None => PlaybackStream::url(manifest_url, DASH_CONTENT_TYPE),
     };
+    // Some CDN tokens only authorize the User-Agent that called the Playback
+    // API, so the manifest and segment requests must present the same one.
+    let mut stream = stream.with_request_header("User-Agent", api::USER_AGENT);
     let mut mpx = None;
     if let Some(license_url) = detail.la_url.as_deref().filter(|url| !url.is_empty()) {
         stream = stream.with_drm(DrmInfo::new(DrmSystem::Widevine, license_url));
@@ -498,61 +501,26 @@ fn build_media(
     Ok((media, mpx))
 }
 
-/// The playback detail to use: the first in DAZN's CDN precedence order whose
-/// token is not bound to the requesting client, falling back to the first
-/// usable one.
-///
-/// DAZN issues each CDN its own token. Akamai EdgeAuth tokens and JWTs without
-/// a `headers` claim are bound to the User-Agent that called the Playback API,
-/// so a player fetching segments with its own User-Agent (e.g. Kodi) gets 401s.
-/// JWTs carrying an explicit empty `headers` list are not bound.
+/// The first playback detail in DAZN's CDN precedence order.
 fn preferred_detail(response: &PlaybackResponse) -> Option<&PlaybackDetail> {
-    let usable: Vec<&PlaybackDetail> = response
-        .playback_details
-        .iter()
-        .filter(|detail| {
-            detail
-                .manifest_url
-                .as_deref()
-                .is_some_and(|url| !url.is_empty())
-        })
-        .collect();
-    let mut ordered: Vec<&PlaybackDetail> = response
+    let usable = |detail: &&PlaybackDetail| {
+        detail
+            .manifest_url
+            .as_deref()
+            .is_some_and(|url| !url.is_empty())
+    };
+    response
         .playback_precision
         .iter()
         .flat_map(|precision| precision.cdns.iter())
-        .filter_map(|cdn| {
-            usable
+        .find_map(|cdn| {
+            response
+                .playback_details
                 .iter()
-                .copied()
+                .filter(usable)
                 .find(|detail| detail.cdn_name.as_deref() == Some(cdn.as_str()))
         })
-        .collect();
-    for detail in &usable {
-        if !ordered.iter().any(|seen| std::ptr::eq(*seen, *detail)) {
-            ordered.push(detail);
-        }
-    }
-    ordered
-        .iter()
-        .copied()
-        .find(|detail| !is_client_bound(detail))
-        .or_else(|| ordered.first().copied())
-}
-
-/// Whether a detail's CDN token only authorizes the client that requested it.
-fn is_client_bound(detail: &PlaybackDetail) -> bool {
-    let Some(value) = detail
-        .cdn_token
-        .as_ref()
-        .and_then(|token| token.value.as_deref())
-    else {
-        return false;
-    };
-    !matches!(
-        api::jwt_claim(value, "headers"),
-        Some(Value::Array(headers)) if headers.is_empty()
-    )
+        .or_else(|| response.playback_details.iter().find(usable))
 }
 
 /// The CDN token as an encoded `name=value` query pair.
@@ -799,9 +767,9 @@ mod tests {
         })
     }
 
-    /// A CDN JWT with an explicit empty `headers` claim (not client-bound).
-    fn unbound_cdn_token() -> String {
-        test_jwt(&json!({ "headers": [], "co": true }))
+    /// A CDN JWT as DAZN issues them in `CdnToken.Value`.
+    fn cdn_token() -> String {
+        test_jwt(&json!({ "co": true }))
     }
 
     fn playback_body(live: bool, license_mode: &str) -> Value {
@@ -820,7 +788,7 @@ mod tests {
                     "ManifestUrl": "https://b.example/stream.mpd?x=1",
                     "LaUrl": "https://lic.example/wv?releasePid=rp",
                     "ReleasePid": "rp",
-                    "CdnToken": { "Name": "dazn-token", "Value": unbound_cdn_token() }
+                    "CdnToken": { "Name": "dazn-token", "Value": cdn_token() }
                 }
             ],
             "License": { "Mode": license_mode }
@@ -993,13 +961,17 @@ mod tests {
         assert_eq!(media.start_time, 120.0);
         assert_eq!(media.title.as_deref(), Some("Match"));
         let stream = &media.streams[0];
-        let token_query = format!("dazn-token={}", unbound_cdn_token());
+        let token_query = format!("dazn-token={}", cdn_token());
         assert_eq!(
             stream.source,
             StreamSource::Url(format!("https://b.example/stream.mpd?x=1&{token_query}"))
         );
         assert_eq!(stream.content_type, DASH_CONTENT_TYPE);
         assert_eq!(stream.segment_query.as_deref(), Some(token_query.as_str()));
+        assert_eq!(
+            stream.request_headers.get("User-Agent").map(String::as_str),
+            Some(api::USER_AGENT)
+        );
         let drm = stream.drm.as_ref().unwrap();
         assert_eq!(drm.system, DrmSystem::Widevine);
         assert_eq!(drm.license_url, "https://lic.example/wv?releasePid=rp");
@@ -1021,20 +993,18 @@ mod tests {
     }
 
     #[test]
-    fn prefers_cdns_whose_token_is_not_client_bound() {
-        let unbound = test_jwt(&json!({ "headers": [], "co": true }));
-        let bound_jwt = test_jwt(&json!({ "co": true }));
+    fn follows_dazn_cdn_precedence_regardless_of_token_type() {
         let response: PlaybackResponse = serde_json::from_value(json!({
             "PlaybackPrecision": { "Cdns": ["dct-ak-live", "dcs-fs-live", "dct-ac-live"] },
             "PlaybackDetails": [
-                detail("dct-ac-live", &unbound),
-                detail("dcs-fs-live", &bound_jwt),
+                detail("dct-ac-live", &test_jwt(&json!({ "headers": [] }))),
+                detail("dcs-fs-live", &test_jwt(&json!({ "co": true }))),
                 detail("dct-ak-live", "st=1~exp=2~acl=%2F*~hmac=ab"),
             ]
         }))
         .unwrap();
         let chosen = preferred_detail(&response).unwrap();
-        assert_eq!(chosen.cdn_name.as_deref(), Some("dct-ac-live"));
+        assert_eq!(chosen.cdn_name.as_deref(), Some("dct-ak-live"));
     }
 
     #[test]
@@ -1047,20 +1017,6 @@ mod tests {
             cdn_token_query(&response.playback_details[0]).as_deref(),
             Some("dazn-token=st%3D1~acl%3D%2F%2A~hmac%3Dab")
         );
-    }
-
-    #[test]
-    fn falls_back_to_precedence_when_every_token_is_client_bound() {
-        let response: PlaybackResponse = serde_json::from_value(json!({
-            "PlaybackPrecision": { "Cdns": ["dcs-fs-live", "dct-ak-live"] },
-            "PlaybackDetails": [
-                detail("dct-ak-live", "st=1~exp=2~hmac=ab"),
-                detail("dcs-fs-live", &test_jwt(&json!({ "co": true }))),
-            ]
-        }))
-        .unwrap();
-        let chosen = preferred_detail(&response).unwrap();
-        assert_eq!(chosen.cdn_name.as_deref(), Some("dcs-fs-live"));
     }
 
     #[tokio::test]

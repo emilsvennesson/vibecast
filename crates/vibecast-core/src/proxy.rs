@@ -51,6 +51,8 @@ pub(crate) struct ManifestRoute {
     pub source: ManifestSource,
     /// Query appended to every segment URL in the manifest (CDN auth tokens).
     pub segment_query: Option<String>,
+    /// App-required headers for the upstream fetch; they override the player's.
+    pub request_headers: HeaderMap,
 }
 
 /// Session-scoped proxy handler backing the bridge's license/manifest routes.
@@ -180,7 +182,10 @@ impl ManifestHandler for SessionProxy {
             ManifestSource::Upstream(url) => url,
         };
 
-        let headers = filter_upstream_headers(&request.headers);
+        let mut headers = filter_upstream_headers(&request.headers);
+        for (name, value) in &route.request_headers {
+            headers.insert(name.clone(), value.clone());
+        }
         let method = if is_head {
             reqwest::Method::HEAD
         } else {
@@ -331,9 +336,9 @@ fn error_manifest(status: u16, message: &str) -> ManifestProxyResponse {
     }
 }
 
-/// Convert an app's string-keyed DRM header config into a validated [`HeaderMap`],
+/// Convert an app's string-keyed header config into a validated [`HeaderMap`],
 /// silently dropping any entries with invalid header names or values.
-fn drm_headers(map: &HashMap<String, String>) -> HeaderMap {
+fn header_map(map: &HashMap<String, String>) -> HeaderMap {
     let mut headers = HeaderMap::with_capacity(map.len());
     for (name, value) in map {
         if let (Ok(name), Ok(value)) = (
@@ -389,6 +394,7 @@ pub(crate) fn collect_routes(
                     content_type: stream.content_type.clone(),
                     source,
                     segment_query: stream.segment_query.clone(),
+                    request_headers: header_map(&stream.request_headers),
                 },
             );
         }
@@ -398,7 +404,7 @@ pub(crate) fn collect_routes(
                 LicenseRoute {
                     system: drm.system,
                     upstream_url: drm.license_url.clone(),
-                    headers: drm_headers(&drm.headers),
+                    headers: header_map(&drm.headers),
                 },
             );
         }
@@ -462,6 +468,7 @@ pub(crate) fn to_payload(media: &PlaybackMedia) -> PlaybackMediaPayload {
                     license_url: drm.license_url.clone(),
                     headers: drm.headers.clone(),
                 }),
+                headers: stream.request_headers.clone(),
             })
             .collect(),
         stream_type: media.stream_type,
@@ -486,6 +493,31 @@ mod tests {
     use vibecast_sdk::{
         LoadRequest, MediaResolveError, NoopSenderChannel, ReceiverContext, StreamType,
     };
+
+    /// A session whose media resolution the manifest proxy never invokes.
+    struct UnreachableSession;
+
+    #[async_trait]
+    impl AppSession for UnreachableSession {
+        async fn resolve_media(
+            &self,
+            _ctx: &AppContext,
+            _request: &LoadRequest,
+        ) -> Result<PlaybackMedia, MediaResolveError> {
+            unreachable!("the manifest proxy never resolves media")
+        }
+    }
+
+    fn test_context() -> AppContext {
+        AppContext::new(
+            "sess",
+            "transport",
+            "APP",
+            reqwest::Client::new(),
+            ReceiverContext::new("vibecast", "Model", "dev", PathBuf::new()),
+            Arc::new(NoopSenderChannel),
+        )
+    }
 
     fn inline_media() -> PlaybackMedia {
         PlaybackMedia::new(
@@ -525,28 +557,82 @@ mod tests {
         );
     }
 
+    #[test]
+    fn stream_request_headers_reach_route_and_player_payload() {
+        let mut media = PlaybackMedia::new(
+            "sess",
+            vec![
+                PlaybackStream::url("https://cdn.example/stream.mpd", "application/dash+xml")
+                    .with_request_header("User-Agent", "Agent/1"),
+            ],
+            StreamType::Live,
+        );
+        let (manifest_routes, _) = collect_routes(&media);
+        assert_eq!(
+            manifest_routes[&RouteId::manifest(0)].request_headers["user-agent"],
+            "Agent/1"
+        );
+        rewrite_streams(&mut media, Some("http://proxy/manifest/sess"), None, 1);
+        assert_eq!(
+            to_payload(&media).streams[0].headers,
+            HashMap::from([("User-Agent".to_string(), "Agent/1".to_string())])
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_manifest_fetch_uses_app_request_headers_over_the_players() {
+        use wiremock::matchers::{header, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(header("user-agent", "Agent/1"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/dash+xml")
+                    .set_body_string("<MPD/>"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let media = PlaybackMedia::new(
+            "sess",
+            vec![PlaybackStream::url(
+                format!("{}/stream.mpd", server.uri()),
+                "application/dash+xml",
+            )
+            .with_request_header("User-Agent", "Agent/1")],
+            StreamType::Live,
+        );
+        let (manifest_routes, _) = collect_routes(&media);
+        let proxy = SessionProxy::new(
+            Arc::new(UnreachableSession),
+            test_context(),
+            manifest_routes,
+            HashMap::new(),
+        );
+        let mut player_headers = HeaderMap::new();
+        player_headers.insert(
+            http::header::USER_AGENT,
+            HeaderValue::from_static("Kodi/21"),
+        );
+
+        let response = proxy
+            .handle_manifest(ManifestProxyRequest {
+                session_id: "sess".into(),
+                route_id: RouteId::manifest(0),
+                method: http::Method::GET,
+                headers: player_headers,
+            })
+            .await
+            .unwrap();
+        assert_eq!(response.status, 200);
+    }
+
     #[tokio::test]
     async fn handle_manifest_serves_inline_body_without_upstream_fetch() {
-        struct NullSession;
-        #[async_trait]
-        impl AppSession for NullSession {
-            async fn resolve_media(
-                &self,
-                _ctx: &AppContext,
-                _request: &LoadRequest,
-            ) -> Result<PlaybackMedia, MediaResolveError> {
-                unreachable!("the inline manifest path never resolves media")
-            }
-        }
-
-        let ctx = AppContext::new(
-            "sess",
-            "transport",
-            "APP",
-            reqwest::Client::new(),
-            ReceiverContext::new("vibecast", "Model", "dev", PathBuf::new()),
-            Arc::new(NoopSenderChannel),
-        );
+        let ctx = test_context();
         let mut manifest_routes = HashMap::new();
         manifest_routes.insert(
             RouteId::manifest(0),
@@ -555,9 +641,15 @@ mod tests {
                 content_type: "application/dash+xml".to_string(),
                 source: ManifestSource::Inline(b"<MPD>inline</MPD>".to_vec()),
                 segment_query: None,
+                request_headers: HeaderMap::new(),
             },
         );
-        let proxy = SessionProxy::new(Arc::new(NullSession), ctx, manifest_routes, HashMap::new());
+        let proxy = SessionProxy::new(
+            Arc::new(UnreachableSession),
+            ctx,
+            manifest_routes,
+            HashMap::new(),
+        );
 
         let get = proxy
             .handle_manifest(ManifestProxyRequest {

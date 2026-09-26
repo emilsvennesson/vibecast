@@ -827,6 +827,7 @@ mod tests {
                 url: "https://example.com/manifest.mpd".into(),
                 content_type: "application/dash+xml".into(),
                 drm: None,
+                headers: Default::default(),
             }],
             stream_type: StreamType::Buffered,
             ..Default::default()

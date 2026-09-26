@@ -271,6 +271,7 @@ impl AppSession for ViaplaySession {
                     content_type: stream_info.content_type.clone(),
                     drm: drm.clone(),
                     segment_query: None,
+                    request_headers: Default::default(),
                 });
             }
         };

@@ -26,7 +26,11 @@ const BRAND: &str = "dazn";
 /// the User-Agent as well as `Model`: an `Android` user agent (as in the
 /// receiver's default) is served the mobile `mob25f` ladder capped at 720p30,
 /// while a CrKey Linux one gets the full TV ladder (1080p60 and up).
-const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) \
+///
+/// Some CDN tokens in the Playback response are bound to this User-Agent, so
+/// the stream's manifest and segment requests must send it too.
+pub const USER_AGENT: &str =
+    "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) \
 Chrome/114.0.0.0 Safari/537.36 CrKey/1.56.500000";
 
 /// Errors raised by the DAZN API client.

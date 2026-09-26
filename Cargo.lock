@@ -3325,6 +3325,7 @@ dependencies = [
  "vibecast-sdk",
  "vibecast-security",
  "vibecast-settings",
+ "wiremock",
 ]
 
 [[package]]

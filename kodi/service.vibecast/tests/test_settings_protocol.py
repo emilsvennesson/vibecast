@@ -180,3 +180,21 @@ class SettingsCatalogTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StreamRequestHeadersTest(unittest.TestCase):
+    def test_encodes_headers_for_inputstream_adaptive(self):
+        from protocol import stream_request_headers
+
+        stream = {"url": "u", "headers": {"User-Agent": "Mozilla/5.0 (X11; Linux) CrKey/1.56"}}
+        self.assertEqual(
+            stream_request_headers(stream),
+            "User-Agent=Mozilla%2F5.0+%28X11%3B+Linux%29+CrKey%2F1.56",
+        )
+
+    def test_missing_or_invalid_headers_yield_empty(self):
+        from protocol import stream_request_headers
+
+        self.assertEqual(stream_request_headers({"url": "u"}), "")
+        self.assertEqual(stream_request_headers({"headers": ["x"]}), "")
+        self.assertEqual(stream_request_headers({"headers": {"A": 1, "": "b"}}), "")

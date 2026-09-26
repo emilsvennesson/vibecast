@@ -81,6 +81,10 @@ pub struct PlaybackStream {
     /// proxy appends to every segment and initialization URL in the manifest,
     /// for CDNs that authorize each media request with a token parameter.
     pub segment_query: Option<String>,
+    /// HTTP headers required on the stream's manifest and media requests (e.g.
+    /// a `User-Agent` a CDN token is bound to). The manifest proxy sends them
+    /// upstream, and they are forwarded to the player for its segment requests.
+    pub request_headers: std::collections::HashMap<String, String>,
 }
 
 impl PlaybackStream {
@@ -92,6 +96,7 @@ impl PlaybackStream {
             content_type: content_type.into(),
             drm: None,
             segment_query: None,
+            request_headers: std::collections::HashMap::new(),
         }
     }
 
@@ -103,6 +108,7 @@ impl PlaybackStream {
             content_type: content_type.into(),
             drm: None,
             segment_query: None,
+            request_headers: std::collections::HashMap::new(),
         }
     }
 
@@ -118,6 +124,18 @@ impl PlaybackStream {
     #[must_use]
     pub fn with_segment_query(mut self, query: impl Into<String>) -> Self {
         self.segment_query = Some(query.into());
+        self
+    }
+
+    /// Require `name: value` on the stream's manifest and media requests (see
+    /// [`request_headers`](Self::request_headers)).
+    #[must_use]
+    pub fn with_request_header(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.request_headers.insert(name.into(), value.into());
         self
     }
 }

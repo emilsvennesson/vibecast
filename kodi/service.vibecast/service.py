@@ -24,6 +24,7 @@ from protocol import (
     ProtocolError,
     decode_server_message,
     registration_message,
+    stream_request_headers,
 )
 from settings_model import SettingsCatalog
 from settings_ui import AppSettingsDialog
@@ -911,6 +912,13 @@ class VibecastService:
             media = self._active_media
 
         self._populate_metadata(list_item, media)
+
+        # Headers the stream's CDN requires (e.g. a User-Agent its token is
+        # bound to). Kodi 21+ splits manifest and segment headers.
+        request_headers = stream_request_headers(stream)
+        if request_headers:
+            list_item.setProperty("inputstream.adaptive.manifest_headers", request_headers)
+            list_item.setProperty("inputstream.adaptive.stream_headers", request_headers)
 
         if isinstance(drm, dict):
             success, reason = self._configure_drm(list_item, drm)
