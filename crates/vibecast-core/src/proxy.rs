@@ -18,11 +18,11 @@ use vibecast_player_api::headers::{
     filter_upstream_headers, filter_upstream_response_headers, HOP_BY_HOP_REQUEST_HEADERS,
 };
 use vibecast_player_api::{
-    default_manifest_content_type, infer_manifest_kind, manifest_route_suffix,
-    normalize_manifest_bytes, DrmPayload, DrmSystem as WireDrmSystem, LicenseHandler,
-    LicenseRequest as WireLicenseRequest, LicenseResponse as WireLicenseResponse, ManifestHandler,
-    ManifestKind, ManifestProxyRequest, ManifestProxyResponse, PlaybackMediaPayload,
-    PlaybackStreamPayload, ProxyResult, RouteId,
+    append_segment_query, default_manifest_content_type, infer_manifest_kind,
+    manifest_route_suffix, normalize_manifest_bytes, DrmPayload, DrmSystem as WireDrmSystem,
+    LicenseHandler, LicenseRequest as WireLicenseRequest, LicenseResponse as WireLicenseResponse,
+    ManifestHandler, ManifestKind, ManifestProxyRequest, ManifestProxyResponse,
+    PlaybackMediaPayload, PlaybackStreamPayload, ProxyResult, RouteId,
 };
 use vibecast_sdk::{
     AppContext, AppSession, DrmSystem, LicenseForwarder, LicenseRequest, LicenseResponse,
@@ -49,6 +49,8 @@ pub(crate) struct ManifestRoute {
     pub kind: ManifestKind,
     pub content_type: String,
     pub source: ManifestSource,
+    /// Query appended to every segment URL in the manifest (CDN auth tokens).
+    pub segment_query: Option<String>,
 }
 
 /// Session-scoped proxy handler backing the bridge's license/manifest routes.
@@ -228,7 +230,10 @@ impl ManifestHandler for SessionProxy {
         if status < 400 {
             let (normalized, resolved_content_type) =
                 normalize_manifest_bytes(&body, upstream_url, Some(&content_type));
-            body = normalized;
+            body = match &route.segment_query {
+                Some(query) => append_segment_query(&normalized, route.kind, query),
+                None => normalized,
+            };
             content_type = resolved_content_type;
         }
 
@@ -383,6 +388,7 @@ pub(crate) fn collect_routes(
                     kind,
                     content_type: stream.content_type.clone(),
                     source,
+                    segment_query: stream.segment_query.clone(),
                 },
             );
         }
@@ -548,6 +554,7 @@ mod tests {
                 kind: ManifestKind::Dash,
                 content_type: "application/dash+xml".to_string(),
                 source: ManifestSource::Inline(b"<MPD>inline</MPD>".to_vec()),
+                segment_query: None,
             },
         );
         let proxy = SessionProxy::new(Arc::new(NullSession), ctx, manifest_routes, HashMap::new());

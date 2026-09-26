@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use vibecast_apps_dazn::Dazn;
 use vibecast_apps_primevideo::PrimeVideo;
 use vibecast_apps_svtplay::SvtPlay;
 use vibecast_apps_tv4play::Tv4Play;
@@ -390,6 +391,7 @@ fn build_app_providers() -> Vec<Arc<dyn AppProvider>> {
         Arc::new(Viaplay::new()),
         Arc::new(PrimeVideo::new()),
         Arc::new(YouTube::new()),
+        Arc::new(Dazn::new()),
     ]
 }
 
@@ -687,6 +689,7 @@ mod tests {
         assert!(keys.contains(&"viaplay"));
         assert!(keys.contains(&"primevideo"));
         assert!(keys.contains(&"youtube"));
+        assert!(keys.contains(&"dazn"));
     }
 
     #[tokio::test]

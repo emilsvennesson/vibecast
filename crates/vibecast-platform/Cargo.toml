@@ -30,6 +30,7 @@ vibecast-apps-tv4play = { path = "../vibecast-apps-tv4play" }
 vibecast-apps-viaplay = { path = "../vibecast-apps-viaplay" }
 vibecast-apps-primevideo = { path = "../vibecast-apps-primevideo" }
 vibecast-apps-youtube = { path = "../vibecast-apps-youtube" }
+vibecast-apps-dazn = { path = "../vibecast-apps-dazn" }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true, features = ["rt"] }

@@ -85,6 +85,132 @@ pub fn normalize_manifest_bytes(
     (transformed.into_bytes(), resolved_content_type)
 }
 
+/// Append `query` (`name=value[&...]`, already URL-encoded) to every media
+/// segment and initialization URL a normalized manifest references, for CDNs
+/// that authorize each media request with a token parameter.
+///
+/// DASH: `SegmentTemplate@media`/`@initialization`, `SegmentURL@media`,
+/// `Initialization@sourceURL`, `RepresentationIndex@sourceURL`, and non-directory
+/// `BaseURL`s (single-file representations). HLS: URI lines and `URI="..."`
+/// attributes. Other kinds are returned unchanged.
+#[must_use]
+pub fn append_segment_query(body: &[u8], kind: ManifestKind, query: &str) -> Vec<u8> {
+    if query.is_empty() {
+        return body.to_vec();
+    }
+    let text = String::from_utf8_lossy(body);
+    match kind {
+        ManifestKind::Dash => append_dash_segment_query(&text, query).into_bytes(),
+        ManifestKind::Hls => append_hls_segment_query(&text, query).into_bytes(),
+        ManifestKind::Unknown => body.to_vec(),
+    }
+}
+
+fn with_query(url: &str, query: &str) -> String {
+    let (path, fragment) = match url.find('#') {
+        Some(index) => url.split_at(index),
+        None => (url, ""),
+    };
+    let separator = if path.contains('?') { '&' } else { '?' };
+    format!("{path}{separator}{query}{fragment}")
+}
+
+fn append_dash_segment_query(manifest: &str, query: &str) -> String {
+    let mut xot = Xot::new();
+    let Ok(root) = xot.parse(manifest) else {
+        return manifest.to_string();
+    };
+    let Ok(doc_el) = xot.document_element(root) else {
+        return manifest.to_string();
+    };
+
+    let targets = [
+        ("SegmentTemplate", "media"),
+        ("SegmentTemplate", "initialization"),
+        ("SegmentURL", "media"),
+        ("Initialization", "sourceURL"),
+        ("RepresentationIndex", "sourceURL"),
+    ];
+    let mut changed = false;
+    for (element, attribute) in targets {
+        let attribute = xot.add_name(attribute);
+        let mut nodes = Vec::new();
+        collect_by_local(&xot, doc_el, element, &mut nodes);
+        for node in nodes {
+            let Some(value) = xot.attributes(node).get(attribute).cloned() else {
+                continue;
+            };
+            if value.is_empty() {
+                continue;
+            }
+            xot.attributes_mut(node)
+                .insert(attribute, with_query(&value, query));
+            changed = true;
+        }
+    }
+
+    let mut base_urls = Vec::new();
+    collect_by_local(&xot, doc_el, "BaseURL", &mut base_urls);
+    for node in base_urls {
+        let text = xot
+            .text_content_str(node)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if text.is_empty() || text.ends_with('/') {
+            continue;
+        }
+        set_element_text(&mut xot, node, &with_query(&text, query));
+        changed = true;
+    }
+
+    if !changed {
+        return manifest.to_string();
+    }
+    xot.to_string(doc_el)
+        .unwrap_or_else(|_| manifest.to_string())
+}
+
+fn append_hls_segment_query(manifest: &str, query: &str) -> String {
+    let mut out = String::with_capacity(manifest.len());
+    for line in split_lines_keepends(manifest) {
+        let (body, ending) = split_line_ending(line);
+        let stripped = body.trim();
+        if stripped.is_empty() {
+            out.push_str(line);
+        } else if stripped.starts_with('#') {
+            out.push_str(&append_hls_uri_attr_query(body, query));
+            out.push_str(ending);
+        } else {
+            out.push_str(&with_query(stripped, query));
+            out.push_str(ending);
+        }
+    }
+    out
+}
+
+fn append_hls_uri_attr_query(line: &str, query: &str) -> String {
+    const MARKER: &str = "URI=\"";
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(position) = rest.find(MARKER) {
+        let (before, after) = rest.split_at(position);
+        out.push_str(before);
+        out.push_str(MARKER);
+        let after = &after[MARKER.len()..];
+        if let Some(end) = after.find('"') {
+            out.push_str(&with_query(&after[..end], query));
+            out.push('"');
+            rest = &after[end + 1..];
+        } else {
+            out.push_str(after);
+            rest = "";
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 // -- DASH ------------------------------------------------------------------
 
 fn transform_dash(manifest: &str, upstream_url: &str) -> String {
@@ -531,6 +657,55 @@ segment-2.ts\n";
             text.contains("https://cdn.example.com/hls/segment-2.ts"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn segment_query_is_appended_to_dash_media_urls() {
+        let manifest = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><BaseURL>https://cdn.example.com/live/</BaseURL><Period>
+  <AdaptationSet><SegmentTemplate media="v_$Number$.m4s" initialization="v-init.dash"/>
+    <Representation id="v"/></AdaptationSet>
+  <AdaptationSet><Representation id="a"><BaseURL>audio.mp4?x=1</BaseURL>
+    <SegmentList><Initialization sourceURL="a-init.mp4"/><SegmentURL media="a1.m4s"/></SegmentList>
+  </Representation></AdaptationSet>
+</Period></MPD>"#;
+        let out = append_segment_query(manifest.as_bytes(), ManifestKind::Dash, "hdntl=a%2Fb");
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains(r#"media="v_$Number$.m4s?hdntl=a%2Fb""#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"initialization="v-init.dash?hdntl=a%2Fb""#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"sourceURL="a-init.mp4?hdntl=a%2Fb""#),
+            "{text}"
+        );
+        assert!(text.contains(r#"media="a1.m4s?hdntl=a%2Fb""#), "{text}");
+        assert!(
+            text.contains(">audio.mp4?x=1&amp;hdntl=a%2Fb</BaseURL>"),
+            "{text}"
+        );
+        // Directory BaseURLs stay untouched (segments carry the token).
+        assert!(
+            text.contains(">https://cdn.example.com/live/</BaseURL>"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn segment_query_is_appended_to_hls_uris() {
+        let playlist =
+            "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4.0,\nhttps://cdn.example.com/s1.m4s\n";
+        let out = append_segment_query(playlist.as_bytes(), ManifestKind::Hls, "t=1");
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains(r#"URI="init.mp4?t=1""#), "{text}");
+        assert!(
+            text.contains("https://cdn.example.com/s1.m4s?t=1\n"),
+            "{text}"
+        );
+        assert!(text.starts_with("#EXTM3U\n"), "{text}");
     }
 
     #[test]

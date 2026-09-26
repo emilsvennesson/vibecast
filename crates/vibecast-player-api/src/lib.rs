@@ -21,8 +21,8 @@ pub mod protocol;
 pub mod proxy;
 
 pub use manifest::{
-    default_manifest_content_type, infer_manifest_kind, manifest_route_suffix,
-    normalize_manifest_bytes, ManifestKind,
+    append_segment_query, default_manifest_content_type, infer_manifest_kind,
+    manifest_route_suffix, normalize_manifest_bytes, ManifestKind,
 };
 pub use player::Player;
 pub use protocol::{

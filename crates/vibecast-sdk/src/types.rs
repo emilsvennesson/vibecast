@@ -77,6 +77,10 @@ pub struct PlaybackStream {
     pub content_type: String,
     /// DRM configuration, if the stream is protected.
     pub drm: Option<DrmInfo>,
+    /// Query string (`name=value[&...]`, already URL-encoded) the manifest
+    /// proxy appends to every segment and initialization URL in the manifest,
+    /// for CDNs that authorize each media request with a token parameter.
+    pub segment_query: Option<String>,
 }
 
 impl PlaybackStream {
@@ -87,6 +91,7 @@ impl PlaybackStream {
             source: StreamSource::Url(url.into()),
             content_type: content_type.into(),
             drm: None,
+            segment_query: None,
         }
     }
 
@@ -97,6 +102,7 @@ impl PlaybackStream {
             source: StreamSource::InlineManifest(body.into()),
             content_type: content_type.into(),
             drm: None,
+            segment_query: None,
         }
     }
 
@@ -104,6 +110,14 @@ impl PlaybackStream {
     #[must_use]
     pub fn with_drm(mut self, drm: DrmInfo) -> Self {
         self.drm = Some(drm);
+        self
+    }
+
+    /// Append `query` to every segment/initialization URL the proxied manifest
+    /// references (see [`segment_query`](Self::segment_query)).
+    #[must_use]
+    pub fn with_segment_query(mut self, query: impl Into<String>) -> Self {
+        self.segment_query = Some(query.into());
         self
     }
 }

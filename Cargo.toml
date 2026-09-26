@@ -17,6 +17,7 @@ members = [
     "crates/vibecast-apps-viaplay",
     "crates/vibecast-apps-primevideo",
     "crates/vibecast-apps-youtube",
+    "crates/vibecast-apps-dazn",
     "crates/vibecast-core",
     "crates/vibecast-receiver",
     "crates/vibecast-platform",

@@ -3153,6 +3153,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "vibecast-apps-dazn"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "vibecast-sdk",
+ "wiremock",
+]
+
+[[package]]
 name = "vibecast-apps-primevideo"
 version = "0.1.0"
 dependencies = [
@@ -3369,6 +3386,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "uuid",
+ "vibecast-apps-dazn",
  "vibecast-apps-primevideo",
  "vibecast-apps-svtplay",
  "vibecast-apps-tv4play",

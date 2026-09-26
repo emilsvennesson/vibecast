@@ -90,6 +90,7 @@ impl AppSession for SvtSession {
                     source: StreamSource::Url(url),
                     content_type,
                     drm,
+                    segment_query: None,
                 },
             )
             .collect();
