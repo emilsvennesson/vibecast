@@ -13,7 +13,8 @@ use tokio::sync::{mpsc, watch};
 use vibecast_sdk::{
     AppContext, AppManifest, AppProvider, AppSession, AppSettingsReader, AppSettingsSchema,
     ChoiceOption, LaunchCredentials, LaunchError, LoadRequest, MediaResolveError,
-    PlaybackController, PlaybackMedia, PlaybackState, SettingDescriptor, SettingScope,
+    MessageDisposition, PlaybackController, PlaybackMedia, PlaybackState, SettingDescriptor,
+    SettingScope,
 };
 
 use lounge::{LoungeCommand, LoungeConnection, LoungeIdentity};
@@ -132,6 +133,7 @@ impl AppSession for YouTubeSession {
             request.current_time,
             &self.capabilities,
             preferred_video_codec,
+            None,
         );
         let prepare = self.sponsorblock.prepare(&video_id, &settings);
         let (media, prepared) = tokio::join!(resolve, prepare);
@@ -142,42 +144,29 @@ impl AppSession for YouTubeSession {
         Ok(media)
     }
 
-    async fn on_sender_connected(&self, ctx: &AppContext, _sender_id: &str) {
-        let ctx = ctx.clone();
-        let mut identity = self.identity.clone();
-        let mut cancel = self.cancel.subscribe();
-        tokio::spawn(async move {
-            loop {
-                let current_identity = { identity.borrow().clone() };
-                if let Some(identity) = current_identity {
-                    ctx.send_custom(
-                        MDX_NAMESPACE,
-                        serde_json::json!({
-                            "type": "mdxSessionStatus",
-                            "data": {
-                                "screenId": identity.screen_id,
-                                "deviceId": identity.device_id,
-                            }
-                        }),
-                    )
-                    .await;
-                    return;
-                }
+    async fn on_message(
+        &self,
+        ctx: &AppContext,
+        namespace: &str,
+        data: &serde_json::Value,
+    ) -> MessageDisposition {
+        if namespace != MDX_NAMESPACE {
+            return MessageDisposition::Unhandled;
+        }
+        // The sender asks for the Lounge it should join; mirror the YouTube TV
+        // receiver's c2n replies (`mdxSessionStatus` / `loungeToken`).
+        let reply: fn(&LoungeIdentity) -> serde_json::Value =
+            match data.get("type").and_then(serde_json::Value::as_str) {
+                Some("getMdxSessionStatus") => mdx_session_status,
+                Some("getLoungeToken") => lounge_token_message,
+                _ => return MessageDisposition::Unhandled,
+            };
+        self.reply_with_identity(ctx, reply);
+        MessageDisposition::Handled
+    }
 
-                tokio::select! {
-                    result = identity.changed() => {
-                        if result.is_err() {
-                            return;
-                        }
-                    }
-                    result = cancel.changed() => {
-                        if result.is_err() || *cancel.borrow() {
-                            return;
-                        }
-                    }
-                }
-            }
-        });
+    async fn on_sender_connected(&self, ctx: &AppContext, _sender_id: &str) {
+        self.reply_with_identity(ctx, mdx_session_status);
     }
 
     async fn on_playback_update(&self, _ctx: &AppContext, state: PlaybackState) {
@@ -196,6 +185,63 @@ impl AppSession for YouTubeSession {
     async fn on_stop(&self, _ctx: &AppContext) {
         let _ = self.cancel.send(true);
     }
+}
+
+impl YouTubeSession {
+    /// Sends `reply(identity)` on the MDX namespace once the Lounge is paired.
+    fn reply_with_identity(
+        &self,
+        ctx: &AppContext,
+        reply: fn(&LoungeIdentity) -> serde_json::Value,
+    ) {
+        let ctx = ctx.clone();
+        let mut identity = self.identity.clone();
+        let mut cancel = self.cancel.subscribe();
+        tokio::spawn(async move {
+            loop {
+                let current_identity = { identity.borrow().clone() };
+                if let Some(identity) = current_identity {
+                    ctx.send_custom(MDX_NAMESPACE, reply(&identity)).await;
+                    return;
+                }
+
+                tokio::select! {
+                    result = identity.changed() => {
+                        if result.is_err() {
+                            return;
+                        }
+                    }
+                    result = cancel.changed() => {
+                        if result.is_err() || *cancel.borrow() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// `mdxSessionStatus` as built by the YouTube TV receiver (`_.SIb`).
+fn mdx_session_status(identity: &LoungeIdentity) -> serde_json::Value {
+    let mut data = serde_json::json!({
+        "screenId": identity.screen_id,
+        "deviceId": identity.device_id,
+        "loungeToken": identity.lounge_token,
+    });
+    if let Some(interval) = identity.refresh_interval_ms {
+        data["loungeTokenRefreshIntervalMs"] = interval.into();
+    }
+    serde_json::json!({ "type": "mdxSessionStatus", "data": data })
+}
+
+/// `loungeToken` as built by the YouTube TV receiver (`_.RIb`).
+fn lounge_token_message(identity: &LoungeIdentity) -> serde_json::Value {
+    let mut data = serde_json::json!({ "loungeToken": identity.lounge_token });
+    if let Some(interval) = identity.refresh_interval_ms {
+        data["loungeTokenRefreshIntervalMs"] = interval.into();
+    }
+    serde_json::json!({ "type": "loungeToken", "data": data })
 }
 
 async fn run_lounge(
@@ -231,8 +277,9 @@ async fn run_lounge(
         }
     };
 
-    let _ = identity_tx.send(Some(lounge.identity()));
-    lounge.run(command_tx, playback_rx, cancel).await;
+    lounge
+        .run(command_tx, playback_rx, identity_tx, cancel)
+        .await;
 }
 
 #[derive(Default)]
@@ -240,6 +287,7 @@ struct QueueState {
     video_ids: Vec<String>,
     current_index: usize,
     list_id: Option<String>,
+    ctt: Option<String>,
     next_pending: bool,
 }
 
@@ -273,8 +321,11 @@ async fn run_commands(
                 current_index,
                 current_time,
                 list_id,
+                ctt,
+                ..
             } => {
                 queue.video_ids = video_ids;
+                queue.ctt = ctt;
                 queue.current_index = current_index.min(queue.video_ids.len().saturating_sub(1));
                 queue.list_id = list_id;
                 queue.next_pending = false;
@@ -345,8 +396,13 @@ async fn run_commands(
         if let Some((video_id, start_time)) = load {
             let snapshot = settings.snapshot();
             let preferred_video_codec = PreferredVideoCodec::from_snapshot(&snapshot);
-            let resolve =
-                resolver.resolve(&video_id, start_time, &capabilities, preferred_video_codec);
+            let resolve = resolver.resolve(
+                &video_id,
+                start_time,
+                &capabilities,
+                preferred_video_codec,
+                queue.ctt.as_deref(),
+            );
             let prepare = sponsorblock.prepare(&video_id, &snapshot);
             let (media, prepared) = tokio::join!(resolve, prepare);
             match media {
@@ -509,6 +565,96 @@ mod tests {
         assert_eq!(
             *playback.operations.lock().unwrap(),
             ["pause", "seek:42", "play", "stop"]
+        );
+    }
+
+    struct RecordingSender(mpsc::UnboundedSender<serde_json::Value>);
+
+    #[async_trait]
+    impl vibecast_sdk::SenderChannel for RecordingSender {
+        async fn send_custom(&self, _namespace: &str, data: serde_json::Value) {
+            let _ = self.0.send(data);
+        }
+        async fn broadcast_custom(&self, _namespace: &str, data: serde_json::Value) {
+            let _ = self.0.send(data);
+        }
+    }
+
+    #[tokio::test]
+    async fn mdx_requests_are_answered_with_the_lounge_token() {
+        let (identity_tx, identity) = watch::channel(None);
+        let (playback_tx, _playback_rx) = mpsc::channel(1);
+        let (cancel, _) = watch::channel(false);
+        let session = YouTubeSession {
+            resolver: Resolver::new(reqwest::Client::new()),
+            capabilities: vibecast_sdk::PlayerCapabilities::default(),
+            identity,
+            playback_tx,
+            playback: Arc::new(RecordingPlayback::default()),
+            sponsorblock: SponsorBlock::new(reqwest::Client::new()),
+            cancel,
+        };
+        let (sent_tx, mut sent) = mpsc::unbounded_channel();
+        let ctx = vibecast_sdk::AppContext::new(
+            "session",
+            "transport",
+            APP_IDS[0],
+            reqwest::Client::new(),
+            vibecast_sdk::ReceiverContext::new(
+                "YouTube test",
+                "Test",
+                "test-device",
+                std::path::PathBuf::new(),
+            ),
+            Arc::new(RecordingSender(sent_tx)),
+        );
+
+        // Requests before pairing are answered once the Lounge identity exists.
+        let status_request = serde_json::json!({"type": "getMdxSessionStatus"});
+        assert_eq!(
+            session
+                .on_message(&ctx, MDX_NAMESPACE, &status_request)
+                .await,
+            MessageDisposition::Handled
+        );
+        identity_tx
+            .send(Some(LoungeIdentity {
+                screen_id: "screen".into(),
+                device_id: "device".into(),
+                lounge_token: "token".into(),
+                refresh_interval_ms: Some(1_123_200_000),
+            }))
+            .unwrap();
+        assert_eq!(
+            sent.recv().await.unwrap(),
+            serde_json::json!({
+                "type": "mdxSessionStatus",
+                "data": {
+                    "screenId": "screen",
+                    "deviceId": "device",
+                    "loungeToken": "token",
+                    "loungeTokenRefreshIntervalMs": 1_123_200_000u64,
+                }
+            })
+        );
+
+        let token_request = serde_json::json!({"type": "getLoungeToken"});
+        session
+            .on_message(&ctx, MDX_NAMESPACE, &token_request)
+            .await;
+        assert_eq!(
+            sent.recv().await.unwrap(),
+            serde_json::json!({
+                "type": "loungeToken",
+                "data": {"loungeToken": "token", "loungeTokenRefreshIntervalMs": 1_123_200_000u64}
+            })
+        );
+
+        assert_eq!(
+            session
+                .on_message(&ctx, CUSTOM_DATA_NAMESPACE, &token_request)
+                .await,
+            MessageDisposition::Unhandled
         );
     }
 

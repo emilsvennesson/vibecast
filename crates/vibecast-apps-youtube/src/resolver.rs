@@ -94,6 +94,7 @@ impl Resolver {
         start_time: f64,
         capabilities: &PlayerCapabilities,
         preferred_video_codec: PreferredVideoCodec,
+        credential_transfer_token: Option<&str>,
     ) -> Result<PlaybackMedia, ResolveError> {
         let mut player_url = Url::parse(&self.endpoints.player)
             .map_err(|_| ResolveError::Protocol("invalid player endpoint"))?;
@@ -106,7 +107,7 @@ impl Resolver {
             .header("User-Agent", CLIENT_USER_AGENT)
             .header("X-YouTube-Client-Name", CLIENT_NAME_HEADER)
             .header("X-YouTube-Client-Version", CLIENT_VERSION)
-            .json(&PlayerRequest::new(video_id))
+            .json(&PlayerRequest::new(video_id, credential_transfer_token))
             .send()
             .await?
             .error_for_status()?
@@ -142,11 +143,11 @@ pub(crate) enum ResolveError {
 struct PlayerRequest<'a> {
     #[serde(rename = "videoId")]
     video_id: &'a str,
-    context: RequestContext,
+    context: RequestContext<'a>,
 }
 
 impl<'a> PlayerRequest<'a> {
-    fn new(video_id: &'a str) -> Self {
+    fn new(video_id: &'a str, credential_transfer_token: Option<&'a str>) -> Self {
         Self {
             video_id,
             context: RequestContext {
@@ -159,14 +160,37 @@ impl<'a> PlayerRequest<'a> {
                     os_version: "14",
                     android_sdk_version: 34,
                 },
+                user: credential_transfer_token.map(|token| UserContext {
+                    credential_transfer_tokens: [CredentialTransferToken {
+                        token,
+                        scope: "VIDEO",
+                    }],
+                }),
             },
         }
     }
 }
 
 #[derive(Serialize)]
-struct RequestContext {
+struct RequestContext<'a> {
     client: ClientContext,
+    /// The sender's credential transfer token (`ctt` from Lounge `setPlaylist`).
+    /// Anonymous requests are often bot-checked (`LOGIN_REQUIRED`); vouching
+    /// with the casting user's token is what a real Cast receiver does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user: Option<UserContext<'a>>,
+}
+
+#[derive(Serialize)]
+struct UserContext<'a> {
+    #[serde(rename = "credentialTransferTokens")]
+    credential_transfer_tokens: [CredentialTransferToken<'a>; 1],
+}
+
+#[derive(Serialize)]
+struct CredentialTransferToken<'a> {
+    token: &'a str,
+    scope: &'static str,
 }
 
 #[derive(Serialize)]
@@ -1106,7 +1130,7 @@ fn valid_video_id(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
@@ -1615,7 +1639,13 @@ mod tests {
         let mut capabilities = caps(&["av1", "vp9", "h264"], &["opus", "aac"], &[], (3840, 2160));
         capabilities.subtitle_formats = vec!["vtt".into()];
         let media = resolver
-            .resolve("dQw4w9WgXcQ", 12.5, &capabilities, PreferredVideoCodec::Vp9)
+            .resolve(
+                "dQw4w9WgXcQ",
+                12.5,
+                &capabilities,
+                PreferredVideoCodec::Vp9,
+                None,
+            )
             .await
             .unwrap();
 
@@ -1659,9 +1689,41 @@ mod tests {
                 0.0,
                 &PlayerCapabilities::default(),
                 PreferredVideoCodec::Auto,
+                None,
             )
             .await
             .unwrap_err();
         assert!(matches!(error, ResolveError::Unplayable(reason) if reason.contains("bot")));
+    }
+
+    #[tokio::test]
+    async fn resolve_vouches_with_the_senders_credential_transfer_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/youtubei/v1/player"))
+            .and(body_partial_json(serde_json::json!({
+                "context": {"user": {"credentialTransferTokens": [
+                    {"token": "ctt-token", "scope": "VIDEO"}
+                ]}}
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "playabilityStatus": {"status": "OK"},
+                "streamingData": {"adaptiveFormats": adaptive_formats()}
+            })))
+            .mount(&server)
+            .await;
+
+        let resolver = Resolver::with_endpoints(reqwest::Client::new(), &server.uri());
+        let capabilities = caps(&["vp9"], &["opus"], &[], (1920, 1080));
+        resolver
+            .resolve(
+                "dQw4w9WgXcQ",
+                0.0,
+                &capabilities,
+                PreferredVideoCodec::Auto,
+                Some("ctt-token"),
+            )
+            .await
+            .unwrap();
     }
 }
