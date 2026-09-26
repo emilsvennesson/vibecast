@@ -136,7 +136,9 @@ impl AppSession for YouTubeSession {
         let prepare = self.sponsorblock.prepare(&video_id, &settings);
         let (media, prepared) = tokio::join!(resolve, prepare);
         let media = media.map_err(map_resolve_error)?;
-        self.sponsorblock.activate(prepared).await;
+        self.sponsorblock
+            .activate(prepared, request.current_time)
+            .await;
         Ok(media)
     }
 
@@ -349,7 +351,7 @@ async fn run_commands(
             let (media, prepared) = tokio::join!(resolve, prepare);
             match media {
                 Ok(media) => {
-                    sponsorblock.activate(prepared).await;
+                    sponsorblock.activate(prepared, start_time).await;
                     playback.load(media).await;
                 }
                 Err(error) => {

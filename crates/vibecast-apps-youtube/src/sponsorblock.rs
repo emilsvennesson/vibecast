@@ -218,24 +218,24 @@ impl SponsorBlock {
         }
     }
 
-    pub(crate) async fn activate(&self, prepared: PreparedSegments) {
-        *self.active.lock().await = ActiveVideo {
-            segments: prepared.segments,
-            last_playback: None,
-        };
+    pub(crate) async fn activate(&self, prepared: PreparedSegments, start_time: f64) {
+        *self.active.lock().await = ActiveVideo::new(prepared.segments, start_time);
     }
 
     #[cfg(test)]
     pub(crate) async fn activate_for_test(&self, segments: &[(f64, f64)]) {
-        self.activate(PreparedSegments {
-            segments: segments
-                .iter()
-                .map(|(start, end)| Segment {
-                    start: *start,
-                    end: *end,
-                })
-                .collect(),
-        })
+        self.activate(
+            PreparedSegments {
+                segments: segments
+                    .iter()
+                    .map(|(start, end)| Segment {
+                        start: *start,
+                        end: *end,
+                    })
+                    .collect(),
+            },
+            0.0,
+        )
         .await;
     }
 
@@ -309,9 +309,27 @@ impl PreparedSegments {
 struct ActiveVideo {
     segments: Vec<Segment>,
     last_playback: Option<PlaybackSample>,
+    /// Position treated as "before" the first playing sample, consumed once so
+    /// segments at the very start (e.g. intros at 0) are still skipped.
+    start_floor: Option<f64>,
 }
 
 impl ActiveVideo {
+    fn new(segments: Vec<Segment>, start_time: f64) -> Self {
+        // Playing from the beginning skips a segment starting at 0, while
+        // resuming inside a segment is respected.
+        let start_floor = if start_time > 0.0 {
+            start_time
+        } else {
+            f64::NEG_INFINITY
+        };
+        Self {
+            segments,
+            last_playback: None,
+            start_floor: Some(start_floor),
+        }
+    }
+
     fn skip_target(
         &mut self,
         player_state: PlayerState,
@@ -322,23 +340,31 @@ impl ActiveVideo {
             player_state,
             current_time,
             observed_at,
-        })?;
-        if player_state != PlayerState::Playing || previous.player_state != PlayerState::Playing {
+        });
+        if player_state != PlayerState::Playing {
             return None;
         }
 
-        let media_elapsed = current_time - previous.current_time;
-        let wall_elapsed = observed_at
-            .saturating_duration_since(previous.observed_at)
-            .as_secs_f64();
-        if media_elapsed < 0.0 || media_elapsed > wall_elapsed + PLAYBACK_DRIFT_TOLERANCE_SECONDS {
-            return None;
-        }
+        let previous_time = match previous {
+            Some(previous) if previous.player_state == PlayerState::Playing => {
+                let media_elapsed = current_time - previous.current_time;
+                let wall_elapsed = observed_at
+                    .saturating_duration_since(previous.observed_at)
+                    .as_secs_f64();
+                if media_elapsed < 0.0
+                    || media_elapsed > wall_elapsed + PLAYBACK_DRIFT_TOLERANCE_SECONDS
+                {
+                    return None;
+                }
+                previous.current_time
+            }
+            _ => self.start_floor.take()?,
+        };
 
         self.segments
             .iter()
             .find(|segment| {
-                previous.current_time < segment.start
+                previous_time < segment.start
                     && current_time >= segment.start
                     && current_time < segment.end
             })
@@ -584,7 +610,7 @@ mod tests {
         );
 
         let prepared = sponsorblock.prepare("dQw4w9WgXcQ", &empty_snapshot()).await;
-        sponsorblock.activate(prepared).await;
+        sponsorblock.activate(prepared, 0.0).await;
 
         assert_eq!(
             sponsorblock.skip_target(PlayerState::Playing, 12.0).await,
@@ -619,7 +645,7 @@ mod tests {
             let prepared = sponsorblock
                 .prepare_with_config("dQw4w9WgXcQ", &config)
                 .await;
-            sponsorblock.activate(prepared).await;
+            sponsorblock.activate(prepared, 0.0).await;
             assert_eq!(
                 sponsorblock.skip_target(PlayerState::Playing, 12.0).await,
                 None
@@ -627,14 +653,18 @@ mod tests {
         }
     }
 
-    fn active_video() -> ActiveVideo {
-        ActiveVideo {
-            segments: vec![Segment {
+    fn segment_video(start_time: f64) -> ActiveVideo {
+        ActiveVideo::new(
+            vec![Segment {
                 start: 10.0,
                 end: 20.0,
             }],
-            last_playback: None,
-        }
+            start_time,
+        )
+    }
+
+    fn active_video() -> ActiveVideo {
+        segment_video(0.0)
     }
 
     #[test]
@@ -706,7 +736,11 @@ mod tests {
             None
         );
 
-        let mut active = active_video();
+        let mut active = segment_video(12.0);
+        assert_eq!(
+            active.skip_target(PlayerState::Buffering, 12.0, started_at),
+            None
+        );
         assert_eq!(
             active.skip_target(PlayerState::Playing, 12.0, started_at),
             None
@@ -716,6 +750,48 @@ mod tests {
                 PlayerState::Playing,
                 13.0,
                 started_at + Duration::from_secs(1)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn segment_at_the_start_is_skipped_once_playback_begins() {
+        let started_at = Instant::now();
+        let mut active = ActiveVideo::new(
+            vec![Segment {
+                start: 0.0,
+                end: 8.0,
+            }],
+            0.0,
+        );
+
+        assert_eq!(
+            active.skip_target(PlayerState::Buffering, 0.0, started_at),
+            None
+        );
+        assert_eq!(
+            active.skip_target(
+                PlayerState::Playing,
+                0.4,
+                started_at + Duration::from_millis(500)
+            ),
+            Some(8.0)
+        );
+        // Seeking back into the segment afterwards is respected.
+        assert_eq!(
+            active.skip_target(
+                PlayerState::Paused,
+                2.0,
+                started_at + Duration::from_secs(5)
+            ),
+            None
+        );
+        assert_eq!(
+            active.skip_target(
+                PlayerState::Playing,
+                2.0,
+                started_at + Duration::from_secs(6)
             ),
             None
         );
