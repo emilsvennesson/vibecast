@@ -133,7 +133,6 @@ impl AppSession for YouTubeSession {
             request.current_time,
             &self.capabilities,
             preferred_video_codec,
-            None,
         );
         let prepare = self.sponsorblock.prepare(&video_id, &settings);
         let (media, prepared) = tokio::join!(resolve, prepare);
@@ -287,7 +286,6 @@ struct QueueState {
     video_ids: Vec<String>,
     current_index: usize,
     list_id: Option<String>,
-    ctt: Option<String>,
     next_pending: bool,
 }
 
@@ -321,11 +319,9 @@ async fn run_commands(
                 current_index,
                 current_time,
                 list_id,
-                ctt,
                 ..
             } => {
                 queue.video_ids = video_ids;
-                queue.ctt = ctt;
                 queue.current_index = current_index.min(queue.video_ids.len().saturating_sub(1));
                 queue.list_id = list_id;
                 queue.next_pending = false;
@@ -396,13 +392,8 @@ async fn run_commands(
         if let Some((video_id, start_time)) = load {
             let snapshot = settings.snapshot();
             let preferred_video_codec = PreferredVideoCodec::from_snapshot(&snapshot);
-            let resolve = resolver.resolve(
-                &video_id,
-                start_time,
-                &capabilities,
-                preferred_video_codec,
-                queue.ctt.as_deref(),
-            );
+            let resolve =
+                resolver.resolve(&video_id, start_time, &capabilities, preferred_video_codec);
             let prepare = sponsorblock.prepare(&video_id, &snapshot);
             let (media, prepared) = tokio::join!(resolve, prepare);
             match media {
