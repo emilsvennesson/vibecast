@@ -11,7 +11,7 @@
 //! ports); certificate rotation is intentionally *not* owned here (the active
 //! certificate is shared across receivers) — instead each receiver exposes a
 //! [`RotationHandle`] so a single external rotation loop can hot-swap the
-//! device-auth material and advertised digest of every receiver.
+//! device-auth material of every receiver.
 
 #![forbid(unsafe_code)]
 
@@ -101,29 +101,17 @@ pub enum ReceiverError {
     },
 }
 
-/// Bundles the portable advertisement identity with the optional live mDNS
-/// responder driving it.
+/// The optional live mDNS responder advertising this receiver.
 ///
-/// The identity is always present — its TXT/instance are reported to a frontend
-/// that owns discovery. The responder exists only when this build both compiles
-/// the `mdns` feature and was asked to advertise from Rust.
+/// The responder exists only when this build both compiles the `mdns` feature
+/// and was asked to advertise from Rust; otherwise a frontend that owns
+/// discovery registers the reported instance/TXT itself.
 struct Advertiser {
-    advertisement: CastAdvertisement,
     #[cfg(feature = "mdns")]
     responder: Option<vibecast_discovery::MdnsResponder>,
 }
 
 impl Advertiser {
-    /// Re-announce after the advertisement's TXT changed, if a responder is live.
-    fn refresh(&mut self) {
-        #[cfg(feature = "mdns")]
-        if let Some(responder) = &mut self.responder {
-            if let Err(error) = responder.refresh(&self.advertisement) {
-                tracing::error!(%error, "failed to re-announce mDNS advertisement");
-            }
-        }
-    }
-
     /// Stop advertising (a no-op without a live responder).
     fn stop(&mut self) {
         #[cfg(feature = "mdns")]
@@ -138,22 +126,12 @@ impl Advertiser {
 #[derive(Clone)]
 pub struct RotationHandle {
     cast_server: Arc<CastServer>,
-    advertiser: Arc<tokio::sync::Mutex<Advertiser>>,
 }
 
 impl RotationHandle {
     /// Hot-swap the device-auth material for future connections.
     pub fn update_auth(&self, auth: AuthMaterial) {
         self.cast_server.update_auth(auth);
-    }
-
-    /// Update the advertised certificate digest; returns the new TXT pairs.
-    pub async fn update_cert_digest(&self, digest: &str) -> Vec<(String, String)> {
-        let mut advertiser = self.advertiser.lock().await;
-        if advertiser.advertisement.update_cert_digest(digest) {
-            advertiser.refresh();
-        }
-        txt_pairs(&advertiser.advertisement)
     }
 }
 
@@ -182,7 +160,6 @@ impl RunningReceiver {
     pub fn rotation_handle(&self) -> RotationHandle {
         RotationHandle {
             cast_server: self.cast_server.clone(),
-            advertiser: self.advertiser.clone(),
         }
     }
 
@@ -376,13 +353,7 @@ pub async fn spawn(params: ReceiverParams) -> Result<RunningReceiver, ReceiverEr
     // Advertisement identity is always computed (its instance/TXT are reported
     // to a frontend that owns discovery). The mDNS responder is only started
     // when this build compiles the `mdns` feature and was asked to advertise.
-    let advertisement = CastAdvertisement::new(
-        &adv_name,
-        &adv_model,
-        &adv_id,
-        cast_port,
-        &bundle.cert_digest_md5(),
-    );
+    let advertisement = CastAdvertisement::new(&adv_name, &adv_model, &adv_id, cast_port);
 
     #[cfg(feature = "mdns")]
     let responder = if advertise_mdns {
@@ -401,7 +372,6 @@ pub async fn spawn(params: ReceiverParams) -> Result<RunningReceiver, ReceiverEr
     let instance_name = advertisement.instance().to_string();
     let txt = txt_pairs(&advertisement);
     let advertiser = Arc::new(tokio::sync::Mutex::new(Advertiser {
-        advertisement,
         #[cfg(feature = "mdns")]
         responder,
     }));

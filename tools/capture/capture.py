@@ -544,7 +544,7 @@ async def amain(args: argparse.Namespace) -> None:
     )
 
     advertiser = vc.CastAdvertiser.start(
-        friendly_name, args.model, device_id, args.listen_port, bundle.cert_digest_md5()
+        friendly_name, args.model, device_id, args.listen_port
     )
     print(f'mDNS: advertising "{friendly_name}" (model {args.model})')
 

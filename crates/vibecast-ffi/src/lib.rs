@@ -129,8 +129,8 @@ pub enum CallbackError {
 }
 
 /// Rust → native events. The frontend implements this to register each player's
-/// Cast receiver over discovery (Android `NsdManager`), re-register on
-/// certificate rotation, and drive its UI/service state.
+/// Cast receiver over discovery (Android `NsdManager`) and drive its
+/// UI/service state.
 ///
 /// Every callback is per-player: one physical player (browser / Kodi) that
 /// registers over the bridge becomes one advertised Cast device.
@@ -139,12 +139,6 @@ pub trait ReceiverObserver: Send + Sync {
     /// A player registered and its receiver bound ports; register it for
     /// discovery under `name` (already suffixed `... [vibecast]`).
     fn on_player_started(&self, started: PlayerStartedInfo) -> Result<(), CallbackError>;
-    /// A player's advertised TXT record changed (certificate rotation).
-    fn on_player_txt_changed(
-        &self,
-        player_id: String,
-        txt: Vec<TxtEntry>,
-    ) -> Result<(), CallbackError>;
     /// A player disconnected; unregister its receiver from discovery.
     fn on_player_stopped(&self, player_id: String) -> Result<(), CallbackError>;
     /// A non-fatal error occurred after startup.
@@ -168,15 +162,6 @@ impl PlayerObserver for ForeignObserver {
         };
         if let Err(error) = self.inner.on_player_started(started) {
             tracing::warn!(%error, "observer.on_player_started failed");
-        }
-    }
-
-    fn on_player_txt_changed(&self, player_id: &str, txt: Vec<(String, String)>) {
-        if let Err(error) = self
-            .inner
-            .on_player_txt_changed(player_id.to_string(), to_txt_entries(txt))
-        {
-            tracing::warn!(%error, "observer.on_player_txt_changed failed");
         }
     }
 
