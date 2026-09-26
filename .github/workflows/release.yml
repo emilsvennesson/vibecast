@@ -173,7 +173,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
       - name: Install SDK packages (NDK r28 + platform/build-tools 36)
         run: |
           sdkmanager "ndk;28.2.13676358" "platforms;android-36" "build-tools;36.0.0"
