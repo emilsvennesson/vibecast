@@ -52,6 +52,7 @@ Build, CI, and release details live in [`docs/ci-cd.md`](docs/ci-cd.md).
 | Viaplay | Device-code auth, Widevine |
 | Prime Video | Custom Widevine license flow, VOD + live |
 | YouTube | Lounge control, generated DASH manifests, per-player codec preference |
+| DAZN | `urn:x-cast:DAZN` session/playback control, Widevine, per-player quality (auto / highest) |
 
 ## Configuration
 

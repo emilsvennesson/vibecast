@@ -50,4 +50,4 @@ regardless, so they rarely matter.
 - `receiver_url` is the web receiver a Chromecast-class device loads to run the
   app — the starting point if you ever want vibecast to host that receiver.
 - Some known appIds: `CC1AD845` Default Media Receiver, `233637DE` YouTube,
-  `CA5E8412` Netflix, `6313CF39` Viaplay, `95370A1C` SVT Play.
+  `CA5E8412` Netflix, `6313CF39` Viaplay, `95370A1C` SVT Play, `E1DE188D` DAZN.

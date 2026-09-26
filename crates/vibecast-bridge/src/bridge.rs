@@ -748,6 +748,7 @@ async fn manifest_handler(
     method: Method,
     Path((session_id, route_path)): Path<(String, String)>,
     State(state): State<BridgeState>,
+    Query(params): Query<HashMap<String, String>>,
     request_headers: HeaderMap,
 ) -> Response {
     let Some(handler) = state.manifest_handler(&session_id) else {
@@ -765,6 +766,7 @@ async fn manifest_handler(
         route_id,
         method,
         headers: filter_upstream_headers(&request_headers),
+        child: params.get("child").and_then(|raw| raw.parse().ok()),
     };
 
     match handler.handle_manifest(request).await {
@@ -827,6 +829,7 @@ mod tests {
                 url: "https://example.com/manifest.mpd".into(),
                 content_type: "application/dash+xml".into(),
                 drm: None,
+                headers: Default::default(),
             }],
             stream_type: StreamType::Buffered,
             ..Default::default()

@@ -17,6 +17,7 @@ members = [
     "crates/vibecast-apps-viaplay",
     "crates/vibecast-apps-primevideo",
     "crates/vibecast-apps-youtube",
+    "crates/vibecast-apps-dazn",
     "crates/vibecast-core",
     "crates/vibecast-receiver",
     "crates/vibecast-platform",
@@ -107,6 +108,14 @@ tracing-logcat = "0.1"
 proptest = "1"
 rcgen = "0.13"
 tower = "0.5"
+
+# Keep dev/test builds lean on disk: full debuginfo dominates `target/` size.
+# Line tables still give file:line in panics/backtraces; dependencies get none.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
 
 [profile.release]
 strip = true

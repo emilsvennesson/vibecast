@@ -52,6 +52,10 @@ pub struct PlaybackStreamPayload {
     /// DRM configuration, if the stream is protected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drm: Option<DrmPayload>,
+    /// HTTP headers the player must send on the stream's media (segment)
+    /// requests. The manifest is fetched through the proxy, which applies them.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub headers: HashMap<String, String>,
 }
 
 /// Media description carried by a `load` command.
@@ -429,6 +433,7 @@ mod tests {
                     url: "https://example.com/manifest.mpd".into(),
                     content_type: "application/dash+xml".into(),
                     drm: None,
+                    headers: HashMap::new(),
                 }],
                 stream_type: StreamType::Buffered,
                 ..Default::default()
@@ -444,8 +449,21 @@ mod tests {
         );
         assert_eq!(value["media"]["autoplay"], true);
         assert_eq!(value["media"]["startTime"], 0.0);
-        // drm omitted when absent
+        // drm and headers omitted when absent
         assert!(value["media"]["streams"][0].get("drm").is_none());
+        assert!(value["media"]["streams"][0].get("headers").is_none());
+    }
+
+    #[test]
+    fn stream_headers_are_serialized_for_players() {
+        let stream = PlaybackStreamPayload {
+            url: "https://example.com/manifest.mpd".into(),
+            content_type: "application/dash+xml".into(),
+            drm: None,
+            headers: HashMap::from([("User-Agent".to_string(), "Agent/1".to_string())]),
+        };
+        let value = serde_json::to_value(&stream).unwrap();
+        assert_eq!(value["headers"], json!({"User-Agent": "Agent/1"}));
     }
 
     #[test]

@@ -270,6 +270,8 @@ impl AppSession for ViaplaySession {
                     source: StreamSource::Url(url.to_string()),
                     content_type: stream_info.content_type.clone(),
                     drm: drm.clone(),
+                    segment_query: None,
+                    request_headers: Default::default(),
                 });
             }
         };

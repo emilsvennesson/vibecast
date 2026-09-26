@@ -58,6 +58,7 @@ KNOWN_APPS: dict[str, str] = {
     "CA5E8412": "Netflix",
     "6313CF39": "Viaplay",
     "95370A1C": "SVT Play",
+    "E1DE188D": "DAZN",
 }
 
 

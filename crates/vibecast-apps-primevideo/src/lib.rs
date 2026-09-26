@@ -294,6 +294,8 @@ impl AppSession for PrimeSession {
                 source: StreamSource::Url(self.api.with_device_type_query(&url)),
                 content_type: "application/dash+xml".to_string(),
                 drm: Some(drm.clone()),
+                segment_query: None,
+                request_headers: Default::default(),
             })
             .collect();
 

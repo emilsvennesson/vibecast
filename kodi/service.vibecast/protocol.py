@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlencode
 
 
 PLAYBACK_MESSAGE_TYPES = frozenset({"load", "play", "pause", "seek", "stop", "volume"})
@@ -35,6 +36,23 @@ def decode_server_message(message: str) -> ServerMessage:
         raise ProtocolError("message type must be a non-empty string")
 
     return ServerMessage(message_type=message_type, payload=payload)
+
+
+def stream_request_headers(stream: dict[str, Any]) -> str:
+    """Encode a load stream's required request headers for inputstream.adaptive.
+
+    Returns the URL-encoded ``name=value&...`` form ISA expects for its
+    ``manifest_headers``/``stream_headers`` properties, or ``""`` when none.
+    """
+    raw = stream.get("headers")
+    if not isinstance(raw, dict):
+        return ""
+    headers = {
+        key: value
+        for key, value in raw.items()
+        if isinstance(key, str) and key and isinstance(value, str) and value
+    }
+    return urlencode(headers)
 
 
 def registration_message(
