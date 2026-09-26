@@ -30,6 +30,8 @@ pub(crate) enum LoungeCommand {
     Pause,
     Seek(f64),
     Next,
+    Previous,
+    Stop,
 }
 
 pub(crate) struct LoungeConnection {
@@ -40,6 +42,7 @@ pub(crate) struct LoungeConnection {
     device_id: String,
     discovery_device_id: String,
     current: CurrentMedia,
+    pending_incoming: Vec<Incoming>,
 }
 
 #[derive(Clone)]
@@ -131,7 +134,7 @@ impl LoungeConnection {
             &device_id,
             receiver,
         )?;
-        let bound = initial_bind(&http, &bind_url).await?;
+        let (bound, pending_incoming) = initial_bind(&http, &bind_url).await?;
 
         Ok(Self {
             http,
@@ -141,6 +144,7 @@ impl LoungeConnection {
             device_id,
             discovery_device_id: cast_cloud_device_id(&receiver.device_id),
             current: CurrentMedia::default(),
+            pending_incoming,
         })
     }
 
@@ -180,7 +184,10 @@ impl LoungeConnection {
             }
 
             match initial_bind(&self.http, &self.bind_url).await {
-                Ok(bound) => self.bound = bound,
+                Ok((bound, pending)) => {
+                    self.bound = bound;
+                    self.pending_incoming = pending;
+                }
                 Err(error) => {
                     tracing::warn!(%error, "YouTube Lounge rebind failed");
                 }
@@ -195,6 +202,14 @@ impl LoungeConnection {
         cancel: &mut watch::Receiver<bool>,
     ) -> Result<(), LoungeError> {
         self.post(Outbound::NowPlaying).await?;
+
+        // The server delivers loungeStatus/getNowPlaying/getDiscoveryDeviceId inside the
+        // bind response and never resends them, so drain those before the poll loop.
+        for incoming in std::mem::take(&mut self.pending_incoming) {
+            if self.dispatch(&incoming, command_tx).await?.is_break() {
+                return Ok(());
+            }
+        }
 
         loop {
             let poll = poll_commands(&self.http, &self.bind_url, &self.bound);
@@ -217,18 +232,29 @@ impl LoungeConnection {
                     };
                     self.bound.aid = self.bound.aid.max(batch.aid);
                     for incoming in batch.messages {
-                        if let Some(outbound) = self.handle_internal(&incoming) {
-                            self.post(outbound).await?;
-                        }
-                        if let Incoming::Command(command) = incoming {
-                            if command_tx.send(command).await.is_err() {
-                                return Ok(());
-                            }
+                        if self.dispatch(&incoming, command_tx).await?.is_break() {
+                            return Ok(());
                         }
                     }
                 }
             }
         }
+    }
+
+    async fn dispatch(
+        &mut self,
+        incoming: &Incoming,
+        command_tx: &mpsc::Sender<LoungeCommand>,
+    ) -> Result<std::ops::ControlFlow<()>, LoungeError> {
+        if let Some(outbound) = self.handle_internal(incoming) {
+            self.post(outbound).await?;
+        }
+        if let Incoming::Command(command) = incoming {
+            if command_tx.send(command.clone()).await.is_err() {
+                return Ok(std::ops::ControlFlow::Break(()));
+            }
+        }
+        Ok(std::ops::ControlFlow::Continue(()))
     }
 
     fn handle_internal(&mut self, incoming: &Incoming) -> Option<Outbound> {
@@ -280,6 +306,19 @@ impl LoungeConnection {
                     Some(Outbound::NowPlaying)
                 } else {
                     self.current.next_pending = true;
+                    None
+                }
+            }
+            Incoming::Command(LoungeCommand::Previous) => {
+                if self.current.current_index > 0 {
+                    self.current.current_index -= 1;
+                    self.current.video_id = self
+                        .current
+                        .video_ids
+                        .get(self.current.current_index)
+                        .cloned();
+                    Some(Outbound::NowPlaying)
+                } else {
                     None
                 }
             }
@@ -408,7 +447,10 @@ fn append_state_fields(
         );
 }
 
-async fn initial_bind(http: &reqwest::Client, bind_url: &Url) -> Result<BoundSession, LoungeError> {
+async fn initial_bind(
+    http: &reqwest::Client,
+    bind_url: &Url,
+) -> Result<(BoundSession, Vec<Incoming>), LoungeError> {
     let mut url = bind_url.clone();
     url.query_pairs_mut()
         .append_pair("RID", "1")
@@ -428,11 +470,12 @@ async fn initial_bind(http: &reqwest::Client, bind_url: &Url) -> Result<BoundSes
     parse_initial_bind(&bytes)
 }
 
-fn parse_initial_bind(bytes: &[u8]) -> Result<BoundSession, LoungeError> {
+fn parse_initial_bind(bytes: &[u8]) -> Result<(BoundSession, Vec<Incoming>), LoungeError> {
     let frames = decode_frames(bytes)?;
     let mut sid = None;
     let mut gsession_id = None;
     let mut aid = 0;
+    let mut messages = Vec::new();
     for frame in frames {
         let Some(entries) = frame.as_array() else {
             continue;
@@ -450,17 +493,20 @@ fn parse_initial_bind(bytes: &[u8]) -> Result<BoundSession, LoungeError> {
                 Some("S") => {
                     gsession_id = message.get(1).and_then(Value::as_str).map(str::to_string)
                 }
-                _ => {}
+                // The server embeds initial control messages (loungeStatus, getNowPlaying,
+                // getDiscoveryDeviceId) in the bind response and never resends them.
+                _ => messages.push(parse_message(message)),
             }
         }
     }
-    Ok(BoundSession {
+    let bound = BoundSession {
         sid: sid.ok_or(LoungeError::Protocol("initial bind omitted SID"))?,
         gsession_id: gsession_id.ok_or(LoungeError::Protocol("initial bind omitted gsessionid"))?,
         aid,
         rid: 1,
         ofs: 0,
-    })
+    };
+    Ok((bound, messages))
 }
 
 async fn poll_commands(
@@ -540,10 +586,11 @@ fn parse_message(message: &[Value]) -> Incoming {
         "play" => Some(LoungeCommand::Play),
         "pause" => Some(LoungeCommand::Pause),
         "next" => Some(LoungeCommand::Next),
-        "seekTo" => params
-            .and_then(|value| value.get("newTime"))
-            .and_then(value_as_f64)
-            .map(LoungeCommand::Seek),
+        "previous" => Some(LoungeCommand::Previous),
+        "stopVideo" => Some(LoungeCommand::Stop),
+        // Matches the TV client: parseFloat(currentTime || newTime), clamping
+        // NaN/negative to 0 (`b=isNaN(b)||b<0?void 0:b;this.player.seekTo(b||0)`).
+        "seekTo" => Some(LoungeCommand::Seek(parse_seek_time(params))),
         _ => None,
     };
     if let Some(command) = command {
@@ -553,7 +600,7 @@ fn parse_message(message: &[Value]) -> Incoming {
         "getNowPlaying" => Incoming::GetNowPlaying,
         "getPlaybackSpeed" => Incoming::GetPlaybackSpeed,
         "getVolume" => Incoming::GetVolume,
-        "onSetDiscoveryDeviceId" => Incoming::SetDiscoveryDeviceId,
+        "getDiscoveryDeviceId" => Incoming::SetDiscoveryDeviceId,
         _ => Incoming::Ignored,
     }
 }
@@ -606,6 +653,16 @@ fn parse_update_playlist(params: Option<&Value>) -> Option<LoungeCommand> {
             .and_then(Value::as_str)
             .map(str::to_string),
     })
+}
+
+fn parse_seek_time(params: Option<&Value>) -> f64 {
+    let time = params
+        .and_then(|value| value.get("currentTime").or_else(|| value.get("newTime")))
+        .and_then(value_as_f64);
+    match time {
+        Some(time) if time >= 0.0 => time,
+        _ => 0.0,
+    }
 }
 
 fn parse_video_ids(params: &Value) -> Vec<String> {
@@ -818,9 +875,53 @@ mod tests {
     }
 
     #[test]
+    fn seek_prefers_current_time_and_clamps_negatives() {
+        // Real TV client: parseFloat(currentTime || newTime), NaN/negative -> 0.
+        let with_current = parse_message(
+            &serde_json::from_str::<Vec<Value>>(
+                r#"["seekTo",{"currentTime":"30.5","newTime":"9"}]"#,
+            )
+            .unwrap(),
+        );
+        assert!(matches!(
+            with_current,
+            Incoming::Command(LoungeCommand::Seek(time)) if time == 30.5
+        ));
+
+        let fallback = parse_message(
+            &serde_json::from_str::<Vec<Value>>(r#"["seekTo",{"newTime":"9"}]"#).unwrap(),
+        );
+        assert!(matches!(
+            fallback,
+            Incoming::Command(LoungeCommand::Seek(time)) if time == 9.0
+        ));
+
+        let negative = parse_message(
+            &serde_json::from_str::<Vec<Value>>(r#"["seekTo",{"newTime":"-5"}]"#).unwrap(),
+        );
+        assert!(matches!(
+            negative,
+            Incoming::Command(LoungeCommand::Seek(time)) if time == 0.0
+        ));
+    }
+
+    #[test]
+    fn stop_and_previous_controls_are_parsed() {
+        let stop = parse_message(&serde_json::from_str::<Vec<Value>>(r#"["stopVideo"]"#).unwrap());
+        assert!(matches!(stop, Incoming::Command(LoungeCommand::Stop)));
+
+        let previous =
+            parse_message(&serde_json::from_str::<Vec<Value>>(r#"["previous"]"#).unwrap());
+        assert!(matches!(
+            previous,
+            Incoming::Command(LoungeCommand::Previous)
+        ));
+    }
+
+    #[test]
     fn initial_bind_requires_both_session_ids() {
         let valid = frame(r#"[[0,["c","SID","",8]],[1,["S","GSID"]]]"#);
-        let bound = parse_initial_bind(valid.as_bytes()).unwrap();
+        let (bound, _) = parse_initial_bind(valid.as_bytes()).unwrap();
         assert_eq!(bound.sid, "SID");
         assert_eq!(bound.gsession_id, "GSID");
         assert_eq!(bound.aid, 1);
@@ -830,6 +931,18 @@ mod tests {
             parse_initial_bind(missing.as_bytes()),
             Err(LoungeError::Protocol("initial bind omitted gsessionid"))
         ));
+    }
+
+    #[test]
+    fn initial_bind_captures_embedded_control_messages() {
+        let body = frame(
+            r#"[[0,["c","SID","",8]],[1,["S","GSID"]],[2,["loungeStatus",{}]],[3,["getNowPlaying"]],[4,["getDiscoveryDeviceId"]]]"#,
+        );
+        let (bound, pending) = parse_initial_bind(body.as_bytes()).unwrap();
+        assert_eq!(bound.aid, 4);
+        assert!(matches!(pending[0], Incoming::Ignored));
+        assert!(matches!(pending[1], Incoming::GetNowPlaying));
+        assert!(matches!(pending[2], Incoming::SetDiscoveryDeviceId));
     }
 
     #[test]
@@ -939,7 +1052,7 @@ mod tests {
             .and(path("/api/lounge/bc/bind"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_string(frame(r#"[[5,["onSetDiscoveryDeviceId"]]]"#)),
+                    .set_body_string(frame(r#"[[5,["getDiscoveryDeviceId"]]]"#)),
             )
             .mount(&server)
             .await;
@@ -958,6 +1071,7 @@ mod tests {
             device_id: "lounge-device".to_string(),
             discovery_device_id: "CAST-ID".to_string(),
             current: CurrentMedia::default(),
+            pending_incoming: Vec::new(),
         };
         let (command_tx, _command_rx) = mpsc::channel(1);
         let (_playback_tx, mut playback_rx) = mpsc::channel(1);

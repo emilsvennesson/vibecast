@@ -11,10 +11,12 @@ use vibecast_sdk::{
     StreamType,
 };
 
-const CLIENT_NAME: &str = "ANDROID_VR";
-const CLIENT_VERSION: &str = "1.57";
-const CLIENT_USER_AGENT: &str =
-    "com.google.android.apps.youtube.vr.oculus/1.57 (Linux; U; Android 12L; en_US)";
+const CLIENT_NAME: &str = "ANDROID";
+const CLIENT_VERSION: &str = "20.10.38";
+const CLIENT_NAME_HEADER: &str = "3";
+const CLIENT_USER_AGENT: &str = "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip";
+/// InnerTube key accepted by the ANDROID client; avoids scraping the watch page.
+const INNERTUBE_API_KEY: &str = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w";
 
 pub(crate) const PREFERRED_VIDEO_CODEC_KEY: SettingKey<String> =
     SettingKey::new("preferred_video_codec");
@@ -57,14 +59,12 @@ pub(crate) struct Resolver {
 
 #[derive(Clone)]
 struct Endpoints {
-    watch: String,
     player: String,
 }
 
 impl Default for Endpoints {
     fn default() -> Self {
         Self {
-            watch: "https://www.youtube.com/watch".to_string(),
             player: "https://www.youtube.com/youtubei/v1/player".to_string(),
         }
     }
@@ -83,7 +83,6 @@ impl Resolver {
         Self {
             http,
             endpoints: Endpoints {
-                watch: format!("{base}/watch"),
                 player: format!("{base}/youtubei/v1/player"),
             },
         }
@@ -96,32 +95,18 @@ impl Resolver {
         capabilities: &PlayerCapabilities,
         preferred_video_codec: PreferredVideoCodec,
     ) -> Result<PlaybackMedia, ResolveError> {
-        let mut watch_url = Url::parse(&self.endpoints.watch)
-            .map_err(|_| ResolveError::Protocol("invalid watch endpoint"))?;
-        watch_url.query_pairs_mut().append_pair("v", video_id);
-        let html = self
-            .http
-            .get(watch_url)
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await?;
-
-        let api_key = extract_config_string(&html, "INNERTUBE_API_KEY").ok_or(
-            ResolveError::Protocol("watch page omitted InnerTube API key"),
-        )?;
-        let visitor_data = extract_config_string(&html, "VISITOR_DATA")
-            .or_else(|| extract_config_string(&html, "visitorData"));
-
         let mut player_url = Url::parse(&self.endpoints.player)
             .map_err(|_| ResolveError::Protocol("invalid player endpoint"))?;
-        player_url.query_pairs_mut().append_pair("key", &api_key);
+        player_url
+            .query_pairs_mut()
+            .append_pair("key", INNERTUBE_API_KEY);
         let response: PlayerResponse = self
             .http
             .post(player_url)
             .header("User-Agent", CLIENT_USER_AGENT)
-            .json(&PlayerRequest::new(video_id, visitor_data.as_deref()))
+            .header("X-YouTube-Client-Name", CLIENT_NAME_HEADER)
+            .header("X-YouTube-Client-Version", CLIENT_VERSION)
+            .json(&PlayerRequest::new(video_id))
             .send()
             .await?
             .error_for_status()?
@@ -153,33 +138,26 @@ pub(crate) enum ResolveError {
     NoCompatibleStream,
 }
 
-fn extract_config_string(html: &str, key: &str) -> Option<String> {
-    let marker = format!("\"{key}\":\"");
-    let start = html.find(&marker)? + marker.len();
-    let tail = &html[start..];
-    let end = tail.find('"')?;
-    Some(tail[..end].to_string())
-}
-
 #[derive(Serialize)]
 struct PlayerRequest<'a> {
     #[serde(rename = "videoId")]
     video_id: &'a str,
-    context: RequestContext<'a>,
+    context: RequestContext,
 }
 
 impl<'a> PlayerRequest<'a> {
-    fn new(video_id: &'a str, visitor_data: Option<&'a str>) -> Self {
+    fn new(video_id: &'a str) -> Self {
         Self {
             video_id,
             context: RequestContext {
                 client: ClientContext {
                     client_name: CLIENT_NAME,
                     client_version: CLIENT_VERSION,
-                    visitor_data,
                     hl: "en",
                     gl: "US",
-                    android_sdk_version: 32,
+                    os_name: "Android",
+                    os_version: "14",
+                    android_sdk_version: 34,
                 },
             },
         }
@@ -187,20 +165,22 @@ impl<'a> PlayerRequest<'a> {
 }
 
 #[derive(Serialize)]
-struct RequestContext<'a> {
-    client: ClientContext<'a>,
+struct RequestContext {
+    client: ClientContext,
 }
 
 #[derive(Serialize)]
-struct ClientContext<'a> {
+struct ClientContext {
     #[serde(rename = "clientName")]
     client_name: &'static str,
     #[serde(rename = "clientVersion")]
     client_version: &'static str,
-    #[serde(rename = "visitorData", skip_serializing_if = "Option::is_none")]
-    visitor_data: Option<&'a str>,
     hl: &'static str,
     gl: &'static str,
+    #[serde(rename = "osName")]
+    os_name: &'static str,
+    #[serde(rename = "osVersion")]
+    os_version: &'static str,
     #[serde(rename = "androidSdkVersion")]
     android_sdk_version: u32,
 }
@@ -229,9 +209,9 @@ struct StreamingData {
     adaptive_formats: Vec<AdaptiveFormat>,
 }
 
-/// One adaptive (video-only or audio-only) rendition. ANDROID_VR returns plain
-/// `url`s plus byte ranges, which is exactly what a DASH `SegmentBase` manifest
-/// needs.
+/// One adaptive (video-only or audio-only) rendition. The ANDROID client returns
+/// plain `url`s (signature pre-applied, no `n` throttling parameter) plus byte
+/// ranges, which is exactly what a DASH `SegmentBase` manifest needs.
 #[derive(Debug, Deserialize)]
 struct AdaptiveFormat {
     itag: Option<u32>,
@@ -1605,13 +1585,6 @@ mod tests {
     #[tokio::test]
     async fn resolve_returns_inline_dash_manifest() {
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/watch"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
-                r#"ytcfg.set({"INNERTUBE_API_KEY":"test-key","VISITOR_DATA":"visitor"});"#,
-            ))
-            .mount(&server)
-            .await;
         Mock::given(method("POST"))
             .and(path("/youtubei/v1/player"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -1660,5 +1633,35 @@ mod tests {
         assert_eq!(media.subtitle.as_deref(), Some("Channel"));
         assert!((media.duration.unwrap() - 213.04).abs() < 0.001);
         assert_eq!(media.start_time, 12.5);
+    }
+
+    #[tokio::test]
+    async fn resolve_surfaces_bot_detection_as_unplayable() {
+        // The client swap away from ANDROID_VR exists precisely to avoid this
+        // response; if a future client regresses into it, resolve must report an
+        // unplayable error carrying the reason rather than a compatible stream.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/youtubei/v1/player"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "playabilityStatus": {
+                    "status": "LOGIN_REQUIRED",
+                    "reason": "Sign in to confirm you\u{2019}re not a bot"
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let resolver = Resolver::with_endpoints(reqwest::Client::new(), &server.uri());
+        let error = resolver
+            .resolve(
+                "dQw4w9WgXcQ",
+                0.0,
+                &PlayerCapabilities::default(),
+                PreferredVideoCodec::Auto,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ResolveError::Unplayable(reason) if reason.contains("bot")));
     }
 }
