@@ -22,7 +22,7 @@ pub mod proxy;
 
 pub use manifest::{
     append_segment_query, default_manifest_content_type, infer_manifest_kind,
-    manifest_route_suffix, normalize_manifest_bytes, ManifestKind,
+    manifest_route_suffix, normalize_manifest_bytes, proxy_hls_children, ManifestKind,
 };
 pub use player::Player;
 pub use protocol::{

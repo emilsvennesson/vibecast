@@ -48,6 +48,9 @@ pub enum DaznError {
     /// A response body could not be decoded.
     #[error("DAZN response could not be decoded")]
     Decode,
+    /// A URL from a DAZN response could not be parsed.
+    #[error("DAZN returned an invalid URL")]
+    InvalidUrl,
 }
 
 impl From<reqwest::Error> for DaznError {
@@ -66,7 +69,7 @@ impl DaznError {
         match self {
             DaznError::Status(status) => Some(*status),
             DaznError::Http(error) => error.status().map(|status| status.as_u16()),
-            DaznError::MissingField(_) | DaznError::Decode => None,
+            DaznError::MissingField(_) | DaznError::Decode | DaznError::InvalidUrl => None,
         }
     }
 
@@ -210,7 +213,7 @@ impl DaznApi {
         let mpx = jwt_claim(token, "mpx")
             .and_then(|value| value.as_str().map(str::to_string))
             .ok_or(DaznError::MissingField("mpx"))?;
-        let url = format!("{license_url}&token={mpx}").replace("/getWidevineLicense", "");
+        let url = mpx_license_url(license_url, &mpx)?;
         let body = MpxLicenseRequest {
             get_widevine_license: MpxLicenseChallenge {
                 release_pid,
@@ -229,6 +232,16 @@ impl DaznApi {
             .decode(body.get_widevine_license_response.license)
             .map_err(|_| DaznError::Decode)
     }
+}
+
+/// The MPX JSON endpoint for a `getWidevineLicense` URL, carrying `mpx` as
+/// the `token` query parameter.
+fn mpx_license_url(license_url: &str, mpx: &str) -> Result<reqwest::Url, DaznError> {
+    let mut url = reqwest::Url::parse(license_url).map_err(|_| DaznError::InvalidUrl)?;
+    let path = url.path().replace("/getWidevineLicense", "");
+    url.set_path(&path);
+    url.query_pairs_mut().append_pair("token", mpx);
+    Ok(url)
 }
 
 /// Decode one claim from a JWT payload without verifying it. The token itself
@@ -268,6 +281,18 @@ mod tests {
         let token = test_jwt(&json!({"exp": 1, "mpx": "abc"}));
         assert_eq!(jwt_claim(&token, "mpx"), Some(json!("abc")));
         assert_eq!(jwt_claim("not-a-jwt", "mpx"), None);
+    }
+
+    #[test]
+    fn mpx_license_url_appends_an_encoded_token() {
+        let url = mpx_license_url("https://mpx.example/wv/getWidevineLicense", "a&b=c").unwrap();
+        assert_eq!(url.as_str(), "https://mpx.example/wv?token=a%26b%3Dc");
+        let url = mpx_license_url("https://mpx.example/getWidevineLicense?form=json", "t").unwrap();
+        assert_eq!(url.as_str(), "https://mpx.example/?form=json&token=t");
+        assert!(matches!(
+            mpx_license_url("not a url", "t"),
+            Err(DaznError::InvalidUrl)
+        ));
     }
 
     #[test]

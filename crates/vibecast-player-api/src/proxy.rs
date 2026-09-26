@@ -160,6 +160,9 @@ pub struct ManifestProxyRequest {
     pub method: http::Method,
     /// Filtered request headers.
     pub headers: HeaderMap,
+    /// Index of an HLS child playlist the route previously emitted
+    /// (`?child={index}`), or `None` for the route's own manifest.
+    pub child: Option<usize>,
 }
 
 /// A manifest response returned by the handler (before the bridge filters
