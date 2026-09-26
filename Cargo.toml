@@ -109,6 +109,14 @@ proptest = "1"
 rcgen = "0.13"
 tower = "0.5"
 
+# Keep dev/test builds lean on disk: full debuginfo dominates `target/` size.
+# Line tables still give file:line in panics/backtraces; dependencies get none.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 strip = true
 lto = "thin"
