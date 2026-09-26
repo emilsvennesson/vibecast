@@ -576,6 +576,34 @@ async fn receiver_status_lists_running_app() {
 }
 
 #[tokio::test]
+async fn relaunching_running_app_joins_existing_session() {
+    let mut harness = setup().await;
+    let client = &mut harness.client;
+    let transport = launch(client).await;
+
+    // A restarted sender re-sends LAUNCH for the running app: it must rejoin
+    // the same session rather than tear it down.
+    send(
+        client,
+        ns::RECEIVER,
+        "receiver-0",
+        r#"{"type":"LAUNCH","requestId":2,"appId":"APP1"}"#,
+    )
+    .await;
+    let status = next_json(client).await;
+    assert_eq!(status["type"], "RECEIVER_STATUS");
+    assert_eq!(status["requestId"], 2);
+    let apps = status["status"]["applications"].as_array().unwrap();
+    assert_eq!(apps.len(), 1);
+    assert_eq!(apps[0]["transportId"], transport.as_str());
+
+    send(client, ns::CONNECTION, &transport, r#"{"type":"CONNECT"}"#).await;
+    let _ = next_json(client).await; // connect status
+    send(client, FAKE_NS, &transport, r#"{"type":"PING"}"#).await;
+    assert_eq!(next_json(client).await["type"], "PONG");
+}
+
+#[tokio::test]
 async fn custom_namespace_message_is_handled_and_replies() {
     let mut harness = setup().await;
     let client = &mut harness.client;
