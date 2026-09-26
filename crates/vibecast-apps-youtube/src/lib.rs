@@ -292,6 +292,22 @@ async fn run_commands(
                     None
                 }
             }
+            LoungeCommand::Previous => {
+                if queue.current_index > 0 {
+                    queue.current_index -= 1;
+                    queue
+                        .video_ids
+                        .get(queue.current_index)
+                        .cloned()
+                        .map(|video_id| (video_id, 0.0))
+                } else {
+                    None
+                }
+            }
+            LoungeCommand::Stop => {
+                playback.stop().await;
+                None
+            }
             LoungeCommand::Play => {
                 playback.play().await;
                 None
@@ -433,12 +449,13 @@ mod tests {
         tx.send(LoungeCommand::Pause).await.unwrap();
         tx.send(LoungeCommand::Seek(42.0)).await.unwrap();
         tx.send(LoungeCommand::Play).await.unwrap();
+        tx.send(LoungeCommand::Stop).await.unwrap();
         drop(tx);
         worker.await.unwrap();
 
         assert_eq!(
             *playback.operations.lock().unwrap(),
-            ["pause", "seek:42", "play"]
+            ["pause", "seek:42", "play", "stop"]
         );
     }
 }
