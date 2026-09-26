@@ -9,7 +9,7 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 use url::Url;
-use vibecast_sdk::{PlaybackState, PlayerState, ReceiverContext};
+use vibecast_sdk::{IdleReason, PlaybackState, PlayerState, ReceiverContext};
 
 const LOUNGE_BASE: &str = "https://www.youtube.com/api/lounge";
 const USER_AGENT: &str =
@@ -292,8 +292,8 @@ impl LoungeConnection {
                 }
                 state = playback_rx.recv() => {
                     let Some(state) = state else { return Ok(()); };
-                    self.current.state = Some(state.clone());
-                    self.post(&[Outbound::State(state)]).await?;
+                    let outbound = self.handle_playback(state);
+                    self.post(&outbound).await?;
                 }
                 result = poll => {
                     let batch = match result {
@@ -413,6 +413,23 @@ impl LoungeConnection {
                 vec![Outbound::HasPreviousNext, Outbound::CastMatchResolved]
             }
             Incoming::Command(_) | Incoming::Ignored => Vec::new(),
+        }
+    }
+
+    fn handle_playback(&mut self, state: PlaybackState) -> Vec<Outbound> {
+        // Stopped (or failed) playback is abandoned: like the TV receiver, clear
+        // nowPlaying so the remote drops its Now playing view. FINISHED keeps it,
+        // since the remote may still advance the queue.
+        let abandoned = state.player_state == PlayerState::Idle
+            && matches!(
+                state.idle_reason,
+                Some(IdleReason::Cancelled | IdleReason::Error)
+            );
+        self.current.state = Some(state.clone());
+        if abandoned && self.current.video_id.take().is_some() {
+            vec![Outbound::State(state), Outbound::NowPlaying]
+        } else {
+            vec![Outbound::State(state)]
         }
     }
 
@@ -1255,6 +1272,54 @@ mod tests {
             values.get("req0_currentTime").map(String::as_str),
             Some("42.5")
         );
+    }
+
+    #[test]
+    fn stopped_playback_clears_now_playing() {
+        let mut connection = LoungeConnection {
+            http: reqwest::Client::new(),
+            headers: HeaderMap::new(),
+            base: Url::parse("https://example.test").unwrap(),
+            bind_url: Url::parse("https://example.test/bc/bind").unwrap(),
+            bound: BoundSession {
+                sid: String::new(),
+                gsession_id: String::new(),
+                aid: 0,
+                rid: 1,
+                ofs: 0,
+            },
+            screen_id: String::new(),
+            device_id: String::new(),
+            lounge_token: String::new(),
+            refresh_interval_ms: None,
+            token_refresh_at: token_refresh_at(None),
+            discovery_device_id: String::new(),
+            current: CurrentMedia::default(),
+            pending_incoming: Vec::new(),
+        };
+        connection.current.video_ids = vec!["Az9BrdBTKpo".to_string()];
+        connection.current.select(0);
+        let idle = |idle_reason| PlaybackState {
+            player_state: PlayerState::Idle,
+            current_time: 10.0,
+            duration: Some(100.0),
+            idle_reason,
+        };
+
+        let outbound = connection.handle_playback(idle(Some(IdleReason::Finished)));
+        assert_eq!(outbound.len(), 1, "finished playback keeps nowPlaying");
+
+        let outbound = connection.handle_playback(idle(Some(IdleReason::Cancelled)));
+        let values = form(&form_body(&outbound, 0, &connection.current, "", ""));
+        assert_eq!(values["count"], "2");
+        assert_eq!(values["req0__sc"], "onStateChange");
+        assert_eq!(values["req0_state"], "0");
+        assert_eq!(values["req1__sc"], "nowPlaying");
+        assert!(!values.contains_key("req1_videoId"));
+
+        // Only the transition is announced; a repeated idle report is just state.
+        let outbound = connection.handle_playback(idle(Some(IdleReason::Cancelled)));
+        assert_eq!(outbound.len(), 1);
     }
 
     #[test]
