@@ -15,6 +15,7 @@ use md5::{Digest, Md5};
 
 #[cfg(feature = "mdns")]
 use crate::error::DiscoveryError;
+use crate::eureka::cloud_device_id;
 
 const SERVICE_TYPE: &str = "_googlecast._tcp.local.";
 const INSTANCE_PREFIX: &str = "vibecast-";
@@ -31,7 +32,9 @@ pub struct CastServiceTxt {
     pub friendly_name: String,
     /// `id` — device id (dashes stripped).
     pub id: String,
-    /// `cd` — certificate digest (uppercase hex).
+    /// `cd` — cloud device id (uppercase hex). Real devices advertise their
+    /// cloud id here (not a certificate digest); senders match it against the
+    /// id a receiver's app reports, so it must be per receiver.
     pub cd: String,
     /// `ca` — capabilities bitfield.
     pub ca: String,
@@ -50,13 +53,13 @@ pub struct CastServiceTxt {
 }
 
 impl CastServiceTxt {
-    fn new(model: &str, friendly_name: &str, clean_id: &str, cert_digest: &str, bs: &str) -> Self {
+    fn new(model: &str, friendly_name: &str, clean_id: &str, cd: String, bs: &str) -> Self {
         Self {
             ve: "05".into(),
             md: model.into(),
             friendly_name: friendly_name.into(),
             id: clean_id.into(),
-            cd: cert_digest.to_uppercase(),
+            cd,
             ca: "463365".into(),
             bs: bs.into(),
             st: "0".into(),
@@ -155,13 +158,7 @@ pub struct CastAdvertisement {
 
 impl CastAdvertisement {
     /// Compute the advertisement identity for a receiver.
-    pub fn new(
-        friendly_name: &str,
-        device_model: &str,
-        device_id: &str,
-        port: u16,
-        cert_digest: &str,
-    ) -> Self {
+    pub fn new(friendly_name: &str, device_model: &str, device_id: &str, port: u16) -> Self {
         let clean_id = clean_device_id(device_id);
         Self {
             instance: instance_name(&clean_id),
@@ -171,7 +168,7 @@ impl CastAdvertisement {
                 device_model,
                 friendly_name,
                 &clean_id,
-                cert_digest,
+                cloud_device_id(device_id),
                 &compute_bs(device_id),
             ),
         }
@@ -207,18 +204,6 @@ impl CastAdvertisement {
     #[must_use]
     pub fn port(&self) -> u16 {
         self.port
-    }
-
-    /// Update the advertised certificate digest (on cert rotation). Returns
-    /// `true` if the digest changed. Callers driving a live `MdnsResponder`
-    /// should re-announce via `MdnsResponder::refresh` when this is `true`.
-    pub fn update_cert_digest(&mut self, cert_digest: &str) -> bool {
-        let digest = cert_digest.to_uppercase();
-        if self.txt.cd == digest {
-            return false;
-        }
-        self.txt.cd = digest;
-        true
     }
 }
 
@@ -286,17 +271,6 @@ impl MdnsResponder {
             Err(error) => tracing::warn!(%error, "failed to request mDNS responder shutdown"),
         }
     }
-
-    /// Re-announce after the advertisement's TXT changed (e.g. cert rotation).
-    ///
-    /// Re-registration goes through a full stop/start so the new TXT is
-    /// re-announced regardless of responder caching. Certificate rotation is
-    /// rare, so the brief re-advertise is acceptable.
-    pub fn refresh(&mut self, advertisement: &CastAdvertisement) -> Result<(), DiscoveryError> {
-        self.stop();
-        *self = Self::start(advertisement)?;
-        Ok(())
-    }
 }
 
 #[cfg(feature = "mdns")]
@@ -323,18 +297,6 @@ mod tests {
     }
 
     #[test]
-    fn update_cert_digest_reports_change_and_uppercases() {
-        let mut advertisement =
-            CastAdvertisement::new("Living Room", "Chromecast", "dev-id", 8009, "abc123");
-        assert_eq!(advertisement.txt().cd, "ABC123");
-        // A no-op update (same digest, different case) reports no change.
-        assert!(!advertisement.update_cert_digest("abc123"));
-        // A real change reports `true` and stores the uppercased digest.
-        assert!(advertisement.update_cert_digest("def456"));
-        assert_eq!(advertisement.txt().cd, "DEF456");
-    }
-
-    #[test]
     fn server_name_prefers_canonical_uuid() {
         let clean = "12345678123412341234123456789abc";
         assert_eq!(
@@ -356,14 +318,14 @@ mod tests {
             "Chromecast",
             "12345678-1234-1234-1234-123456789abc",
             8009,
-            "abcdef", // lower-case digest, expect uppercased
         );
         let txt = ad.txt();
         assert_eq!(txt.ve, "05");
         assert_eq!(txt.md, "Chromecast");
         assert_eq!(txt.friendly_name, "Living Room");
         assert_eq!(txt.id, "12345678123412341234123456789abc");
-        assert_eq!(txt.cd, "ABCDEF"); // uppercased
+        // cd is the per-receiver cloud id, matching eureka_info's cloud_device_id.
+        assert_eq!(txt.cd, "12345678123412341234123456789ABC");
         assert_eq!(txt.ca, "463365");
         assert_eq!(txt.st, "0");
         assert_eq!(txt.ic, "/setup/icon.png");
@@ -386,7 +348,6 @@ mod tests {
             "Chromecast",
             "12345678-1234-1234-1234-123456789abc",
             8009,
-            "ABCDEF",
         );
 
         let base = service_info(&ad).unwrap();

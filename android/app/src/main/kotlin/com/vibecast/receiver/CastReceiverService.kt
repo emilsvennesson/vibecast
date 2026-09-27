@@ -157,17 +157,6 @@ class CastReceiverService :
         )
     }
 
-    override fun onPlayerTxtChanged(
-        playerId: String,
-        txt: List<TxtEntry>,
-    ) {
-        mainHandler.post {
-            val existing = registrations[playerId] ?: return@post
-            Log.i(TAG, "TXT changed (cert rotation); re-registering NSD for $playerId")
-            registerPlayer(playerId, existing.advertisement, txt)
-        }
-    }
-
     override fun onPlayerStopped(playerId: String) {
         mainHandler.post {
             unregisterPlayer(playerId)

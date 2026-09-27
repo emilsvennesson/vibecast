@@ -379,17 +379,15 @@ pub struct CastAdvertiser {
 
 #[uniffi::export]
 impl CastAdvertiser {
-    /// Start advertising a Cast device with the given identity + TXT digest.
+    /// Start advertising a Cast device with the given identity.
     #[uniffi::constructor]
     pub fn start(
         friendly_name: String,
         model: String,
         device_id: String,
         port: u16,
-        cert_digest: String,
     ) -> Result<Arc<Self>, PrimitivesError> {
-        let advertisement =
-            CastAdvertisement::new(&friendly_name, &model, &device_id, port, &cert_digest);
+        let advertisement = CastAdvertisement::new(&friendly_name, &model, &device_id, port);
         let responder =
             MdnsResponder::start(&advertisement).map_err(|error| PrimitivesError::Mdns {
                 reason: error.to_string(),

@@ -1,18 +1,26 @@
 //! YouTube Lounge pairing and BrowserChannel command transport.
 
+use std::path::Path;
 use std::time::Duration;
 
-use serde::Deserialize;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 use url::Url;
-use vibecast_sdk::{PlaybackState, PlayerState, ReceiverContext};
+use vibecast_sdk::{IdleReason, PlaybackState, PlayerState, ReceiverContext};
 
 const LOUNGE_BASE: &str = "https://www.youtube.com/api/lounge";
 const USER_AGENT: &str =
     "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 Chrome/120 Safari/537.36 CrKey/1.56";
 const MAX_FRAME_LENGTH: usize = 1024 * 1024;
+/// Used when the token response carries no refresh interval.
+const DEFAULT_TOKEN_REFRESH: Duration = Duration::from_secs(24 * 60 * 60);
+/// Floor for the server's interval, and the retry delay after a failed refresh.
+const MIN_TOKEN_REFRESH: Duration = Duration::from_secs(60);
+/// Position change between player reports (~1 s apart) treated as a seek.
+const POSITION_JUMP_SECS: f64 = 3.0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LoungeCommand {
@@ -21,6 +29,8 @@ pub(crate) enum LoungeCommand {
         current_index: usize,
         current_time: f64,
         list_id: Option<String>,
+        ctt: Option<String>,
+        player_params: Option<String>,
     },
     UpdatePlaylist {
         video_ids: Vec<String>,
@@ -36,10 +46,15 @@ pub(crate) enum LoungeCommand {
 
 pub(crate) struct LoungeConnection {
     http: reqwest::Client,
+    headers: HeaderMap,
+    base: Url,
     bind_url: Url,
     bound: BoundSession,
     screen_id: String,
     device_id: String,
+    lounge_token: String,
+    refresh_interval_ms: Option<u64>,
+    token_refresh_at: tokio::time::Instant,
     discovery_device_id: String,
     current: CurrentMedia,
     pending_incoming: Vec<Incoming>,
@@ -49,6 +64,8 @@ pub(crate) struct LoungeConnection {
 pub(crate) struct LoungeIdentity {
     pub(crate) screen_id: String,
     pub(crate) device_id: String,
+    pub(crate) lounge_token: String,
+    pub(crate) refresh_interval_ms: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -65,9 +82,27 @@ struct CurrentMedia {
     video_ids: Vec<String>,
     video_id: Option<String>,
     list_id: Option<String>,
+    ctt: Option<String>,
+    player_params: Option<String>,
+    /// Client playback nonce, fresh per video like the TV client's.
+    cpn: String,
     current_index: usize,
     next_pending: bool,
     state: Option<PlaybackState>,
+}
+
+impl CurrentMedia {
+    fn select(&mut self, index: usize) {
+        self.current_index = index;
+        self.video_id = self.video_ids.get(index).cloned();
+        self.cpn = new_cpn();
+    }
+}
+
+fn new_cpn() -> String {
+    use base64::Engine as _;
+    let bytes = uuid::Uuid::new_v4().into_bytes();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes[..12])
 }
 
 #[derive(Debug, Error)]
@@ -76,8 +111,23 @@ pub(crate) enum LoungeError {
     Http(#[from] reqwest::Error),
     #[error("YouTube Lounge JSON response was invalid")]
     Json(#[from] serde_json::Error),
+    #[error("YouTube Lounge state could not be stored")]
+    Io(#[from] std::io::Error),
     #[error("YouTube Lounge protocol error: {0}")]
     Protocol(&'static str),
+}
+
+impl LoungeError {
+    /// The Lounge server refused the request (as opposed to a transient failure).
+    fn is_rejection(&self) -> bool {
+        match self {
+            Self::Http(error) => error
+                .status()
+                .is_some_and(|status| status.is_client_error()),
+            Self::Protocol(_) => true,
+            Self::Json(_) | Self::Io(_) => false,
+        }
+    }
 }
 
 impl LoungeConnection {
@@ -94,39 +144,39 @@ impl LoungeConnection {
         base: &str,
     ) -> Result<Self, LoungeError> {
         let base = Url::parse(base).map_err(|_| LoungeError::Protocol("invalid base URL"))?;
-        let screen: ScreenIdResponse = http
-            .get(join(&base, "pairing/generate_screen_id")?)
-            .query(&[("enable_screen_id_secret_generation", "true")])
-            .header("User-Agent", USER_AGENT)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-
-        let token_body = {
-            let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-            serializer.append_pair("screen_ids", &screen.screen_id);
-            serializer.finish()
+        // Like a real TV, keep one screen per receiver so a returning phone finds
+        // the same Lounge; only the token is refreshed.
+        let screen_path = receiver
+            .data_dir
+            .join(format!("lounge-{}.json", receiver.device_id));
+        let stored = load_screen(&screen_path);
+        let stored_token = match &stored {
+            Some(screen) => match lounge_token(&http, &base, &screen.screen_id).await {
+                Ok(token) => Some((screen.clone(), token)),
+                Err(error) if error.is_rejection() => {
+                    tracing::warn!(%error, "stored YouTube screen rejected; pairing a new one");
+                    None
+                }
+                Err(error) => return Err(error),
+            },
+            None => None,
         };
-        let token_response: LoungeTokenResponse = http
-            .post(join(&base, "pairing/get_lounge_token_batch")?)
-            .header("User-Agent", USER_AGENT)
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(token_body)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let lounge_token = token_response
-            .screens
-            .into_iter()
-            .find(|item| item.screen_id == screen.screen_id)
-            .ok_or(LoungeError::Protocol("token response omitted screen"))?
-            .lounge_token;
-
-        let device_id = uuid::Uuid::new_v4().to_string();
+        let (screen, token) = match stored_token {
+            Some(paired) => paired,
+            None => {
+                let screen = generate_screen(&http, &base).await?;
+                let token = lounge_token(&http, &base, &screen.screen_id).await?;
+                (screen, token)
+            }
+        };
+        if stored.as_ref() != Some(&screen) {
+            if let Err(error) = save_screen(&screen_path, &screen) {
+                tracing::warn!(%error, "failed to persist YouTube screen");
+            }
+        }
+        let lounge_token = token.lounge_token;
+        let device_id = screen.device_id.clone();
+        let discovery_device_id = cast_cloud_device_id(&receiver.device_id);
         let bind_url = build_bind_url(
             &base,
             &screen.screen_id_secret,
@@ -134,15 +184,21 @@ impl LoungeConnection {
             &device_id,
             receiver,
         )?;
-        let (bound, pending_incoming) = initial_bind(&http, &bind_url).await?;
+        let headers = lounge_headers(receiver, &discovery_device_id);
+        let (bound, pending_incoming) = initial_bind(&http, &headers, &bind_url).await?;
 
         Ok(Self {
             http,
+            headers,
+            base,
             bind_url,
             bound,
             screen_id: screen.screen_id,
             device_id,
-            discovery_device_id: cast_cloud_device_id(&receiver.device_id),
+            lounge_token,
+            refresh_interval_ms: token.refresh_interval_ms,
+            token_refresh_at: token_refresh_at(token.refresh_interval_ms),
+            discovery_device_id,
             current: CurrentMedia::default(),
             pending_incoming,
         })
@@ -152,22 +208,28 @@ impl LoungeConnection {
         LoungeIdentity {
             screen_id: self.screen_id.clone(),
             device_id: self.device_id.clone(),
+            lounge_token: self.lounge_token.clone(),
+            refresh_interval_ms: self.refresh_interval_ms,
         }
     }
 
+    /// Serves the Lounge until cancelled, publishing the identity (and every
+    /// refreshed lounge token) on `identity_tx`.
     pub(crate) async fn run(
         mut self,
         command_tx: mpsc::Sender<LoungeCommand>,
         mut playback_rx: mpsc::Receiver<PlaybackState>,
+        identity_tx: watch::Sender<Option<LoungeIdentity>>,
         mut cancel: watch::Receiver<bool>,
     ) {
+        let _ = identity_tx.send(Some(self.identity()));
         loop {
             if *cancel.borrow() {
                 return;
             }
 
             match self
-                .run_bound(&command_tx, &mut playback_rx, &mut cancel)
+                .run_bound(&command_tx, &mut playback_rx, &identity_tx, &mut cancel)
                 .await
             {
                 Ok(()) => return,
@@ -183,7 +245,7 @@ impl LoungeConnection {
                 }
             }
 
-            match initial_bind(&self.http, &self.bind_url).await {
+            match initial_bind(&self.http, &self.headers, &self.bind_url).await {
                 Ok((bound, pending)) => {
                     self.bound = bound;
                     self.pending_incoming = pending;
@@ -199,9 +261,17 @@ impl LoungeConnection {
         &mut self,
         command_tx: &mpsc::Sender<LoungeCommand>,
         playback_rx: &mut mpsc::Receiver<PlaybackState>,
+        identity_tx: &watch::Sender<Option<LoungeIdentity>>,
         cancel: &mut watch::Receiver<bool>,
     ) -> Result<(), LoungeError> {
-        self.post(Outbound::NowPlaying).await?;
+        // Same opening batch as the Shield.
+        self.post(&[
+            Outbound::AutoplayMode,
+            Outbound::NowPlaying,
+            Outbound::NowPlayingShorts,
+            Outbound::DiscoveryDeviceId,
+        ])
+        .await?;
 
         // The server delivers loungeStatus/getNowPlaying/getDiscoveryDeviceId inside the
         // bind response and never resends them, so drain those before the poll loop.
@@ -212,8 +282,11 @@ impl LoungeConnection {
         }
 
         loop {
-            let poll = poll_commands(&self.http, &self.bind_url, &self.bound);
+            let poll = poll_commands(&self.http, &self.headers, &self.bind_url, &self.bound);
             tokio::select! {
+                () = tokio::time::sleep_until(self.token_refresh_at) => {
+                    self.refresh_token(identity_tx).await;
+                }
                 result = cancel.changed() => {
                     if result.is_err() || *cancel.borrow() {
                         return Ok(());
@@ -221,8 +294,10 @@ impl LoungeConnection {
                 }
                 state = playback_rx.recv() => {
                     let Some(state) = state else { return Ok(()); };
-                    self.current.state = Some(state.clone());
-                    self.post(Outbound::State(state)).await?;
+                    let outbound = self.handle_playback(state);
+                    if !outbound.is_empty() {
+                        self.post(&outbound).await?;
+                    }
                 }
                 result = poll => {
                     let batch = match result {
@@ -241,13 +316,34 @@ impl LoungeConnection {
         }
     }
 
+    /// Renews the lounge token before it expires, as the TV receiver does, so a
+    /// long-lived session stays joinable and can still rebind. The current bind
+    /// keeps working; the new token is used from the next (re)bind on.
+    async fn refresh_token(&mut self, identity_tx: &watch::Sender<Option<LoungeIdentity>>) {
+        match lounge_token(&self.http, &self.base, &self.screen_id).await {
+            Ok(token) => {
+                set_query_param(&mut self.bind_url, "loungeIdToken", &token.lounge_token);
+                self.lounge_token = token.lounge_token;
+                self.refresh_interval_ms = token.refresh_interval_ms;
+                self.token_refresh_at = token_refresh_at(token.refresh_interval_ms);
+                let _ = identity_tx.send(Some(self.identity()));
+                tracing::debug!("refreshed YouTube lounge token");
+            }
+            Err(error) => {
+                tracing::warn!(%error, "YouTube lounge token refresh failed; retrying");
+                self.token_refresh_at = tokio::time::Instant::now() + MIN_TOKEN_REFRESH;
+            }
+        }
+    }
+
     async fn dispatch(
         &mut self,
         incoming: &Incoming,
         command_tx: &mpsc::Sender<LoungeCommand>,
     ) -> Result<std::ops::ControlFlow<()>, LoungeError> {
-        if let Some(outbound) = self.handle_internal(incoming) {
-            self.post(outbound).await?;
+        let outbound = self.handle_internal(incoming);
+        if !outbound.is_empty() {
+            self.post(&outbound).await?;
         }
         if let Incoming::Command(command) = incoming {
             if command_tx.send(command.clone()).await.is_err() {
@@ -257,18 +353,21 @@ impl LoungeConnection {
         Ok(std::ops::ControlFlow::Continue(()))
     }
 
-    fn handle_internal(&mut self, incoming: &Incoming) -> Option<Outbound> {
+    fn handle_internal(&mut self, incoming: &Incoming) -> Vec<Outbound> {
         match incoming {
             Incoming::Command(LoungeCommand::SetPlaylist {
                 video_ids,
                 current_index,
                 current_time,
                 list_id,
+                ctt,
+                player_params,
             }) => {
                 self.current.video_ids.clone_from(video_ids);
-                self.current.video_id = video_ids.get(*current_index).cloned();
-                self.current.current_index = *current_index;
+                self.current.select(*current_index);
                 self.current.list_id.clone_from(list_id);
+                self.current.ctt.clone_from(ctt);
+                self.current.player_params.clone_from(player_params);
                 self.current.next_pending = false;
                 self.current.state = Some(PlaybackState {
                     player_state: PlayerState::Buffering,
@@ -276,7 +375,7 @@ impl LoungeConnection {
                     duration: None,
                     idle_reason: None,
                 });
-                Some(Outbound::NowPlaying)
+                vec![Outbound::HasPreviousNext, Outbound::NowPlaying]
             }
             Incoming::Command(LoungeCommand::UpdatePlaylist { video_ids, list_id }) => {
                 self.current.video_ids.clone_from(video_ids);
@@ -284,69 +383,94 @@ impl LoungeConnection {
                 if self.current.next_pending
                     && self.current.current_index + 1 < self.current.video_ids.len()
                 {
-                    self.current.current_index += 1;
-                    self.current.video_id = self
-                        .current
-                        .video_ids
-                        .get(self.current.current_index)
-                        .cloned();
+                    self.current.select(self.current.current_index + 1);
                     self.current.next_pending = false;
-                    return Some(Outbound::NowPlaying);
+                    return vec![Outbound::HasPreviousNext, Outbound::NowPlaying];
                 }
-                None
+                vec![Outbound::HasPreviousNext]
             }
             Incoming::Command(LoungeCommand::Next) => {
                 if self.current.current_index + 1 < self.current.video_ids.len() {
-                    self.current.current_index += 1;
-                    self.current.video_id = self
-                        .current
-                        .video_ids
-                        .get(self.current.current_index)
-                        .cloned();
-                    Some(Outbound::NowPlaying)
+                    self.current.select(self.current.current_index + 1);
+                    vec![Outbound::HasPreviousNext, Outbound::NowPlaying]
                 } else {
                     self.current.next_pending = true;
-                    None
+                    Vec::new()
                 }
             }
             Incoming::Command(LoungeCommand::Previous) => {
                 if self.current.current_index > 0 {
-                    self.current.current_index -= 1;
-                    self.current.video_id = self
-                        .current
-                        .video_ids
-                        .get(self.current.current_index)
-                        .cloned();
-                    Some(Outbound::NowPlaying)
+                    self.current.select(self.current.current_index - 1);
+                    vec![Outbound::HasPreviousNext, Outbound::NowPlaying]
                 } else {
-                    None
+                    Vec::new()
                 }
             }
-            Incoming::GetNowPlaying => Some(Outbound::NowPlaying),
-            Incoming::GetPlaybackSpeed => Some(Outbound::PlaybackSpeed),
-            Incoming::GetVolume => Some(Outbound::Volume),
-            Incoming::SetDiscoveryDeviceId => Some(Outbound::DiscoveryDeviceId),
-            Incoming::Command(_) | Incoming::Ignored => None,
+            Incoming::GetNowPlaying => vec![Outbound::NowPlaying, Outbound::NowPlayingShorts],
+            Incoming::GetPlaybackSpeed => vec![Outbound::PlaybackSpeed],
+            Incoming::GetVolume => vec![Outbound::Volume],
+            Incoming::GetPartyGamesMode => vec![Outbound::PartyGamesMode],
+            Incoming::SetDiscoveryDeviceId => vec![Outbound::DiscoveryDeviceId],
+            // The Shield answers a remote joining with its queue state and
+            // castMatchResolved, which ties the Lounge to the Cast session.
+            Incoming::RemoteConnected => {
+                vec![Outbound::HasPreviousNext, Outbound::CastMatchResolved]
+            }
+            Incoming::Command(_) | Incoming::Ignored => Vec::new(),
         }
     }
 
-    async fn post(&mut self, outbound: Outbound) -> Result<(), LoungeError> {
+    fn handle_playback(&mut self, state: PlaybackState) -> Vec<Outbound> {
+        // Stopped (or failed) playback is abandoned: like the TV receiver, clear
+        // nowPlaying so the remote drops its Now playing view. FINISHED keeps it,
+        // since the remote may still advance the queue.
+        let abandoned = state.player_state == PlayerState::Idle
+            && matches!(
+                state.idle_reason,
+                Some(IdleReason::Cancelled | IdleReason::Error)
+            );
+        // Like the TV receiver, announce state transitions only; the remote
+        // extrapolates the position itself.
+        let previous = self.current.state.replace(state.clone());
+        // A position jump (e.g. a seek the player reports late) is announced
+        // too, or the remote keeps extrapolating from the stale position.
+        let changed = previous.as_ref().is_none_or(|previous| {
+            previous.player_state != state.player_state
+                || previous.idle_reason != state.idle_reason
+                || (state.current_time - previous.current_time).abs() > POSITION_JUMP_SECS
+        });
+        let duration_learned = state.duration.is_some()
+            && previous
+                .as_ref()
+                .is_none_or(|previous| previous.duration.is_none());
+        let mut outbound = Vec::new();
+        if changed {
+            outbound.push(Outbound::State(state));
+        }
+        if (abandoned && self.current.video_id.take().is_some()) || duration_learned {
+            outbound.push(Outbound::NowPlaying);
+        }
+        outbound
+    }
+
+    async fn post(&mut self, batch: &[Outbound]) -> Result<(), LoungeError> {
         self.bound.rid += 1;
         let mut url = self.bind_url.clone();
         append_bound_query(&mut url, &self.bound, self.bound.rid.to_string().as_str());
         url.query_pairs_mut()
             .append_pair("zx", &uuid::Uuid::new_v4().simple().to_string());
 
-        let body = outbound.form_body(
+        let body = form_body(
+            batch,
             self.bound.ofs,
             &self.current,
             &self.discovery_device_id,
             &self.device_id,
         );
-        self.bound.ofs += 1;
+        self.bound.ofs += batch.len() as u64;
         self.http
             .post(url)
-            .header("User-Agent", USER_AGENT)
+            .headers(self.headers.clone())
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(body)
             .send()
@@ -359,60 +483,144 @@ impl LoungeConnection {
 }
 
 enum Outbound {
+    AutoplayMode,
     NowPlaying,
+    NowPlayingShorts,
     State(PlaybackState),
+    HasPreviousNext,
+    CastMatchResolved,
     PlaybackSpeed,
     Volume,
+    PartyGamesMode,
     DiscoveryDeviceId,
 }
 
+/// Encodes `batch` as one BrowserChannel POST body (`count`, `ofs`, `reqN_*`).
+fn form_body(
+    batch: &[Outbound],
+    ofs: u64,
+    current: &CurrentMedia,
+    discovery_id: &str,
+    lounge_device_id: &str,
+) -> String {
+    let mut form = url::form_urlencoded::Serializer::new(String::new());
+    form.append_pair("count", &batch.len().to_string())
+        .append_pair("ofs", &ofs.to_string());
+    for (index, outbound) in batch.iter().enumerate() {
+        outbound.append(
+            &mut form,
+            &format!("req{index}_"),
+            current,
+            discovery_id,
+            lounge_device_id,
+        );
+    }
+    form.finish()
+}
+
 impl Outbound {
-    fn form_body(
+    #[cfg(test)]
+    fn name(&self) -> &'static str {
+        match self {
+            Self::AutoplayMode => "onAutoplayModeChanged",
+            Self::NowPlaying => "nowPlaying",
+            Self::NowPlayingShorts => "nowPlayingShorts",
+            Self::State(_) => "onStateChange",
+            Self::HasPreviousNext => "onHasPreviousNextChanged",
+            Self::CastMatchResolved => "castMatchResolved",
+            Self::PlaybackSpeed => "onPlaybackSpeedChanged",
+            Self::Volume => "onVolumeChanged",
+            Self::PartyGamesMode => "onPartyGamesModeChanged",
+            Self::DiscoveryDeviceId => "setDiscoveryDeviceId",
+        }
+    }
+
+    fn append(
         &self,
-        ofs: u64,
+        form: &mut url::form_urlencoded::Serializer<'_, String>,
+        prefix: &str,
         current: &CurrentMedia,
         discovery_id: &str,
         lounge_device_id: &str,
-    ) -> String {
-        let mut form = url::form_urlencoded::Serializer::new(String::new());
-        form.append_pair("count", "1")
-            .append_pair("ofs", &ofs.to_string());
+    ) {
+        let key = |name: &str| format!("{prefix}{name}");
         match self {
+            // vibecast plays only what the remote queues; it never autoplays.
+            Self::AutoplayMode => {
+                form.append_pair(&key("_sc"), "onAutoplayModeChanged")
+                    .append_pair(&key("autoplayMode"), "UNSUPPORTED");
+            }
             Self::NowPlaying => {
-                form.append_pair("req0__sc", "nowPlaying");
-                if let Some(video_id) = &current.video_id {
-                    form.append_pair("req0_videoId", video_id);
-                }
+                form.append_pair(&key("_sc"), "nowPlaying");
+                let Some(video_id) = &current.video_id else {
+                    return;
+                };
+                form.append_pair(&key("videoId"), video_id);
                 if let Some(state) = &current.state {
-                    append_state_fields(&mut form, "req0_", state);
+                    append_state_fields(form, prefix, state);
+                    form.append_pair(&key("cpn"), &current.cpn);
                 }
-                if let Some(list_id) = &current.list_id {
-                    form.append_pair("req0_listId", list_id);
+                for (name, value) in [
+                    ("listId", &current.list_id),
+                    ("ctt", &current.ctt),
+                    ("playerParams", &current.player_params),
+                ] {
+                    if let Some(value) = value {
+                        form.append_pair(&key(name), value);
+                    }
                 }
-                form.append_pair("req0_currentIndex", &current.current_index.to_string());
+                form.append_pair(&key("currentIndex"), &current.current_index.to_string());
+            }
+            Self::NowPlayingShorts => {
+                form.append_pair(&key("_sc"), "nowPlayingShorts");
             }
             Self::State(state) => {
-                form.append_pair("req0__sc", "onStateChange");
-                append_state_fields(&mut form, "req0_", state);
-                form.append_pair("req0_playabilityStatus", "OK");
+                form.append_pair(&key("_sc"), "onStateChange");
+                append_state_fields(form, prefix, state);
+                form.append_pair(&key("cpn"), &current.cpn)
+                    .append_pair(&key("playabilityStatus"), "OK");
+            }
+            Self::HasPreviousNext => {
+                let has_next = current.current_index + 1 < current.video_ids.len();
+                form.append_pair(&key("_sc"), "onHasPreviousNextChanged")
+                    .append_pair(&key("hasPrevious"), bool_str(current.current_index > 0))
+                    .append_pair(&key("hasNext"), bool_str(has_next));
+            }
+            Self::CastMatchResolved => {
+                form.append_pair(&key("_sc"), "castMatchResolved");
             }
             Self::PlaybackSpeed => {
-                form.append_pair("req0__sc", "onPlaybackSpeedChanged")
-                    .append_pair("req0_playbackSpeed", "1");
+                form.append_pair(&key("_sc"), "onPlaybackSpeedChanged")
+                    .append_pair(&key("playbackSpeed"), "1")
+                    .append_pair(
+                        &key("playbackSpeedInfo"),
+                        r#"{"playbackSpeed":1,"isContentSupportVSP":false}"#,
+                    );
             }
             Self::Volume => {
-                form.append_pair("req0__sc", "onVolumeChanged")
-                    .append_pair("req0_volume", "100")
-                    .append_pair("req0_muted", "false");
+                form.append_pair(&key("_sc"), "onVolumeChanged")
+                    .append_pair(&key("volume"), "100")
+                    .append_pair(&key("muted"), "false");
+            }
+            Self::PartyGamesMode => {
+                form.append_pair(&key("_sc"), "onPartyGamesModeChanged")
+                    .append_pair(&key("isActive"), "false");
             }
             Self::DiscoveryDeviceId => {
-                form.append_pair("req0__sc", "setDiscoveryDeviceId")
-                    .append_pair("req0_discoveryDeviceId", discovery_id)
-                    .append_pair("req0_loungeDeviceId", lounge_device_id)
-                    .append_pair("req0_castCloudDeviceId", discovery_id);
+                form.append_pair(&key("_sc"), "setDiscoveryDeviceId")
+                    .append_pair(&key("discoveryDeviceId"), discovery_id)
+                    .append_pair(&key("loungeDeviceId"), lounge_device_id)
+                    .append_pair(&key("castCloudDeviceId"), discovery_id);
             }
         }
-        form.finish()
+    }
+}
+
+fn bool_str(value: bool) -> &'static str {
+    if value {
+        "true"
+    } else {
+        "false"
     }
 }
 
@@ -449,6 +657,7 @@ fn append_state_fields(
 
 async fn initial_bind(
     http: &reqwest::Client,
+    headers: &HeaderMap,
     bind_url: &Url,
 ) -> Result<(BoundSession, Vec<Incoming>), LoungeError> {
     let mut url = bind_url.clone();
@@ -459,7 +668,7 @@ async fn initial_bind(
         .append_pair("zx", &uuid::Uuid::new_v4().simple().to_string());
     let bytes = http
         .post(url)
-        .header("User-Agent", USER_AGENT)
+        .headers(headers.clone())
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body("count=0")
         .send()
@@ -511,6 +720,7 @@ fn parse_initial_bind(bytes: &[u8]) -> Result<(BoundSession, Vec<Incoming>), Lou
 
 async fn poll_commands(
     http: &reqwest::Client,
+    headers: &HeaderMap,
     bind_url: &Url,
     bound: &BoundSession,
 ) -> Result<IncomingBatch, LoungeError> {
@@ -522,7 +732,7 @@ async fn poll_commands(
         .append_pair("zx", &uuid::Uuid::new_v4().simple().to_string());
     let bytes = http
         .get(url)
-        .header("User-Agent", USER_AGENT)
+        .headers(headers.clone())
         .timeout(Duration::from_secs(60))
         .send()
         .await?
@@ -550,7 +760,9 @@ enum Incoming {
     GetNowPlaying,
     GetPlaybackSpeed,
     GetVolume,
+    GetPartyGamesMode,
     SetDiscoveryDeviceId,
+    RemoteConnected,
     Ignored,
 }
 
@@ -600,7 +812,9 @@ fn parse_message(message: &[Value]) -> Incoming {
         "getNowPlaying" => Incoming::GetNowPlaying,
         "getPlaybackSpeed" => Incoming::GetPlaybackSpeed,
         "getVolume" => Incoming::GetVolume,
+        "getPartyGamesMode" => Incoming::GetPartyGamesMode,
         "getDiscoveryDeviceId" => Incoming::SetDiscoveryDeviceId,
+        "remoteConnected" => Incoming::RemoteConnected,
         _ => Incoming::Ignored,
     }
 }
@@ -636,11 +850,14 @@ fn parse_set_playlist(params: Option<&Value>) -> Option<LoungeCommand> {
             .get("currentTime")
             .and_then(value_as_f64)
             .unwrap_or_default(),
-        list_id: params
-            .get("listId")
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        list_id: string_param(params, "listId"),
+        ctt: string_param(params, "ctt"),
+        player_params: string_param(params, "playerParams"),
     })
+}
+
+fn string_param(params: &Value, key: &str) -> Option<String> {
+    params.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
 fn parse_update_playlist(params: Option<&Value>) -> Option<LoungeCommand> {
@@ -743,6 +960,96 @@ impl FrameDecoder {
     }
 }
 
+/// The persisted Lounge screen identity (`screenIdSecret` is never logged).
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+struct StoredScreen {
+    #[serde(rename = "screenId")]
+    screen_id: String,
+    #[serde(rename = "screenIdSecret")]
+    screen_id_secret: String,
+    #[serde(rename = "deviceId")]
+    device_id: String,
+}
+
+fn load_screen(path: &Path) -> Option<StoredScreen> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes)
+        .inspect_err(|error| tracing::warn!(%error, "ignoring invalid stored YouTube screen"))
+        .ok()
+}
+
+fn save_screen(path: &Path, screen: &StoredScreen) -> Result<(), LoungeError> {
+    std::fs::write(path, serde_json::to_vec(screen)?)?;
+    Ok(())
+}
+
+async fn generate_screen(http: &reqwest::Client, base: &Url) -> Result<StoredScreen, LoungeError> {
+    let screen: ScreenIdResponse = http
+        .get(join(base, "pairing/generate_screen_id")?)
+        .query(&[("enable_screen_id_secret_generation", "true")])
+        .header("User-Agent", USER_AGENT)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    Ok(StoredScreen {
+        screen_id: screen.screen_id,
+        screen_id_secret: screen.screen_id_secret,
+        device_id: uuid::Uuid::new_v4().to_string(),
+    })
+}
+
+async fn lounge_token(
+    http: &reqwest::Client,
+    base: &Url,
+    screen_id: &str,
+) -> Result<LoungeTokenScreen, LoungeError> {
+    let body = {
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        serializer.append_pair("screen_ids", screen_id);
+        serializer.finish()
+    };
+    let response: LoungeTokenResponse = http
+        .post(join(base, "pairing/get_lounge_token_batch")?)
+        .header("User-Agent", USER_AGENT)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    response
+        .screens
+        .into_iter()
+        .find(|item| item.screen_id == screen_id)
+        .ok_or(LoungeError::Protocol("token response omitted screen"))
+}
+
+fn token_refresh_at(refresh_interval_ms: Option<u64>) -> tokio::time::Instant {
+    let interval = refresh_interval_ms
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_TOKEN_REFRESH)
+        .max(MIN_TOKEN_REFRESH);
+    tokio::time::Instant::now() + interval
+}
+
+fn set_query_param(url: &mut Url, key: &str, value: &str) {
+    let pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .map(|(name, current)| {
+            let current = if name == key {
+                value.into()
+            } else {
+                current.into_owned()
+            };
+            (name.into_owned(), current)
+        })
+        .collect();
+    url.query_pairs_mut().clear().extend_pairs(pairs);
+}
+
 fn build_bind_url(
     base: &Url,
     screen_secret: &str,
@@ -755,10 +1062,10 @@ fn build_bind_url(
         "brand": "vibecast",
         "model": receiver.device_model,
         "year": 0,
-        "os": "Linux",
-        "osVersion": "1",
+        "os": "Android",
+        "osVersion": "11.0",
         "chipset": "",
-        "clientName": "TVHTML5",
+        "clientName": "TVHTML5_CAST",
         "dialAdditionalDataSupportLevel": "unsupported",
         "mdxDialServerType": "MDX_DIAL_SERVER_TYPE_UNKNOWN"
     });
@@ -768,19 +1075,47 @@ fn build_bind_url(
         .append_pair("name", "YouTube on TV")
         .append_pair("app", "lb-v4")
         .append_pair("theme", "cl")
-        .append_pair(
-            "capabilities",
-            "dsp,dpa,mic,ntb,vsp,ads,pas,dcn,dcp,drq,sads",
-        )
+        // Mirrors the Cast-hosted TV receiver (captured from a SHIELD).
+        .append_pair("capabilities", "dsp,dpa,ads,asw,apw,pas,dcn,dcp,drq")
         .append_pair("cst", "m")
         .append_pair("mdxVersion", "2")
         .append_pair("screenIdSecret", screen_secret)
+        .append_pair("enforce_screen_id_secret_validation", "true")
         .append_pair("loungeIdToken", lounge_token)
         .append_pair("VER", "8")
         .append_pair("v", "2")
         .append_pair("t", "1")
-        .append_pair("deviceInfo", &device_info.to_string());
+        .append_pair("deviceInfo", &device_info.to_string())
+        .append_pair("discoveryDeviceId", device_id);
     Ok(url)
+}
+
+/// Headers the Cast-hosted YouTube TV page sends on every Lounge request.
+fn lounge_headers(receiver: &ReceiverContext, cast_device_id: &str) -> HeaderMap {
+    let user_agent = if receiver.user_agent.is_empty() {
+        USER_AGENT
+    } else {
+        receiver.user_agent.as_str()
+    };
+    let mut headers = HeaderMap::new();
+    for (name, value) in [
+        ("user-agent", user_agent),
+        ("origin", "https://www.youtube.com"),
+        ("referer", "https://www.youtube.com/tv?castv=2.0"),
+        ("cast-app-id", crate::APP_IDS[0]),
+        ("cast-app-device-id", cast_device_id),
+        (
+            "cast-device-capabilities",
+            receiver.cast_device_capabilities.as_str(),
+        ),
+    ] {
+        if let Ok(value) = HeaderValue::from_str(value) {
+            if !value.is_empty() {
+                headers.insert(HeaderName::from_static(name), value);
+            }
+        }
+    }
+    headers
 }
 
 fn cast_cloud_device_id(device_id: &str) -> String {
@@ -813,12 +1148,13 @@ struct LoungeTokenScreen {
     screen_id: String,
     #[serde(rename = "loungeToken")]
     lounge_token: String,
+    #[serde(rename = "refreshIntervalMs", default)]
+    refresh_interval_ms: Option<u64>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -948,13 +1284,18 @@ mod tests {
     #[test]
     fn playback_state_is_encoded_for_lounge() {
         let current = CurrentMedia::default();
-        let body = Outbound::State(PlaybackState {
-            player_state: PlayerState::Paused,
-            current_time: 42.5,
-            duration: Some(120.0),
-            idle_reason: None,
-        })
-        .form_body(3, &current, "device", "lounge-device");
+        let body = form_body(
+            &[Outbound::State(PlaybackState {
+                player_state: PlayerState::Paused,
+                current_time: 42.5,
+                duration: Some(120.0),
+                idle_reason: None,
+            })],
+            3,
+            &current,
+            "device",
+            "lounge-device",
+        );
         let values: std::collections::HashMap<_, _> = url::form_urlencoded::parse(body.as_bytes())
             .into_owned()
             .collect();
@@ -969,9 +1310,96 @@ mod tests {
         );
     }
 
+    fn test_connection() -> LoungeConnection {
+        LoungeConnection {
+            http: reqwest::Client::new(),
+            headers: HeaderMap::new(),
+            base: Url::parse("https://example.test").unwrap(),
+            bind_url: Url::parse("https://example.test/bc/bind").unwrap(),
+            bound: BoundSession {
+                sid: String::new(),
+                gsession_id: String::new(),
+                aid: 0,
+                rid: 1,
+                ofs: 0,
+            },
+            screen_id: String::new(),
+            device_id: String::new(),
+            lounge_token: String::new(),
+            refresh_interval_ms: None,
+            token_refresh_at: token_refresh_at(None),
+            discovery_device_id: String::new(),
+            current: CurrentMedia::default(),
+            pending_incoming: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn stopped_playback_clears_now_playing() {
+        let mut connection = test_connection();
+        connection.current.video_ids = vec!["Az9BrdBTKpo".to_string()];
+        connection.current.select(0);
+        let idle = |idle_reason| PlaybackState {
+            player_state: PlayerState::Idle,
+            current_time: 10.0,
+            duration: Some(100.0),
+            idle_reason,
+        };
+
+        connection.current.state = Some(PlaybackState {
+            player_state: PlayerState::Playing,
+            ..idle(None)
+        });
+        let outbound = connection.handle_playback(idle(Some(IdleReason::Finished)));
+        assert_eq!(outbound.len(), 1, "finished playback keeps nowPlaying");
+
+        let outbound = connection.handle_playback(idle(Some(IdleReason::Cancelled)));
+        let values = form(&form_body(&outbound, 0, &connection.current, "", ""));
+        assert_eq!(values["count"], "2");
+        assert_eq!(values["req0__sc"], "onStateChange");
+        assert_eq!(values["req0_state"], "0");
+        assert_eq!(values["req1__sc"], "nowPlaying");
+        assert!(!values.contains_key("req1_videoId"));
+
+        // Only the transition is announced; a repeated idle report is silent.
+        let outbound = connection.handle_playback(idle(Some(IdleReason::Cancelled)));
+        assert!(outbound.is_empty());
+    }
+
+    #[test]
+    fn playback_reports_announce_transitions_and_known_duration() {
+        let mut connection = test_connection();
+        connection.current.video_ids = vec!["Az9BrdBTKpo".to_string()];
+        connection.current.select(0);
+        let report = |player_state, current_time, duration| PlaybackState {
+            player_state,
+            current_time,
+            duration,
+            idle_reason: None,
+        };
+        let names = |outbound: Vec<Outbound>| -> Vec<&'static str> {
+            outbound.iter().map(Outbound::name).collect()
+        };
+
+        let outbound = connection.handle_playback(report(PlayerState::Buffering, 0.0, None));
+        assert_eq!(names(outbound), ["onStateChange"]);
+        // Duration becomes known: the TV receiver re-sends nowPlaying.
+        let outbound = connection.handle_playback(report(PlayerState::Buffering, 0.0, Some(9.0)));
+        assert_eq!(names(outbound), ["nowPlaying"]);
+        let outbound = connection.handle_playback(report(PlayerState::Playing, 0.1, Some(9.0)));
+        assert_eq!(names(outbound), ["onStateChange"]);
+        // Position-only progress is not posted.
+        let outbound = connection.handle_playback(report(PlayerState::Playing, 1.1, Some(9.0)));
+        assert!(outbound.is_empty());
+        // The player reports a seek's new position late, while still playing.
+        let outbound = connection.handle_playback(report(PlayerState::Playing, 7.5, Some(9.0)));
+        assert_eq!(names(outbound), ["onStateChange"]);
+    }
+
     #[test]
     fn discovery_status_includes_cast_and_lounge_identities() {
-        let body = Outbound::DiscoveryDeviceId.form_body(
+        let body = form_body(
+            &[Outbound::DiscoveryDeviceId],
             0,
             &CurrentMedia::default(),
             "CAST-ID",
@@ -983,6 +1411,88 @@ mod tests {
         assert_eq!(values.get("req0_discoveryDeviceId").unwrap(), "CAST-ID");
         assert_eq!(values.get("req0_castCloudDeviceId").unwrap(), "CAST-ID");
         assert_eq!(values.get("req0_loungeDeviceId").unwrap(), "lounge-id");
+    }
+
+    fn form(body: &str) -> std::collections::HashMap<String, String> {
+        url::form_urlencoded::parse(body.as_bytes())
+            .into_owned()
+            .collect()
+    }
+
+    #[test]
+    fn opening_batch_matches_the_captured_shield_post() {
+        let body = form_body(
+            &[
+                Outbound::AutoplayMode,
+                Outbound::NowPlaying,
+                Outbound::NowPlayingShorts,
+                Outbound::DiscoveryDeviceId,
+            ],
+            0,
+            &CurrentMedia::default(),
+            "CAST-ID",
+            "lounge-id",
+        );
+        let values = form(&body);
+        assert_eq!(values["count"], "4");
+        assert_eq!(values["ofs"], "0");
+        assert_eq!(values["req0__sc"], "onAutoplayModeChanged");
+        assert_eq!(values["req1__sc"], "nowPlaying");
+        assert!(
+            !values.contains_key("req1_videoId"),
+            "idle nowPlaying is empty"
+        );
+        assert_eq!(values["req2__sc"], "nowPlayingShorts");
+        assert_eq!(values["req3__sc"], "setDiscoveryDeviceId");
+        assert_eq!(values["req3_castCloudDeviceId"], "CAST-ID");
+    }
+
+    #[test]
+    fn now_playing_echoes_the_remote_playlist_context() {
+        // Captured SHIELD setPlaylist (ctt/playerParams shortened).
+        let set_playlist = frame(
+            r#"[[9,["setPlaylist",{"listId":"RQ_list","ctt":"APmki7T7","eventDetails":"{\"eventType\":\"VIDEO_ADDED\",\"videoId\":\"Az9BrdBTKpo\"}","playerParams":"YADIAQCQAgE=","videoIds":"Az9BrdBTKpo,yUbu5YuZEnw","currentIndex":"0","csn":"csn","currentTime":"0"}]]]"#,
+        );
+        let incoming = parse_incoming(set_playlist.as_bytes())
+            .unwrap()
+            .messages
+            .remove(0);
+        let mut connection = test_connection();
+        let outbound = connection.handle_internal(&incoming);
+        let values = form(&form_body(&outbound, 4, &connection.current, "", ""));
+
+        assert_eq!(values["count"], "2");
+        assert_eq!(values["req0__sc"], "onHasPreviousNextChanged");
+        assert_eq!(values["req0_hasPrevious"], "false");
+        assert_eq!(values["req0_hasNext"], "true");
+        assert_eq!(values["req1__sc"], "nowPlaying");
+        assert_eq!(values["req1_videoId"], "Az9BrdBTKpo");
+        assert_eq!(values["req1_state"], "3");
+        assert_eq!(values["req1_listId"], "RQ_list");
+        assert_eq!(values["req1_ctt"], "APmki7T7");
+        assert_eq!(values["req1_playerParams"], "YADIAQCQAgE=");
+        assert_eq!(values["req1_currentIndex"], "0");
+        assert_eq!(values["req1_cpn"].len(), 16);
+
+        let remote = parse_message(
+            &serde_json::from_str::<Vec<Value>>(r#"["remoteConnected",{"id":"x"}]"#).unwrap(),
+        );
+        let outbound = connection.handle_internal(&remote);
+        let values = form(&form_body(&outbound, 6, &connection.current, "", ""));
+        assert_eq!(values["req0__sc"], "onHasPreviousNextChanged");
+        assert_eq!(values["req1__sc"], "castMatchResolved");
+
+        let party =
+            parse_message(&serde_json::from_str::<Vec<Value>>(r#"["getPartyGamesMode"]"#).unwrap());
+        let values = form(&form_body(
+            &connection.handle_internal(&party),
+            8,
+            &connection.current,
+            "",
+            "",
+        ));
+        assert_eq!(values["req0__sc"], "onPartyGamesModeChanged");
+        assert_eq!(values["req0_isActive"], "false");
     }
 
     #[test]
@@ -1007,7 +1517,11 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/lounge/pairing/get_lounge_token_batch"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "screens": [{"screenId": "screen-id", "loungeToken": "lounge-token"}]
+                "screens": [{
+                    "screenId": "screen-id",
+                    "loungeToken": "lounge-token",
+                    "refreshIntervalMs": 1123200000
+                }]
             })))
             .mount(&server)
             .await;
@@ -1020,7 +1534,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let receiver = ReceiverContext::new("Living Room", "Model", "device-1", PathBuf::new());
+        let data_dir =
+            std::env::temp_dir().join(format!("vibecast-lounge-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let receiver = ReceiverContext::new("Living Room", "Model", "device-1", data_dir.clone());
         let mut connection = LoungeConnection::establish_at(
             reqwest::Client::new(),
             &receiver,
@@ -1032,12 +1549,127 @@ mod tests {
         let identity = connection.identity();
         assert_eq!(identity.screen_id, "screen-id");
         assert!(!identity.device_id.is_empty());
+        assert_eq!(identity.lounge_token, "lounge-token");
+        assert_eq!(identity.refresh_interval_ms, Some(1_123_200_000));
         assert_eq!(connection.bound.sid, "SID");
         assert_eq!(connection.bound.gsession_id, "GSID");
 
         connection.bound.aid = 4;
-        connection.post(Outbound::NowPlaying).await.unwrap();
+        connection.post(&[Outbound::NowPlaying]).await.unwrap();
         assert_eq!(connection.bound.aid, 4, "forward ACK must not advance AID");
+
+        // A second pairing reuses the persisted screen and lounge device id.
+        let again = LoungeConnection::establish_at(
+            reqwest::Client::new(),
+            &receiver,
+            &format!("{}/api/lounge", server.uri()),
+        )
+        .await
+        .unwrap()
+        .identity();
+        assert_eq!(again.screen_id, identity.screen_id);
+        assert_eq!(again.device_id, identity.device_id);
+        let generated = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path().ends_with("generate_screen_id"))
+            .count();
+        assert_eq!(generated, 1);
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn due_lounge_token_is_refreshed_and_published() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/lounge/pairing/get_lounge_token_batch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "screens": [{
+                    "screenId": "screen-id",
+                    "loungeToken": "fresh-token",
+                    "refreshIntervalMs": 1123200000
+                }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/lounge/bc/bind"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/lounge/bc/bind"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(30)))
+            .mount(&server)
+            .await;
+
+        let mut connection = LoungeConnection {
+            http: reqwest::Client::new(),
+            headers: HeaderMap::new(),
+            base: Url::parse(&format!("{}/api/lounge", server.uri())).unwrap(),
+            bind_url: Url::parse(&format!(
+                "{}/api/lounge/bc/bind?device=LOUNGE_SCREEN&loungeIdToken=stale-token&VER=8",
+                server.uri()
+            ))
+            .unwrap(),
+            bound: BoundSession {
+                sid: "SID".to_string(),
+                gsession_id: "GSID".to_string(),
+                aid: 0,
+                rid: 1,
+                ofs: 0,
+            },
+            screen_id: "screen-id".to_string(),
+            device_id: "lounge-device".to_string(),
+            lounge_token: "stale-token".to_string(),
+            refresh_interval_ms: Some(1),
+            token_refresh_at: tokio::time::Instant::now(),
+            discovery_device_id: "CAST-ID".to_string(),
+            current: CurrentMedia::default(),
+            pending_incoming: Vec::new(),
+        };
+        let (command_tx, _command_rx) = mpsc::channel(1);
+        let (_playback_tx, mut playback_rx) = mpsc::channel(1);
+        let (identity_tx, mut identity_rx) = watch::channel(None);
+        let (cancel_tx, mut cancel_rx) = watch::channel(false);
+        let task = tokio::spawn(async move {
+            let result = connection
+                .run_bound(&command_tx, &mut playback_rx, &identity_tx, &mut cancel_rx)
+                .await;
+            (result, connection)
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), identity_rx.changed())
+            .await
+            .expect("refreshed identity was not published")
+            .unwrap();
+        let identity = identity_rx.borrow().clone().unwrap();
+        assert_eq!(identity.lounge_token, "fresh-token");
+        assert_eq!(identity.refresh_interval_ms, Some(1_123_200_000));
+
+        cancel_tx.send(true).unwrap();
+        let (result, connection) = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("Lounge loop did not stop after cancellation")
+            .unwrap();
+        result.unwrap();
+        // The next (re)bind presents the fresh token; other params are untouched.
+        let query: Vec<(String, String)> = connection
+            .bind_url
+            .query_pairs()
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        assert_eq!(
+            query,
+            [
+                ("device".to_string(), "LOUNGE_SCREEN".to_string()),
+                ("loungeIdToken".to_string(), "fresh-token".to_string()),
+                ("VER".to_string(), "8".to_string()),
+            ]
+        );
+        assert!(connection.token_refresh_at > tokio::time::Instant::now() + MIN_TOKEN_REFRESH);
     }
 
     #[tokio::test]
@@ -1059,6 +1691,8 @@ mod tests {
 
         let mut connection = LoungeConnection {
             http: reqwest::Client::new(),
+            headers: HeaderMap::new(),
+            base: Url::parse(&format!("{}/api/lounge", server.uri())).unwrap(),
             bind_url: Url::parse(&format!("{}/api/lounge/bc/bind", server.uri())).unwrap(),
             bound: BoundSession {
                 sid: "SID".to_string(),
@@ -1069,16 +1703,20 @@ mod tests {
             },
             screen_id: "screen-id".to_string(),
             device_id: "lounge-device".to_string(),
+            lounge_token: "lounge-token".to_string(),
+            refresh_interval_ms: None,
+            token_refresh_at: token_refresh_at(None),
             discovery_device_id: "CAST-ID".to_string(),
             current: CurrentMedia::default(),
             pending_incoming: Vec::new(),
         };
         let (command_tx, _command_rx) = mpsc::channel(1);
         let (_playback_tx, mut playback_rx) = mpsc::channel(1);
+        let (identity_tx, _identity_rx) = watch::channel(None);
         let (cancel_tx, mut cancel_rx) = watch::channel(false);
         let task = tokio::spawn(async move {
             connection
-                .run_bound(&command_tx, &mut playback_rx, &mut cancel_rx)
+                .run_bound(&command_tx, &mut playback_rx, &identity_tx, &mut cancel_rx)
                 .await
         });
 
@@ -1106,13 +1744,13 @@ mod tests {
             .map(|request| {
                 if request.method.as_str() == "GET" {
                     "poll"
-                } else if String::from_utf8_lossy(&request.body).contains("req0__sc=nowPlaying") {
-                    "nowPlaying"
+                } else if String::from_utf8_lossy(&request.body).starts_with("count=4") {
+                    "opening"
                 } else {
                     "setDiscoveryDeviceId"
                 }
             })
             .collect::<Vec<_>>();
-        assert_eq!(sequence, &["nowPlaying", "poll", "setDiscoveryDeviceId"]);
+        assert_eq!(sequence, &["opening", "poll", "setDiscoveryDeviceId"]);
     }
 }

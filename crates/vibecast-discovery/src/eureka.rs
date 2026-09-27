@@ -400,7 +400,13 @@ fn build_payload(state: &EurekaState, params: Option<&[String]>) -> Value {
     }
 }
 
-fn cloud_device_id(ssdp_udn: &str) -> String {
+/// The Cast cloud device id for a receiver's device id (its `ssdp_udn`): the
+/// dashless uppercase id when it is 32 alphanumerics (a UUID), else its MD5.
+///
+/// Reported as `cloud_device_id` in eureka_info and as the mDNS `cd`; senders
+/// (e.g. YouTube) use it to tie a receiver's app sessions to the Cast device.
+#[must_use]
+pub fn cloud_device_id(ssdp_udn: &str) -> String {
     let cleaned: String = ssdp_udn.replace('-', "").to_uppercase();
     if cleaned.len() == 32 && cleaned.chars().all(|c| c.is_ascii_alphanumeric()) {
         cleaned

@@ -526,6 +526,19 @@ impl DeviceHub {
             }
         };
 
+        // Like a Chromecast, re-launching the running app joins it instead of
+        // restarting it, so a reconnecting sender resumes the same session.
+        if self
+            .sessions
+            .values()
+            .any(|session| session.app_id == request.app_id)
+        {
+            tracing::info!(app_id = %request.app_id, "app already running; joining session");
+            let response = self.receiver_status(request.request_id);
+            self.broadcast(RECEIVER_0, ns::RECEIVER, &response).await;
+            return;
+        }
+
         // LAUNCH replaces the current app: stop existing sessions first.
         for session_id in self.sessions.keys().cloned().collect::<Vec<_>>() {
             self.stop_session(&session_id).await;

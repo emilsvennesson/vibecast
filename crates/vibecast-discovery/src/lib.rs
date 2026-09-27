@@ -18,7 +18,7 @@ mod eureka;
 mod mdns;
 
 pub use error::DiscoveryError;
-pub use eureka::{DeviceCapabilities, EurekaIdentity, EurekaServer};
+pub use eureka::{cloud_device_id, DeviceCapabilities, EurekaIdentity, EurekaServer};
 pub use mdns::{CastAdvertisement, CastServiceTxt};
 
 #[cfg(feature = "mdns")]

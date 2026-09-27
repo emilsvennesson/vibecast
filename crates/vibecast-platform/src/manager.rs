@@ -53,8 +53,6 @@ pub struct PlayerStarted {
 pub trait PlayerObserver: Send + Sync {
     /// A player's receiver started and (unless Rust advertises) needs registering.
     fn on_player_started(&self, _started: PlayerStarted) {}
-    /// A player's advertised TXT record changed (certificate rotation).
-    fn on_player_txt_changed(&self, _player_id: &str, _txt: Vec<(String, String)>) {}
     /// A player's receiver stopped and should be unregistered.
     fn on_player_stopped(&self, _player_id: &str) {}
 }
@@ -267,8 +265,7 @@ impl PlayerManager {
         // New receivers registered after this point use the rotated bundle.
         self.bundle = rotated.clone();
         let crl = rotated.crl.clone().or_else(|| self.config.crl.clone());
-        let digest = rotated.cert_digest_md5();
-        for (player_id, tracked) in &self.receivers {
+        for tracked in self.receivers.values() {
             tracked
                 .receiver
                 .rotation_handle()
@@ -276,16 +273,8 @@ impl PlayerManager {
                     bundle: rotated.clone(),
                     crl: crl.clone(),
                 });
-            let txt = tracked
-                .receiver
-                .rotation_handle()
-                .update_cert_digest(&digest)
-                .await;
-            if let Some(observer) = &self.config.observer {
-                observer.on_player_txt_changed(player_id, txt);
-            }
         }
-        tracing::info!("rotated active certificate (TLS + device-auth + discovery)");
+        tracing::info!("rotated active certificate (TLS + device-auth)");
     }
 
     fn eureka_identity(&self, friendly_name: &str, device_id: &str) -> EurekaIdentity {

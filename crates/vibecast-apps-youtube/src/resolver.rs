@@ -11,11 +11,14 @@ use vibecast_sdk::{
     StreamType,
 };
 
-const CLIENT_NAME: &str = "ANDROID";
-const CLIENT_VERSION: &str = "20.10.38";
-const CLIENT_NAME_HEADER: &str = "3";
-const CLIENT_USER_AGENT: &str = "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip";
-/// InnerTube key accepted by the ANDROID client; avoids scraping the watch page.
+/// The VISIONOS client's stream URLs play in full without a GVS PO token; the
+/// ANDROID/IOS clients' URLs 403 after roughly the first minute of media.
+const CLIENT_NAME: &str = "VISIONOS";
+const CLIENT_VERSION: &str = "1.02";
+const CLIENT_NAME_HEADER: &str = "101";
+const CLIENT_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) \
+     AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
+/// InnerTube key accepted by the player endpoint; avoids scraping the watch page.
 const INNERTUBE_API_KEY: &str = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w";
 
 pub(crate) const PREFERRED_VIDEO_CODEC_KEY: SettingKey<String> =
@@ -95,23 +98,18 @@ impl Resolver {
         capabilities: &PlayerCapabilities,
         preferred_video_codec: PreferredVideoCodec,
     ) -> Result<PlaybackMedia, ResolveError> {
-        let mut player_url = Url::parse(&self.endpoints.player)
-            .map_err(|_| ResolveError::Protocol("invalid player endpoint"))?;
-        player_url
-            .query_pairs_mut()
-            .append_pair("key", INNERTUBE_API_KEY);
-        let response: PlayerResponse = self
-            .http
-            .post(player_url)
-            .header("User-Agent", CLIENT_USER_AGENT)
-            .header("X-YouTube-Client-Name", CLIENT_NAME_HEADER)
-            .header("X-YouTube-Client-Version", CLIENT_VERSION)
-            .json(&PlayerRequest::new(video_id))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let mut response = self.player(video_id, None).await?;
+        // An anonymous request without a visitor identity is often bot-checked,
+        // but the response hands one out; retrying with it passes the check.
+        if response.playability_status.status == "LOGIN_REQUIRED" {
+            if let Some(visitor_data) = response
+                .response_context
+                .as_ref()
+                .and_then(|context| context.visitor_data.clone())
+            {
+                response = self.player(video_id, Some(&visitor_data)).await?;
+            }
+        }
 
         if response.playability_status.status != "OK" {
             return Err(ResolveError::Unplayable(
@@ -123,6 +121,34 @@ impl Resolver {
         }
 
         playback_media(response, start_time, capabilities, preferred_video_codec)
+    }
+
+    async fn player(
+        &self,
+        video_id: &str,
+        visitor_data: Option<&str>,
+    ) -> Result<PlayerResponse, ResolveError> {
+        let mut player_url = Url::parse(&self.endpoints.player)
+            .map_err(|_| ResolveError::Protocol("invalid player endpoint"))?;
+        player_url
+            .query_pairs_mut()
+            .append_pair("key", INNERTUBE_API_KEY);
+        let mut request = self
+            .http
+            .post(player_url)
+            .header("User-Agent", CLIENT_USER_AGENT)
+            .header("X-YouTube-Client-Name", CLIENT_NAME_HEADER)
+            .header("X-YouTube-Client-Version", CLIENT_VERSION);
+        if let Some(visitor_data) = visitor_data {
+            request = request.header("X-Goog-Visitor-Id", visitor_data);
+        }
+        Ok(request
+            .json(&PlayerRequest::new(video_id, visitor_data))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
     }
 }
 
@@ -142,11 +168,11 @@ pub(crate) enum ResolveError {
 struct PlayerRequest<'a> {
     #[serde(rename = "videoId")]
     video_id: &'a str,
-    context: RequestContext,
+    context: RequestContext<'a>,
 }
 
 impl<'a> PlayerRequest<'a> {
-    fn new(video_id: &'a str) -> Self {
+    fn new(video_id: &'a str, visitor_data: Option<&'a str>) -> Self {
         Self {
             video_id,
             context: RequestContext {
@@ -155,38 +181,49 @@ impl<'a> PlayerRequest<'a> {
                     client_version: CLIENT_VERSION,
                     hl: "en",
                     gl: "US",
-                    os_name: "Android",
-                    os_version: "14",
-                    android_sdk_version: 34,
+                    device_make: "Apple",
+                    device_model: "RealityDevice17,1",
+                    os_name: "visionOS",
+                    os_version: "26.5.23O471",
+                    visitor_data,
                 },
             },
         }
     }
 }
 
+/// Deliberately anonymous: vouching with the sender's `ctt` binds the stream
+/// URLs to the account (`pcm2`), which then 403 after about a minute without a
+/// GVS PO token.
 #[derive(Serialize)]
-struct RequestContext {
-    client: ClientContext,
+struct RequestContext<'a> {
+    client: ClientContext<'a>,
 }
 
 #[derive(Serialize)]
-struct ClientContext {
+struct ClientContext<'a> {
     #[serde(rename = "clientName")]
     client_name: &'static str,
     #[serde(rename = "clientVersion")]
     client_version: &'static str,
     hl: &'static str,
     gl: &'static str,
+    #[serde(rename = "deviceMake")]
+    device_make: &'static str,
+    #[serde(rename = "deviceModel")]
+    device_model: &'static str,
     #[serde(rename = "osName")]
     os_name: &'static str,
     #[serde(rename = "osVersion")]
     os_version: &'static str,
-    #[serde(rename = "androidSdkVersion")]
-    android_sdk_version: u32,
+    #[serde(rename = "visitorData", skip_serializing_if = "Option::is_none")]
+    visitor_data: Option<&'a str>,
 }
 
 #[derive(Debug, Deserialize)]
 struct PlayerResponse {
+    #[serde(rename = "responseContext")]
+    response_context: Option<ResponseContext>,
     #[serde(rename = "playabilityStatus", default)]
     playability_status: PlayabilityStatus,
     #[serde(rename = "streamingData")]
@@ -194,6 +231,12 @@ struct PlayerResponse {
     #[serde(rename = "videoDetails")]
     video_details: Option<VideoDetails>,
     captions: Option<Captions>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponseContext {
+    #[serde(rename = "visitorData")]
+    visitor_data: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -209,7 +252,7 @@ struct StreamingData {
     adaptive_formats: Vec<AdaptiveFormat>,
 }
 
-/// One adaptive (video-only or audio-only) rendition. The ANDROID client returns
+/// One adaptive (video-only or audio-only) rendition. The VISIONOS client returns
 /// plain `url`s (signature pre-applied, no `n` throttling parameter) plus byte
 /// ranges, which is exactly what a DASH `SegmentBase` manifest needs.
 #[derive(Debug, Deserialize)]
@@ -1106,7 +1149,7 @@ fn valid_video_id(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_partial_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
@@ -1637,9 +1680,9 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_surfaces_bot_detection_as_unplayable() {
-        // The client swap away from ANDROID_VR exists precisely to avoid this
-        // response; if a future client regresses into it, resolve must report an
-        // unplayable error carrying the reason rather than a compatible stream.
+        // If the bot check persists (no visitor identity to retry with), resolve
+        // must report an unplayable error carrying the reason rather than a
+        // compatible stream.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/youtubei/v1/player"))
@@ -1663,5 +1706,43 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, ResolveError::Unplayable(reason) if reason.contains("bot")));
+    }
+
+    #[tokio::test]
+    async fn resolve_retries_a_bot_check_with_the_issued_visitor_identity() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/youtubei/v1/player"))
+            .and(header("X-Goog-Visitor-Id", "visitor-1"))
+            .and(body_partial_json(serde_json::json!({
+                "context": {"client": {"visitorData": "visitor-1"}}
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "playabilityStatus": {"status": "OK"},
+                "streamingData": {"adaptiveFormats": adaptive_formats()}
+            })))
+            .with_priority(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/youtubei/v1/player"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "responseContext": {"visitorData": "visitor-1"},
+                "playabilityStatus": {
+                    "status": "LOGIN_REQUIRED",
+                    "reason": "Sign in to confirm you\u{2019}re not a bot"
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let resolver = Resolver::with_endpoints(reqwest::Client::new(), &server.uri());
+        let capabilities = caps(&["vp9"], &["opus"], &[], (1920, 1080));
+        resolver
+            .resolve("dQw4w9WgXcQ", 0.0, &capabilities, PreferredVideoCodec::Auto)
+            .await
+            .unwrap();
     }
 }
