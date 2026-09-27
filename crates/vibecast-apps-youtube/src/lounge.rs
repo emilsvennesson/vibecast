@@ -19,6 +19,8 @@ const MAX_FRAME_LENGTH: usize = 1024 * 1024;
 const DEFAULT_TOKEN_REFRESH: Duration = Duration::from_secs(24 * 60 * 60);
 /// Floor for the server's interval, and the retry delay after a failed refresh.
 const MIN_TOKEN_REFRESH: Duration = Duration::from_secs(60);
+/// Position change between player reports (~1 s apart) treated as a seek.
+const POSITION_JUMP_SECS: f64 = 3.0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LoungeCommand {
@@ -293,7 +295,9 @@ impl LoungeConnection {
                 state = playback_rx.recv() => {
                     let Some(state) = state else { return Ok(()); };
                     let outbound = self.handle_playback(state);
-                    self.post(&outbound).await?;
+                    if !outbound.is_empty() {
+                        self.post(&outbound).await?;
+                    }
                 }
                 result = poll => {
                     let batch = match result {
@@ -425,12 +429,28 @@ impl LoungeConnection {
                 state.idle_reason,
                 Some(IdleReason::Cancelled | IdleReason::Error)
             );
-        self.current.state = Some(state.clone());
-        if abandoned && self.current.video_id.take().is_some() {
-            vec![Outbound::State(state), Outbound::NowPlaying]
-        } else {
-            vec![Outbound::State(state)]
+        // Like the TV receiver, announce state transitions only; the remote
+        // extrapolates the position itself.
+        let previous = self.current.state.replace(state.clone());
+        // A position jump (e.g. a seek the player reports late) is announced
+        // too, or the remote keeps extrapolating from the stale position.
+        let changed = previous.as_ref().is_none_or(|previous| {
+            previous.player_state != state.player_state
+                || previous.idle_reason != state.idle_reason
+                || (state.current_time - previous.current_time).abs() > POSITION_JUMP_SECS
+        });
+        let duration_learned = state.duration.is_some()
+            && previous
+                .as_ref()
+                .is_none_or(|previous| previous.duration.is_none());
+        let mut outbound = Vec::new();
+        if changed {
+            outbound.push(Outbound::State(state));
         }
+        if (abandoned && self.current.video_id.take().is_some()) || duration_learned {
+            outbound.push(Outbound::NowPlaying);
+        }
+        outbound
     }
 
     async fn post(&mut self, batch: &[Outbound]) -> Result<(), LoungeError> {
@@ -499,6 +519,22 @@ fn form_body(
 }
 
 impl Outbound {
+    #[cfg(test)]
+    fn name(&self) -> &'static str {
+        match self {
+            Self::AutoplayMode => "onAutoplayModeChanged",
+            Self::NowPlaying => "nowPlaying",
+            Self::NowPlayingShorts => "nowPlayingShorts",
+            Self::State(_) => "onStateChange",
+            Self::HasPreviousNext => "onHasPreviousNextChanged",
+            Self::CastMatchResolved => "castMatchResolved",
+            Self::PlaybackSpeed => "onPlaybackSpeedChanged",
+            Self::Volume => "onVolumeChanged",
+            Self::PartyGamesMode => "onPartyGamesModeChanged",
+            Self::DiscoveryDeviceId => "setDiscoveryDeviceId",
+        }
+    }
+
     fn append(
         &self,
         form: &mut url::form_urlencoded::Serializer<'_, String>,
@@ -1274,9 +1310,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn stopped_playback_clears_now_playing() {
-        let mut connection = LoungeConnection {
+    fn test_connection() -> LoungeConnection {
+        LoungeConnection {
             http: reqwest::Client::new(),
             headers: HeaderMap::new(),
             base: Url::parse("https://example.test").unwrap(),
@@ -1296,7 +1331,12 @@ mod tests {
             discovery_device_id: String::new(),
             current: CurrentMedia::default(),
             pending_incoming: Vec::new(),
-        };
+        }
+    }
+
+    #[test]
+    fn stopped_playback_clears_now_playing() {
+        let mut connection = test_connection();
         connection.current.video_ids = vec!["Az9BrdBTKpo".to_string()];
         connection.current.select(0);
         let idle = |idle_reason| PlaybackState {
@@ -1306,6 +1346,10 @@ mod tests {
             idle_reason,
         };
 
+        connection.current.state = Some(PlaybackState {
+            player_state: PlayerState::Playing,
+            ..idle(None)
+        });
         let outbound = connection.handle_playback(idle(Some(IdleReason::Finished)));
         assert_eq!(outbound.len(), 1, "finished playback keeps nowPlaying");
 
@@ -1317,9 +1361,39 @@ mod tests {
         assert_eq!(values["req1__sc"], "nowPlaying");
         assert!(!values.contains_key("req1_videoId"));
 
-        // Only the transition is announced; a repeated idle report is just state.
+        // Only the transition is announced; a repeated idle report is silent.
         let outbound = connection.handle_playback(idle(Some(IdleReason::Cancelled)));
-        assert_eq!(outbound.len(), 1);
+        assert!(outbound.is_empty());
+    }
+
+    #[test]
+    fn playback_reports_announce_transitions_and_known_duration() {
+        let mut connection = test_connection();
+        connection.current.video_ids = vec!["Az9BrdBTKpo".to_string()];
+        connection.current.select(0);
+        let report = |player_state, current_time, duration| PlaybackState {
+            player_state,
+            current_time,
+            duration,
+            idle_reason: None,
+        };
+        let names = |outbound: Vec<Outbound>| -> Vec<&'static str> {
+            outbound.iter().map(Outbound::name).collect()
+        };
+
+        let outbound = connection.handle_playback(report(PlayerState::Buffering, 0.0, None));
+        assert_eq!(names(outbound), ["onStateChange"]);
+        // Duration becomes known: the TV receiver re-sends nowPlaying.
+        let outbound = connection.handle_playback(report(PlayerState::Buffering, 0.0, Some(9.0)));
+        assert_eq!(names(outbound), ["nowPlaying"]);
+        let outbound = connection.handle_playback(report(PlayerState::Playing, 0.1, Some(9.0)));
+        assert_eq!(names(outbound), ["onStateChange"]);
+        // Position-only progress is not posted.
+        let outbound = connection.handle_playback(report(PlayerState::Playing, 1.1, Some(9.0)));
+        assert!(outbound.is_empty());
+        // The player reports a seek's new position late, while still playing.
+        let outbound = connection.handle_playback(report(PlayerState::Playing, 7.5, Some(9.0)));
+        assert_eq!(names(outbound), ["onStateChange"]);
     }
 
     #[test]
@@ -1383,27 +1457,7 @@ mod tests {
             .unwrap()
             .messages
             .remove(0);
-        let mut connection = LoungeConnection {
-            http: reqwest::Client::new(),
-            headers: HeaderMap::new(),
-            base: Url::parse("https://example.test").unwrap(),
-            bind_url: Url::parse("https://example.test/bc/bind").unwrap(),
-            bound: BoundSession {
-                sid: String::new(),
-                gsession_id: String::new(),
-                aid: 0,
-                rid: 1,
-                ofs: 0,
-            },
-            screen_id: String::new(),
-            device_id: String::new(),
-            lounge_token: String::new(),
-            refresh_interval_ms: None,
-            token_refresh_at: token_refresh_at(None),
-            discovery_device_id: String::new(),
-            current: CurrentMedia::default(),
-            pending_incoming: Vec::new(),
-        };
+        let mut connection = test_connection();
         let outbound = connection.handle_internal(&incoming);
         let values = form(&form_body(&outbound, 4, &connection.current, "", ""));
 
