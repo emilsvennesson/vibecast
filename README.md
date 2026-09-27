@@ -11,15 +11,23 @@ Chromecast.
 Players connect to vibecast over a WebSocket and register their capabilities
 (resolution, codecs, HDR, DRM security level). Each one is advertised as a
 separate Cast device. vibecast handles the Cast session and app logic, and the
-player only has to play the stream it's given, so adding a new player is
-straightforward.
+player only has to play the stream it's given.
 
 ```mermaid
 flowchart LR
-    sender[Sender app] -- Cast --> vibecast
-    vibecast -- WebSocket --> kodi[Kodi]
-    vibecast -- WebSocket --> browser[Browser]
-    vibecast -- WebSocket --> other[Other players]
+    sender["Sender app<br/>(phone, browser)"]
+
+    subgraph vibecast
+        receiver["Cast receiver<br/>(one per player)"]
+        apps["Apps<br/>(YouTube, Prime Video, …)"]
+        bridge["Player bridge<br/>(DRM + manifest proxy)"]
+        receiver --> apps --> bridge
+    end
+
+    sender -- "mDNS + CastV2" --> receiver
+    bridge -- "WebSocket" --> kodi["Kodi"]
+    bridge -- "WebSocket" --> browser["Browser"]
+    bridge -- "WebSocket" --> other["Other players"]
 ```
 
 ## Supported apps
