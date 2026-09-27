@@ -129,9 +129,9 @@ Command-line flags override the config file: `--data-dir`, `--certs`,
 
 ## Acknowledgments
 
-- [go-cast](https://github.com/tristanpenman/go-cast) by Tristan Penman — an
-  invaluable open reference for the CastV2 protocol and Cast device
-  authentication.
+- [go-cast](https://github.com/tristanpenman/go-cast) by Tristan Penman.
+  vibecast started off as a fork of go-cast and used it as a reference for
+  the CastV2 protocol and Cast device authentication.
 
 ## License
 
