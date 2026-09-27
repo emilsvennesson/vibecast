@@ -127,6 +127,12 @@ player_port = 8010
 Command-line flags override the config file: `--data-dir`, `--certs`,
 `--model`, `--bind-host`, `--player-port`, `--log-level`.
 
+## Acknowledgments
+
+- [go-cast](https://github.com/tristanpenman/go-cast) by Tristan Penman.
+  vibecast started off as a fork of go-cast and used it as a reference for
+  the CastV2 protocol and Cast device authentication.
+
 ## License
 
 MIT. See [`LICENSE`](LICENSE).
