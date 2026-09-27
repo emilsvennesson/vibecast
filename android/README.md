@@ -17,7 +17,7 @@ browser player, which connect to the player bridge on port `8010`.
 
 Prerequisites:
 
-- Android SDK with platform 36 and build-tools 36
+- Android SDK with platform 37 and build-tools 36
 - Android NDK r28+ (`ANDROID_NDK_HOME`, or the newest under `$ANDROID_HOME/ndk/`)
 - JDK 17
 - Rust with the Android targets and `cargo-ndk`:
