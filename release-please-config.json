@@ -11,6 +11,7 @@
       "component": "vibecast",
       "changelog-path": "CHANGELOG.md",
       "draft": true,
+      "force-tag-creation": true,
       "extra-files": [
         {
           "type": "toml",
