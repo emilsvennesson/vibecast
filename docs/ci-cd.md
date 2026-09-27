@@ -58,6 +58,12 @@ and your Conventional Commits.
    the tap. If any build fails, the release stays a hidden draft and neither
    `:latest` nor the tap move — **no partial/inconsistent release is visible**.
 
+`force-tag-creation: true` in `release-please-config.json` matters here: GitHub
+creates tags for draft releases only at publish time ("lazy tags"), so without
+it release-please cannot see the just-cut release in the same run and opens a
+spurious duplicate release PR re-collecting the whole history
+([googleapis/release-please#1650](https://github.com/googleapis/release-please/issues/1650)).
+
 ### Published artifacts
 
 - Linux binaries: `vibecast-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`,
