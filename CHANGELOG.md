@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/emilsvennesson/vibecast/compare/v0.2.0...v0.2.1) (2026-09-27)
+
+
+### Bug Fixes
+
+* **release:** enable force-tag-creation for draft releases ([#106](https://github.com/emilsvennesson/vibecast/issues/106)) ([4cde20b](https://github.com/emilsvennesson/vibecast/commit/4cde20b3f49b296debec8cb9a2badb51c7bae940))
+
 ## [0.2.0](https://github.com/emilsvennesson/vibecast/compare/v0.1.0...v0.2.0) (2026-09-27)
 
 
