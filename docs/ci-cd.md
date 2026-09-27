@@ -116,18 +116,18 @@ Secrets (Settings → Secrets and variables → Actions):
 | `ANDROID_KEY_ALIAS` | build-android | signing key alias |
 | `ANDROID_KEY_PASSWORD` | build-android | key password |
 | `HOMEBREW_TAP_DEPLOY_KEY` | homebrew | private ed25519 deploy key with write to the tap repo |
-| `RELEASE_PLEASE_TOKEN` | release-please | *optional* — fine-grained PAT (Contents + Pull requests: read/write). Makes the release PR trigger CI so a required `ci-success` check can pass on it. Falls back to `GITHUB_TOKEN` when unset (release PR gets no CI). |
 | `GITHUB_TOKEN` | most jobs | automatic; GHCR push, release upload, release-please |
 
 ### Branch protection + the release PR
 
-PRs opened with the automatic `GITHUB_TOKEN` do **not** trigger workflows (a
-GitHub anti-recursion rule), so the release-please PR gets no CI checks by
-default. If you require `ci-success` in branch protection, set
-`RELEASE_PLEASE_TOKEN` to a fine-grained PAT (Contents + Pull requests
-read/write, scoped to this repo) — the release PR will then run CI and can
-satisfy the required check. Without it, either don't require the check on release
-PRs or admin-merge them.
+The release PR is opened by `github-actions[bot]` with the automatic
+`GITHUB_TOKEN` — no PAT secret is needed. GitHub's anti-recursion rules still
+apply, with one carve-out: `pull_request` events (`opened`, `synchronize`,
+`reopened`) from `GITHUB_TOKEN`-created PRs **do** create CI runs, but in an
+*approval-required* state. Approve them once via the "Approve workflows to
+run" banner in the PR merge box and the `ci-success` check passes like any
+other PR. If branch protection requires the check and the runs are never
+approved, the release PR stays blocked (admin-merge also works).
 
 The Android keystore is stable across releases — losing it blocks future signed
 upgrades. Keep the `.jks` + passwords somewhere safe.
