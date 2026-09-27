@@ -1,67 +1,45 @@
-# vibecast — Android (Android TV) frontend
+# vibecast for Android TV
 
-A thin Kotlin frontend that hosts the portable Rust receiver core on Android. It
-loads the `vibecast-ffi` cdylib through UniFFI-generated Kotlin bindings, runs a
-`connectedDevice` foreground service, advertises the receiver via `NsdManager`,
-and holds a Wi-Fi lock while serving. It **coexists** with a device's built-in
-Cast receiver by binding alternate ports and advertising a distinct instance.
+An Android TV app that runs the vibecast receiver on the device. The Rust core
+is loaded through UniFFI-generated Kotlin bindings and runs in a foreground
+service, advertising each connected player over `NsdManager`. It runs alongside
+the device's built-in Cast receiver.
 
-This phase hosts the **server only** — CastV2 TLS + device auth, the eureka
-endpoint, and the player-bridge HTTP/WS server. No on-device media renderer is
-wired to the bridge yet.
+There is no native player yet: playback goes through the Kodi add-on or the
+browser player, which connect to the player bridge on port `8010`.
 
-## Layout
+## Requirements
 
-```
-android/
-  app/
-    build.gradle.kts                  cargo-ndk + uniffi-bindgen wiring, Android config
-    src/main/AndroidManifest.xml      permissions, FGS (connectedDevice), leanback launcher
-    src/main/kotlin/com/vibecast/receiver/
-      MainActivity.kt                 status screen (start/stop)
-      CastReceiverService.kt          FGS + ReceiverObserver + NsdManager + WifiLock
-      ReceiverState.kt                shared UI state
-      Settings.kt                     name/ports (SharedPreferences)
-      Provisioning.kt                 certs.json discovery in filesDir
-  gradle/libs.versions.toml           version catalog
-  config/detekt/detekt.yml            detekt rules
-```
-
-The Rust `.so` and generated Kotlin bindings are produced into `app/build/` by
-Gradle tasks (`cargoBuildAndroid`, `cargoBuildHostFfi`, `generateUniffiKotlin`)
-and are **not** committed.
-
-## Prerequisites
-
-- Android SDK (`ANDROID_HOME` / `local.properties` `sdk.dir`), platform 36, build-tools 36.
-- Android **NDK r28+** (16 KB page default). Set `ANDROID_NDK_HOME`, or install it
-  under `$ANDROID_HOME/ndk/` and the build auto-detects the newest.
-- Rust with the Android targets and `cargo-ndk`:
-  ```sh
-  rustup target add aarch64-linux-android x86_64-linux-android
-  cargo install cargo-ndk    # or: cargo binstall cargo-ndk
-  ```
-- JDK 17 (Gradle daemon). The wrapper pins Gradle 8.13 / AGP 8.13.2.
+- Android 8.0 (API 26) or later; `arm64-v8a` or `x86_64`
+- Device-auth certificates (`certs.json`, see [Certificates](../README.md#certificates))
 
 ## Build
 
+Prerequisites:
+
+- Android SDK with platform 36 and build-tools 36
+- Android NDK r28+ (`ANDROID_NDK_HOME`, or the newest under `$ANDROID_HOME/ndk/`)
+- JDK 17
+- Rust with the Android targets and `cargo-ndk`:
+  ```sh
+  rustup target add aarch64-linux-android x86_64-linux-android
+  cargo install cargo-ndk
+  ```
+
 ```sh
 cd android
-./gradlew :app:assembleDebug                          # APK with both ABIs' .so
-./gradlew :app:assembleDebug lintDebug ktlintCheck detekt   # full quality gate
+./gradlew :app:assembleDebug                                # APK
+./gradlew :app:assembleDebug lintDebug ktlintCheck detekt   # APK + lint
 ```
 
-The build cross-compiles `vibecast-ffi` for `arm64-v8a` + `x86_64`, generates the
-Kotlin bindings from an unstripped host build (the shipped `.so` is stripped and
-drops the UniFFI metadata bindgen needs), and packages everything.
+## Install and provision certificates
 
-## Provision device-auth certs (development)
-
-`certs.json` is harvested device-auth material — **never committed, never bundled
-in the APK**. Provision it into the app's private files dir over adb (debuggable
-build). SELinux permitting, the simplest reliable path is push-then-`run-as`:
+`certs.json` is never bundled in the APK. Copy it into the app's private
+storage over adb (requires a debug build):
 
 ```sh
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+
 PKG=com.vibecast.receiver
 adb shell run-as "$PKG" mkdir -p files
 adb push ~/.vibecast/certs.json /data/local/tmp/certs.json
@@ -69,42 +47,17 @@ adb shell run-as "$PKG" cp /data/local/tmp/certs.json files/certs.json
 adb shell rm /data/local/tmp/certs.json
 ```
 
-## Run + validate on device
+## Run
+
+Open vibecast on the TV and press **Start receiver**, or:
 
 ```sh
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-# Launch the status screen and press "Start receiver" (the service is not exported).
 adb shell am start -n com.vibecast.receiver/.MainActivity
-
-adb logcat -s vibecast          # Rust (tracing-logcat) + Kotlin logs, tag "vibecast"
-adb shell ss -tln | grep 9009   # confirm alt ports bound (9009/9008/9443/8010)
 ```
 
-Discovery coexistence (from another host):
+Then point a player at `<tv-ip>:8010`. Once it connects, it appears as a Cast
+device on the network. Logs:
 
 ```sh
-dns-sd -B _googlecast._tcp      # vibecast-<id> appears alongside the built-in Cast
+adb logcat -s vibecast
 ```
-
-Then cast from any sender (Chrome, Google Home) to the "vibecast (Android)"
-device: it completes CastV2 device auth and a `LAUNCH` reaches the hub. There is
-no renderer yet, so media does not play — that is a later phase.
-
-## Ports (alternate, to coexist with a built-in Cast receiver)
-
-| Service        | vibecast | system Cast |
-|----------------|----------|-------------|
-| CastV2 TLS     | 9009     | 8009        |
-| eureka HTTP    | 9008     | 8008        |
-| eureka HTTPS   | 9443     | 8443        |
-| player bridge  | 8010 (loopback) | —    |
-
-Change them in the status app's settings (SharedPreferences) if needed.
-
-## Notes / limitations
-
-- `compileSdk`/`targetSdk` are 36 (Android 16), the latest AGP 8.13 supports.
-  Targeting API 37+ (Android 17) additionally needs the `ACCESS_LOCAL_NETWORK`
-  permission — see the note in `AndroidManifest.xml`.
-- `useLegacyPackaging = false` keeps `.so` files page-aligned for 16 KB devices;
-  JNA (5.19) loads them from the APK without extraction.
