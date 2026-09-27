@@ -18,9 +18,9 @@ flowchart LR
     sender["Sender app<br/>(phone, browser)"]
 
     subgraph vibecast
-        receiver["Cast receiver<br/>(one per player)"]
-        apps["Apps<br/>(YouTube, Prime Video, …)"]
-        bridge["Player bridge<br/>(DRM + manifest proxy)"]
+        receiver["Cast receiver"]
+        apps["Apps"]
+        bridge["Player bridge"]
         receiver --> apps --> bridge
     end
 
