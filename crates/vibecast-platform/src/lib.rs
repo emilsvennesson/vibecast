@@ -360,7 +360,9 @@ fn create_installation_id(path: &Path) -> Result<uuid::Uuid, PlatformError> {
 fn read_concurrently_created_installation_id(path: &Path) -> Result<uuid::Uuid, PlatformError> {
     // The winning process creates the file before writing its UUID. Give that
     // short window time to close rather than treating an empty file as corrupt.
-    for _ in 0..10 {
+    // The budget is generous: under heavy CI-runner load the winner can be
+    // descheduled between create and write for far longer than a fast machine.
+    for _ in 0..100 {
         let value = std::fs::read_to_string(path).map_err(|source| PlatformError::StateRead {
             path: path.to_path_buf(),
             source,
@@ -368,7 +370,7 @@ fn read_concurrently_created_installation_id(path: &Path) -> Result<uuid::Uuid, 
         if let Ok(id) = uuid::Uuid::parse_str(value.trim()) {
             return Ok(id);
         }
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(20));
     }
     let value = std::fs::read_to_string(path).map_err(|source| PlatformError::StateRead {
         path: path.to_path_buf(),
