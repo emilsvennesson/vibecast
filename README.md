@@ -7,9 +7,8 @@ vibecast is a native Google Cast receiver written in Rust. It implements the
 CastV2 protocol and device authentication and advertises itself over mDNS, so
 unmodified sender apps can cast to a browser or Kodi as if it were a Chromecast.
 
-Each connected player is advertised as a separate Cast device
-(`<player name> [vibecast]`) that reports that player's own capabilities
-(resolution, codecs, HDR, DRM security level).
+Each connected player is advertised as a separate Cast device that reports that
+player's own capabilities (resolution, codecs, HDR, DRM security level).
 
 ## Supported apps
 
