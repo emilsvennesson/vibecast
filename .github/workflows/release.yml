@@ -174,9 +174,9 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
-      - name: Install SDK packages (NDK r28 + platform/build-tools 36)
+      - name: Install SDK packages (NDK r28 + platform 37/build-tools 36)
         run: |
-          sdkmanager "ndk;28.2.13676358" "platforms;android-36" "build-tools;36.0.0"
+          sdkmanager "ndk;28.2.13676358" "platforms;android-37.0" "build-tools;36.0.0"
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/28.2.13676358" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
