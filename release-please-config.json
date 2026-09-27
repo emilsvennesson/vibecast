@@ -3,6 +3,7 @@
   "bootstrap-sha": "20f198cfd166796bb52a8a980f6cdaaf97659121",
   "include-component-in-tag": false,
   "bump-minor-pre-major": true,
+  "bump-patch-for-minor-pre-major": true,
   "tag-separator": "-",
   "packages": {
     ".": {
