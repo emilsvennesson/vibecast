@@ -202,9 +202,9 @@ Two workflows (details in `docs/ci-cd.md`):
   succeeds — atomic, no partial releases.
 
 Releasing is automatic: land Conventional Commits (`fix`→patch, `feat`→minor,
-`!`→major), then merge the release PR release-please opens. One version drives
-`[workspace.package].version` (toml updater), `Cargo.lock` (`cargo update
---workspace`), and Android `versionName`. Third-party actions are SHA-pinned;
+`!`→major, or minor while on `0.x`), then merge the release PR release-please
+opens. One version drives `[workspace.package].version` (toml updater),
+`Cargo.lock` (`cargo update --workspace`), and Android `versionName`. Third-party actions are SHA-pinned;
 don't unpin. Linux binaries need glibc ≥ 2.38 (aws-lc-rs), hence the
 distroless-debian13 runtime.
 

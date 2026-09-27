@@ -89,10 +89,11 @@ One version drives everything, kept in sync by release-please:
 
 Because all crates share one version, `release-type` is `simple` (not `rust`).
 Commit → bump mapping (Conventional Commits): `fix:` → patch, `feat:` → minor,
-`!`/`BREAKING CHANGE:` → major. Force a version with a `Release-As: X.Y.Z`
-commit footer. The initial release is pinned to `0.1.0` via `release-as` in the
-config; remove that key after `0.1.0` ships so subsequent versions compute from
-commits.
+`!`/`BREAKING CHANGE:` → major, except that while the version is `0.x`,
+`bump-minor-pre-major` makes breaking changes a minor bump. Force a version with
+a `Release-As: X.Y.Z` commit footer. The initial release is pinned to `0.1.0`
+via `release-as` in the config; remove that key after `0.1.0` ships so
+subsequent versions compute from commits.
 
 ## Required secrets & configuration
 
