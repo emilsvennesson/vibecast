@@ -3,62 +3,99 @@
 [![CI](https://github.com/emilsvennesson/vibecast/actions/workflows/ci.yml/badge.svg)](https://github.com/emilsvennesson/vibecast/actions/workflows/ci.yml)
 [![Release](https://github.com/emilsvennesson/vibecast/actions/workflows/release.yml/badge.svg)](https://github.com/emilsvennesson/vibecast/actions/workflows/release.yml)
 
-Turn any computer into a Chromecast. vibecast is a native Google Cast
-receiver — it impersonates a Chromecast on your network so the Cast button in
-supported apps works against a PC, HTPC, or media server instead of a dongle.
-Cast from your phone; playback happens on the machine running vibecast.
+vibecast is a native Google Cast receiver written in Rust. It implements the
+CastV2 protocol and device authentication and advertises itself over mDNS, so
+unmodified sender apps can cast to a browser or Kodi as if it were a Chromecast.
 
-It's a single Rust binary with no cloud dependency: it speaks the full CastV2
-TLS protocol, advertises itself over mDNS, and runs an embedded Shaka Player
-for playback. A Kodi add-on is included for boxes that prefer Kodi's player.
+Each connected player is advertised as a separate Cast device
+(`<player name> [vibecast]`) that reports that player's own capabilities
+(resolution, codecs, HDR, DRM security level).
 
-## Quick start
+## Supported apps
 
-```sh
-cargo run -p vibecast-cli
-```
+- YouTube (with optional SponsorBlock)
+- Prime Video
+- SVT Play
+- TV4 Play
+- Viaplay
+- DAZN
 
-Open `http://localhost:8010/` for the bundled browser player, or connect the
-Kodi add-on. Each connected player becomes its own advertised Cast receiver
-named `<player name> [vibecast]`; Cast and eureka ports are assigned dynamically.
+## Platforms
 
-You'll need a Cast device-auth certificate bundle (`certs.json`) in the data
-directory (`$HOME/.vibecast` by default). Vibecast uses pre-harvested static
-signatures for device auth — no runtime RSA signing.
+**Receiver (server)**
+
+- **Linux** (x86_64, aarch64) and **macOS** (Apple Silicon): the `vibecast`
+  binary, available through Homebrew, Docker, or release tarballs.
+- **Android TV**: an APK that runs the receiver as a foreground service,
+  alongside the device's built-in Cast receiver. It has no native player yet, so
+  playback goes through one of the players below. See
+  [`android/README.md`](android/README.md).
+
+**Players**
+
+- **Browser**: the receiver serves a Shaka Player page at `http://<host>:8010/`.
+  It's intended for development and testing.
+- **Kodi** (21.3+): the add-on in [`kodi/service.vibecast/`](kodi/service.vibecast/README.md)
+  plays streams with Kodi's own player and Widevine through inputstream.adaptive.
 
 ## Install
 
-Prebuilt artifacts are published on each [release](https://github.com/emilsvennesson/vibecast/releases).
+Prebuilt binaries, the Android APK, and Docker images are published with each
+[release](https://github.com/emilsvennesson/vibecast/releases).
 
 ```sh
 # Homebrew (macOS Apple Silicon + Linux)
 brew install emilsvennesson/vibecast/vibecast
 
-# Docker / GHCR (multi-arch). mDNS needs host networking; mount a data dir.
+# Docker (multi-arch). mDNS requires host networking.
 docker run --rm --network host \
   -v "$HOME/.vibecast:/data" \
   ghcr.io/emilsvennesson/vibecast:latest --data-dir /data
+
+# From source
+cargo run -p vibecast-cli --release
 ```
 
-Or grab a binary tarball / the Android APK directly from the release assets.
-Build, CI, and release details live in [`docs/ci-cd.md`](docs/ci-cd.md).
+Start `vibecast`, then open the browser player or connect the Kodi add-on.
+The Cast device appears in your phone's Cast menu once a player is connected.
 
-## Bundled apps
+## Certificates
 
-| App | Notes |
-| --- | --- |
-| SVT Play | DASH + ditto manifests, ClearKey/Widevine |
-| TV4 Play | OAuth refresh, Yospace ad-stitching, Widevine |
-| Viaplay | Device-code auth, Widevine |
-| Prime Video | Custom Widevine license flow, VOD + live |
-| YouTube | Lounge control, generated DASH manifests, codec preference, optional SponsorBlock |
-| DAZN | `urn:x-cast:DAZN` session/playback control, Widevine, per-player quality (auto / highest) |
+Senders require Cast device authentication: a certificate chain rooted in
+Google's Cast CA plus a signed auth response. Passing it requires device-auth
+material from a real Cast device, and **none is included in this repository or
+its releases**.
+
+Put the material in `certs.json` in the data directory (`~/.vibecast/certs.json`
+by default, or set a different path with `--certs`):
+
+```jsonc
+{
+  "cpu": "-----BEGIN CERTIFICATE-----…",   // device certificate (PEM)
+  "ica": "-----BEGIN CERTIFICATE-----…",   // intermediate CA chain (PEM)
+  "crl": "…",                              // optional, base64
+  "certs": [
+    {
+      "pu": "-----BEGIN CERTIFICATE-----…", // peer (TLS) certificate (PEM)
+      "pr": "-----BEGIN PRIVATE KEY-----…", // its private key (PEM)
+      "sig_sha1": "…",                      // pre-computed auth signature, base64
+      "sig_sha256": "…"                     // pre-computed auth signature, base64
+    }
+  ]
+}
+```
+
+Each peer certificate is only valid for a limited time. You can list several
+entries under `certs`, and vibecast uses whichever one is currently valid,
+switching automatically when it expires. When no entry is valid, senders will
+reject the device.
+
+On Android, copy the same file into the app's private storage with adb. See
+[`android/README.md`](android/README.md#install-and-provision-certificates).
 
 ## Configuration
 
-Receiver config lives at `{data_dir}/config.toml` (default data dir:
-`$HOME/.vibecast`). A missing file yields Chromecast-like defaults; partial
-config overrides only the keys you name. CLI flags override config for one run.
+Everything is optional. vibecast reads `~/.vibecast/config.toml`:
 
 ```toml
 [device]
@@ -68,42 +105,8 @@ model = "Chromecast"
 player_port = 8010
 ```
 
-Apps declare typed runtime settings in their manifests. Values are stored in
-`{data_dir}/settings.json` and synchronized with each connected player. The
-bundled browser player and Kodi add-on render those settings generically.
-
-## Writing an app
-
-App crates depend only on `vibecast-sdk`. Implement `AppProvider` (a manifest +
-factory) and `AppSession` (an owned per-launch session) — `resolve_media` turns
-a Cast `LOAD` request into playable streams + DRM info. Model new apps on
-`vibecast-apps-svtplay` and register them in
-`crates/vibecast-platform/src/lib.rs::build_app_providers`.
-
-```sh
-cargo doc -p vibecast-sdk --open   # full app-author docs
-```
-
-## Kodi
-
-`kodi/service.vibecast/` is a Python Kodi add-on that bridges Kodi's player to
-vibecast's WebSocket endpoint. It's a **client** of the receiver, not part of
-it — the Rust receiver serves the `/player` endpoint by default. See
-[`kodi/service.vibecast/README.md`](kodi/service.vibecast/README.md).
-
-## Status
-
-Working receiver with the four bundled apps above. Limitations:
-
-- No Windows CI (ubuntu + macos).
-- `vibecast-bridge` uses `std::sync::Mutex::lock().unwrap()` in production
-  paths (poison = panic; deliberate for a server).
-- `cargo-deny` ignores one build-time-only advisory (`RUSTSEC-2024-0370`,
-  proc-macro-error via the `xot` manifest crate); the shipped binary has no
-  ignored vulnerabilities.
-
-See [`AGENTS.md`](AGENTS.md) for the full developer guide (architecture,
-layering, build/test/lint commands, conventions).
+Command-line flags override the config file: `--data-dir`, `--certs`,
+`--model`, `--bind-host`, `--player-port`, `--log-level`.
 
 ## License
 
