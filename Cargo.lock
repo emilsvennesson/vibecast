@@ -3289,7 +3289,7 @@ name = "vibecast-apps-dazn"
 version = "0.2.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "reqwest",
  "serde",
  "serde_json",
@@ -3306,7 +3306,7 @@ name = "vibecast-apps-primevideo"
 version = "0.2.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "reqwest",
  "serde",
  "serde_json",
@@ -3371,7 +3371,7 @@ name = "vibecast-apps-youtube"
 version = "0.2.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "prost",
  "reqwest",
  "serde",
@@ -3467,7 +3467,7 @@ version = "0.2.0"
 dependencies = [
  "axum",
  "axum-server",
- "base64 0.22.1",
+ "base64 0.23.1",
  "hex",
  "md-5",
  "mdns-sd",
@@ -3619,7 +3619,7 @@ name = "vibecast-security"
 version = "0.2.0"
 dependencies = [
  "arc-swap",
- "base64 0.22.1",
+ "base64 0.23.1",
  "hex",
  "md-5",
  "prost",
