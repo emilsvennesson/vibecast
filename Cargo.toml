@@ -62,7 +62,7 @@ hex = "0.4"
 http = "1"
 
 # Discovery: mDNS advertisement + eureka HTTP/HTTPS
-mdns-sd = "0.20"
+mdns-sd = "0.21"
 axum = "0.8"
 axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 
